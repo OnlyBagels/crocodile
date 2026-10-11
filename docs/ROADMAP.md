@@ -65,7 +65,8 @@ report what matters most; issues and discussions are welcome.
 11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
     Microsoft Store listing (MSIX, signed by the Store, with the built-in
     updater disabled) plus winget; Apple Developer Program for Developer ID
-    signing, notarization and working macOS auto-update; SignPath for the
+    signing, notarization and updates that keep macOS permissions (unsigned
+    builds update in place but lose the Accessibility permission); SignPath for the
     direct Windows download. Until then: the one-line installers.
 
 ## Paused

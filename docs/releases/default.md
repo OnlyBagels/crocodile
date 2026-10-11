@@ -18,8 +18,10 @@ These builds are not code-signed yet:
 - **Windows:** SmartScreen says "Windows protected your PC" → _More info_ →
   _Run anyway_.
 - **macOS:** open the app once, then _System Settings → Privacy & Security →
-  Open Anyway_. macOS updates are not automatic in unsigned builds; the app
-  tells you when a new version is available.
+  Open Anyway_.
+
+The app tells you when a new version is out: click **Update** in the top bar,
+then **Restart to update** once it has downloaded.
 
 ## Getting started
 
