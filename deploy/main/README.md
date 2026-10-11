@@ -49,6 +49,27 @@ website come from the reverse proxy already running on the machine.
 Check that `https://DOMAIN/v1/servers` lists the coordinator after a minute,
 and that `https://coord.DOMAIN/health` answers.
 
+### A reverse proxy running in a container
+
+The coordinator uses the host's network, so it isn't on any Docker network
+and a proxy container can't reach it by name (`crocodile-coordinator:7443`)
+or at `127.0.0.1` (inside a container, that is the container itself). Have it
+listen on the gateway of the proxy's Docker network instead, which the proxy
+can reach and the internet can't:
+
+```sh
+docker network inspect <proxy-network> --format '{{(index .IPAM.Config 0).Gateway}}'
+# e.g. 172.18.0.1: put it in .env
+echo 'CROC_COORD_HOST=172.18.0.1' >> .env
+docker compose up -d coordinator
+```
+
+and route `coord.DOMAIN` to `http://172.18.0.1:7443` (Caddy:
+`reverse_proxy 172.18.0.1:7443`). The directory doesn't change: it stays on
+the Docker network and the proxy reaches it by name. If the host firewall
+(ufw) drops traffic from containers to the host, allow TCP 7443 on that
+network's bridge interface (`ip -4 addr` shows which `br-…` has the gateway).
+
 ## The default in the apps
 
 Apps built from this repository use `https://crocodilechat.com` as their
@@ -63,6 +84,12 @@ can still add other servers under Settings → Network.
 ```sh
 git pull && docker compose up -d --build
 ```
+
+Upgrading from 0.3.x: the coordinator moved from published ports to the
+host's network (for the relay's UDP port range). Its WebSocket port is now on
+the host's `127.0.0.1:7443`; a proxy in a container needs
+[the setting above](#a-reverse-proxy-running-in-a-container), and the
+firewall needs UDP 49160-49259 open for the relay.
 
 The placeholder page and install scripts update with `git pull` alone (the
 proxy serves them straight from the clone).
