@@ -253,13 +253,16 @@ describe('TURN relay', () => {
   });
 
   /** A TURN client on a UDP socket: authenticated requests, and what comes back. */
-  async function turnClient(turn: TurnServer) {
+  async function turnClient(turn: TurnServer, opts: { user?: string; expiresAt?: number } = {}) {
     const sock = createSocket('udp4');
     cleanup.push(() => sock.close());
     const replies: Buffer[] = [];
     sock.on('message', (b) => replies.push(b));
     await new Promise<void>((r) => sock.bind(0, '127.0.0.1', r));
-    const creds = turn.credentials('eeeeeeeeeeeeeeeeeeeeeeeeee', Date.now() + 60_000);
+    const creds = turn.credentials(
+      opts.user ?? 'eeeeeeeeeeeeeeeeeeeeeeeeee',
+      opts.expiresAt ?? Date.now() + 60_000,
+    );
     const key = createHash('md5')
       .update(`${creds.username}:crocodile:${creds.credential}`)
       .digest();
@@ -354,5 +357,64 @@ describe('TURN relay', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(binds).toBe(1);
     expect(internals.allocations.size).toBe(1);
+  });
+
+  /** Allocates for a client; resolves with the error code, or 0 on success. */
+  async function allocate(c: Awaited<ReturnType<typeof turnClient>>) {
+    const tx = randomBytes(12);
+    c.send(0x003, tx, [c.transport, ...c.auth], c.key);
+    const err = (await c.answer(tx)).attrs.find((a) => a.type === 0x0009)?.value;
+    return err ? err[2]! * 100 + err[3]! : 0;
+  }
+
+  it("a user's newest allocation replaces their oldest at the cap, instead of being refused", async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      limits: { maxAllocationsPerUser: 2 },
+    }).start();
+    cleanup.push(() => turn.stop());
+    const tuples = (turn as unknown as { allocations: Map<string, unknown> }).allocations;
+    const clients: Awaited<ReturnType<typeof turnClient>>[] = [];
+    for (let i = 0; i < 3; i++) {
+      const c = await turnClient(turn);
+      // Connections that ended without a goodbye leave allocations behind.
+      expect(await allocate(c)).toBe(0);
+      clients.push(c);
+    }
+    const port = (c: (typeof clients)[number]) => `127.0.0.1|${c.sock.address().port}`;
+    expect([...tuples.keys()]).toEqual([port(clients[1]!), port(clients[2]!)]);
+    // Another user's allocations are not touched.
+    const other = await turnClient(turn, { user: 'ffffffffffffffffffffffffff' });
+    expect(await allocate(other)).toBe(0);
+    expect(turn.allocationCount()).toBe(3);
+  });
+
+  it('keeps an allocation whose grant was extended past its credentials', async () => {
+    let grantEnd = Date.now() + 60_000;
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      grantEnd: () => grantEnd,
+    }).start();
+    cleanup.push(() => turn.stop());
+    // Credentials written for a grant that has since been renewed.
+    const c = await turnClient(turn, { expiresAt: Date.now() + 1500 });
+    expect(await allocate(c)).toBe(0);
+    await new Promise((r) => setTimeout(r, 2600));
+    // Past the credentials' expiry and a sweep later, still there and refreshable.
+    expect(turn.allocationCount()).toBe(1);
+    const tx = randomBytes(12);
+    const lifetime = { type: 0x000d, value: Buffer.from([0, 0, 2, 0x58]) };
+    c.send(0x004, tx, [lifetime, ...c.auth], c.key);
+    const refreshed = await c.answer(tx);
+    expect(refreshed.attrs.find((a) => a.type === 0x0009)).toBeUndefined();
+    // Once the grant really ends, the allocation goes.
+    grantEnd = Date.now() - 1;
+    await waitFor(() => turn.allocationCount() === 0, 5000);
   });
 });

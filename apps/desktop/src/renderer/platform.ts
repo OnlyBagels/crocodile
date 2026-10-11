@@ -276,8 +276,9 @@ export function createPlatform(opts: {
     probeNetwork,
     async capabilities() {
       const caps = await browserCapabilities();
-      const { nat } = await probeNetwork();
-      return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat };
+      const { nat, udp } = await probeNetwork();
+      // With UDP blocked nobody can reach this device directly: the worst host.
+      return { ...caps, cpuCores: opts.cpuCores ?? caps.cpuCores, nat: udp ? nat : 'symmetric' };
     },
   };
 }

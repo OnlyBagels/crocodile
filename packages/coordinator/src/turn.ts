@@ -53,7 +53,12 @@ const ATTR = {
 export interface TurnLimits {
   /** Max distinct users with a live grant at once. */
   maxUsers: number;
-  /** Max allocations (≈ peer connections) per user. */
+  /**
+   * Max allocations (≈ peer connections × network interfaces) per user. A
+   * new one past it replaces the user's oldest: allocations of connections
+   * that ended without a goodbye linger until they expire, and must not lock
+   * the user out of the relay meanwhile.
+   */
   maxAllocationsPerUser: number;
   /** Bytes per second each allocation may relay (both directions). */
   bytesPerSecond: number;
@@ -63,7 +68,7 @@ export interface TurnLimits {
 
 export const defaultTurnLimits: TurnLimits = {
   maxUsers: 25,
-  maxAllocationsPerUser: 4,
+  maxAllocationsPerUser: 8,
   bytesPerSecond: 96 * 1024,
   maxGrantMs: 60 * 60_000,
 };
@@ -285,6 +290,13 @@ export interface TurnServerOptions {
   relayPorts?: { min: number; max: number };
   /** Shared secret for REST-API style credentials. */
   secret: Buffer;
+  /**
+   * When a user's grant currently ends, if the coordinator extended it past
+   * the expiry written into their credentials: allocations made with the
+   * older credentials then keep working, so a relayed call isn't cut off
+   * when its grant is renewed.
+   */
+  grantEnd?: (userId: string) => number | undefined;
   limits?: Partial<TurnLimits>;
   /**
    * Allow relaying to loopback/private/link-local addresses. Off by default:
@@ -525,8 +537,8 @@ export class TurnServer {
       return null;
     }
     const match = username.match(/^(\d+):([a-z2-7]{8,64})$/);
-    const expiry = match ? Number(match[1]) * 1000 : 0;
-    if (nv === 'bad' || !match || expiry < Date.now()) {
+    const written = match ? Number(match[1]) * 1000 : 0;
+    if (nv === 'bad' || !match || this.grantEnd(match[2]!, written) < Date.now()) {
       challenge(401, 'Unauthorized');
       return null;
     }
@@ -536,7 +548,16 @@ export class TurnServer {
       challenge(401, 'Unauthorized');
       return null;
     }
-    return { key, userId: match[2]!, grantExpiresAt: expiry };
+    return { key, userId: match[2]!, grantExpiresAt: written };
+  }
+
+  /**
+   * When a user's access ends: the later of the expiry written into their
+   * credentials and their current (possibly extended) grant. Worked out each
+   * time, never stored, so access ends as soon as the grant does.
+   */
+  private grantEnd(userId: string, credentialExpiry: number): number {
+    return Math.max(credentialExpiry, this.opts.grantEnd?.(userId) ?? 0);
   }
 
   private reply(via: Socket, m: Msg, rinfo: RemoteInfo, cls: number, attrs: Attr[], key?: Buffer) {
@@ -627,11 +648,7 @@ export class TurnServer {
       return;
     }
     const users = this.activeUsers();
-    const mine = [...this.allocations.values()].filter((a) => a.userId === auth.userId).length;
-    if (
-      (!users.has(auth.userId) && users.size >= this.limits.maxUsers) ||
-      mine >= this.limits.maxAllocationsPerUser
-    ) {
+    if (!users.has(auth.userId) && users.size >= this.limits.maxUsers) {
       this.reply(
         via,
         m,
@@ -642,6 +659,13 @@ export class TurnServer {
       );
       return;
     }
+    // At the per-user cap the oldest goes (Map order is creation order).
+    const mine = [...this.allocations.values()].filter((a) => a.userId === auth.userId);
+    for (const old of mine.slice(
+      0,
+      Math.max(0, mine.length - this.limits.maxAllocationsPerUser + 1),
+    ))
+      this.remove(old, 'replaced by a newer allocation');
     this.allocating.add(tuple);
     let socket: Socket | null;
     try {
@@ -659,7 +683,7 @@ export class TurnServer {
     }
     socket.on('error', () => {});
     const now = Date.now();
-    const lifetime = this.lifetime(m, auth.grantExpiresAt);
+    const lifetime = this.lifetime(m, this.grantEnd(auth.userId, auth.grantExpiresAt));
     const a: Allocation = {
       tuple,
       client: { address: rinfo.address, port: rinfo.port },
@@ -709,8 +733,9 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
-    const lifetime = this.lifetime(m, auth.grantExpiresAt);
-    if (lifetime === 0) this.remove(a);
+    a.grantExpiresAt = Math.max(a.grantExpiresAt, auth.grantExpiresAt);
+    const lifetime = this.lifetime(m, this.grantEnd(a.userId, a.grantExpiresAt));
+    if (lifetime === 0) this.remove(a, 'released');
     else a.expiresAt = Date.now() + lifetime * 1000;
     this.reply(
       via,
@@ -823,11 +848,11 @@ export class TurnServer {
   private expire() {
     const now = Date.now();
     for (const a of [...this.allocations.values()]) {
-      if (a.expiresAt < now || a.grantExpiresAt < now) this.remove(a);
+      if (a.expiresAt < now || this.grantEnd(a.userId, a.grantExpiresAt) < now) this.remove(a);
     }
   }
 
-  private remove(a: Allocation) {
+  private remove(a: Allocation, reason = 'ended') {
     if (this.allocations.get(a.tuple) !== a) return;
     this.allocations.delete(a.tuple);
     try {
@@ -835,7 +860,7 @@ export class TurnServer {
     } catch {
       /* already closed */
     }
-    this.opts.log?.('relay allocation closed', { user: a.userId, bytes: a.bytesRelayed });
+    this.opts.log?.('relay allocation closed', { user: a.userId, bytes: a.bytesRelayed, reason });
   }
 }
 
