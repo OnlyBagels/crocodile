@@ -669,7 +669,15 @@ export class TurnServer {
     this.allocating.add(tuple);
     let socket: Socket | null;
     try {
-      socket = await this.bindRelaySocket(isIPv4(rinfo.address) ? 'udp4' : 'udp6');
+      const type = isIPv4(rinfo.address) ? 'udp4' : 'udp6';
+      socket = await this.bindRelaySocket(type);
+      // No port free: the user's own oldest allocation gives its port up, so
+      // a full pool can't lock out someone with stale allocations either.
+      const oldest = [...this.allocations.values()].find((a) => a.userId === auth.userId);
+      if (!socket && oldest) {
+        this.remove(oldest, 'replaced by a newer allocation (no free port)');
+        socket = await this.bindRelaySocket(type);
+      }
     } finally {
       this.allocating.delete(tuple);
     }

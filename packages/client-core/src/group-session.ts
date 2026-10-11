@@ -110,6 +110,8 @@ export interface ConnectAttempt {
 const ATTEMPTS_KEPT = 8;
 /** Renew a relay grant this long before it ends (the server extends grants in their last 10 minutes). */
 const RELAY_RENEW_BEFORE_MS = 5 * 60_000;
+/** How soon a failed renewal is tried again. */
+const RELAY_RENEW_RETRY_MS = 30_000;
 
 export type TransportFactory = (
   opts: Omit<RelayLinkOptions, 'RTCPeerConnection'>,
@@ -160,7 +162,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   relayGrant: RelayGrant | null = null;
 
   private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
-  private transport?: { epoch: number; host: string; t: RelayTransport };
+  private transport?: { epoch: number; host: string; t: RelayTransport; attempt?: ConnectAttempt };
   private failures = 0;
   /** How the connection to the host travels, once known. */
   route: ConnectionRoute | null = null;
@@ -246,6 +248,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.left = true;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
     this.closeTransport();
     this.stopHosting();
     this.keyring.dispose();
@@ -403,14 +406,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
           .link()
           .request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
     });
-    const entry = { epoch: state.epoch, host: state.host, t };
-    this.transport = entry;
     const attempt: ConnectAttempt = {
       startedAt: Date.now(),
       host: state.host,
       viaRelay: !!grant,
       steps: [],
     };
+    const entry = { epoch: state.epoch, host: state.host, t, attempt };
+    this.transport = entry;
     this.attempts = [...this.attempts, attempt].slice(-ATTEMPTS_KEPT);
     this.connectedAt = null;
     t.on('progress', ({ step }) => {
@@ -549,6 +552,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
    */
   private scheduleRelayRenewal() {
     clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
     const grant = this.relayGrant;
     if (!grant) return;
     const left = grant.expiresAt - Date.now();
@@ -556,12 +560,26 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       () => void this.renewRelay(grant),
       Math.max(0, left - Math.min(RELAY_RENEW_BEFORE_MS, left / 2)),
     );
+    // At its end the grant goes, whether or not the server's notice reaches
+    // us (it doesn't while our link is down): a stale grant would keep its
+    // dead credentials in every reconnect and block asking for a new one.
+    this.expiryTimer = setTimeout(
+      () => {
+        if (this.left || this.relayGrant !== grant) return;
+        this.ctx.log('relay grant ran out', { at: grant.expiresAt });
+        this.dropServerRelay();
+      },
+      Math.max(0, left),
+    );
   }
+
+  private expiryTimer?: ReturnType<typeof setTimeout>;
 
   private async renewRelay(grant: RelayGrant) {
     if (this.left || this.relayGrant !== grant) return;
     if (!this.dependsOnRelay) {
       this.ctx.log('relay not needed any more: connected directly', { route: this.route });
+      clearTimeout(this.expiryTimer);
       this.relayGrant = null;
       this.emit('update', undefined);
       return;
@@ -574,8 +592,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.scheduleRelayRenewal();
       this.emit('update', undefined);
     } catch (err) {
-      // The grant runs out and the server says so (relay_expired).
-      this.ctx.log('relay renewal failed', { err: String(err) });
+      // Try again while the grant lasts (the link may be down for a moment);
+      // if it runs out first, the expiry timer drops it.
+      const left = grant.expiresAt - Date.now();
+      this.ctx.log('relay renewal failed', { err: String(err), leftS: Math.round(left / 1000) });
+      if (this.left || this.relayGrant !== grant || left <= 0) return;
+      clearTimeout(this.renewTimer);
+      this.renewTimer = setTimeout(
+        () => void this.renewRelay(grant),
+        Math.min(RELAY_RENEW_RETRY_MS, left / 2),
+      );
     }
   }
 
@@ -587,6 +613,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   dropServerRelay(): boolean {
     if (!this.relayGrant) return false;
     clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
     const interrupted = !!this.transport && this.dependsOnRelay;
     this.relayGrant = null;
     this.emit('update', undefined);
@@ -602,6 +629,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private closeTransport() {
     const t = this.transport;
     this.transport = undefined;
+    // An attempt still under way when we move on (another host, a new epoch,
+    // leaving) ends here; it must not show as "trying" forever.
+    if (t?.attempt && !t.attempt.end)
+      t.attempt.end = {
+        at: Date.now(),
+        ok: false,
+        stage: 'superseded',
+        reason: 'stopped: the session moved on (another host, or the session closed)',
+      };
     t?.t.close();
   }
 

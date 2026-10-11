@@ -35,6 +35,11 @@ export const STAGE_TEXT: Record<FailStage, { title: string; detail: string }> = 
     title: 'The host closed the connection',
     detail: 'The host left or handed over to someone else. Crocodile connects to the new host.',
   },
+  superseded: {
+    title: 'Stopped: the session moved on',
+    detail:
+      'Another host took over, or the conversation was closed, before this attempt finished. Nothing went wrong.',
+  },
   rejected: {
     title: "The host's answer didn't check out",
     detail:

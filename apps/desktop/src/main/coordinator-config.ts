@@ -30,7 +30,8 @@ export function relayCapacity(s: CoordinatorSettings): number {
  */
 export function relayPorts(s: CoordinatorSettings): { min: number; max: number } {
   const min = s.port + 2;
-  // Four per person, as each may hold up to four relayed connections. Past
-  // port 65535 the settings are refused (coordinatorStartError).
+  // Four per person covers typical use (a chat, a DM and a call). Someone
+  // holding more takes over their own oldest port when the range is full
+  // (TurnServer). Past port 65535 the settings are refused (coordinatorStartError).
   return { min, max: min + relayCapacity(s) * 4 - 1 };
 }

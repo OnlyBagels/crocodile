@@ -34,7 +34,8 @@ function AttemptSteps({ attempt }: { attempt: ConnectAttempt }) {
     attempt.end &&
     !attempt.end.ok &&
     attempt.end.stage !== 'lost' &&
-    attempt.end.stage !== 'host-left'
+    attempt.end.stage !== 'host-left' &&
+    attempt.end.stage !== 'superseded'
       ? STEPS.find((s) => !attempt.steps.some((d) => d.step === s.step))?.step
       : undefined;
   return (
@@ -81,7 +82,8 @@ export function ConnectionDetails({ session }: { session: SessionView }) {
     !u ? 'nobody' : u === me ? 'you' : (profiles[u]?.username ?? 'someone');
   const attempts = [...session.attempts].reverse();
   const latest = attempts[0];
-  const failure = attempts.find((a) => a.end && !a.end.ok);
+  // The latest real failure; an attempt the session itself stopped isn't one.
+  const failure = attempts.find((a) => a.end && !a.end.ok && a.end.stage !== 'superseded');
   let headline: string;
   if (session.iAmHost) headline = 'You are hosting: the others connect to you.';
   else if (session.status === 'connected')
@@ -110,7 +112,7 @@ export function ConnectionDetails({ session }: { session: SessionView }) {
           <p className="mt-1 text-xs leading-relaxed text-muted">
             {STAGE_TEXT[failure.end.stage].detail}
           </p>
-          <p className="mt-1 text-[11px] text-faint">Reported by WebRTC: {failure.end.reason}</p>
+          <p className="mt-1 text-[11px] text-faint">Details: {failure.end.reason}</p>
         </div>
       )}
       {latest && (

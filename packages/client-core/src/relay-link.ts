@@ -48,9 +48,18 @@ export type ConnectStep = 'offer' | 'answer' | 'path' | 'open';
  * Where a connection failed: the host never answered (`no-answer`), no
  * network path worked (`no-path`), a path worked but the channel didn't
  * open (`no-channel`), it worked and was then lost (`lost`), the host closed
- * it (`host-left`), or the host's answer didn't check out (`rejected`).
+ * it (`host-left`), the host's answer didn't check out (`rejected`), or the
+ * session moved on before it finished (`superseded`).
  */
-export type FailStage = 'no-answer' | 'no-path' | 'no-channel' | 'lost' | 'host-left' | 'rejected';
+export type FailStage =
+  | 'no-answer'
+  | 'no-path'
+  | 'no-channel'
+  | 'lost'
+  | 'host-left'
+  | 'rejected'
+  /** Stopped by the session itself: another host or epoch, or leaving. */
+  | 'superseded';
 
 export type RelayLinkEvents = {
   open: void;

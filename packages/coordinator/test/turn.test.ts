@@ -27,6 +27,26 @@ async function waitFor<T>(fn: () => T | undefined | false, ms = 10_000): Promise
   }
 }
 
+/** `n` consecutive UDP ports free right now on 127.0.0.1. */
+async function freePortRange(n: number): Promise<{ min: number; max: number }> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    const min = 40000 + Math.floor(Math.random() * 20000);
+    const socks = [];
+    let ok = true;
+    for (let p = min; p < min + n && ok; p++) {
+      const sock = createSocket('udp4');
+      ok = await new Promise<boolean>((r) => {
+        sock.once('error', () => r(false));
+        sock.bind(p, '127.0.0.1', () => r(true));
+      });
+      socks.push(sock);
+    }
+    for (const sock of socks) sock.close();
+    if (ok) return { min, max: min + n - 1 };
+  }
+  throw new Error('no free port range');
+}
+
 async function connect(a: RTCPeerConnection, b: RTCPeerConnection) {
   a.onIceCandidate.subscribe((c) => c && b.addIceCandidate(c).catch(() => {}));
   b.onIceCandidate.subscribe((c) => c && a.addIceCandidate(c).catch(() => {}));
@@ -390,6 +410,30 @@ describe('TURN relay', () => {
     const other = await turnClient(turn, { user: 'ffffffffffffffffffffffffff' });
     expect(await allocate(other)).toBe(0);
     expect(turn.allocationCount()).toBe(3);
+  });
+
+  it("a full port range makes room from the user's own oldest allocation", async () => {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      relayPorts: await freePortRange(2),
+    }).start();
+    cleanup.push(() => turn.stop());
+    const tuples = (turn as unknown as { allocations: Map<string, unknown> }).allocations;
+    const first = await turnClient(turn);
+    const second = await turnClient(turn);
+    expect(await allocate(first)).toBe(0);
+    expect(await allocate(second)).toBe(0);
+    // The range is full, well under the per-user cap: the oldest makes room.
+    const third = await turnClient(turn);
+    expect(await allocate(third)).toBe(0);
+    const port = (c: typeof first) => `127.0.0.1|${c.sock.address().port}`;
+    expect([...tuples.keys()]).toEqual([port(second), port(third)]);
+    // Someone with nothing to give up is told the server is full.
+    const other = await turnClient(turn, { user: 'ffffffffffffffffffffffffff' });
+    expect(await allocate(other)).toBe(508);
   });
 
   it('keeps an allocation whose grant was extended past its credentials', async () => {
