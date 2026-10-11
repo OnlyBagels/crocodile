@@ -82,10 +82,16 @@ import {
   defaultTransportFactory,
   type RelayStatus,
   type TransportFactory,
+  type ConnectAttempt,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
-import { networkVerdict, type NetworkVerdict } from './caps';
-import type { ConnectionRoute } from './relay-link';
+import {
+  networkChecklist,
+  networkVerdict,
+  type NetworkCheckItem,
+  type NetworkVerdict,
+} from './caps';
+import type { ConnectionRoute, LinkStats } from './relay-link';
 import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
@@ -181,6 +187,10 @@ export interface SessionView {
   route: ConnectionRoute | null;
   /** Connecting to the host keeps failing. */
   trouble: boolean;
+  /** When the current connection to the host opened (null while not connected). */
+  connectedAt: number | null;
+  /** Recent attempts to connect to the host, newest last (host as a user id). */
+  attempts: ConnectAttempt[];
 }
 
 /** What the network allows for direct connections (see checkNetwork). */
@@ -188,6 +198,9 @@ export interface NetworkStatus {
   verdict: NetworkVerdict;
   checking: boolean;
   checkedAt: number;
+  /** What each check found, and why the verdict is what it is. */
+  checks?: NetworkCheckItem[];
+  reason?: string;
 }
 
 export interface DeviceView {
@@ -758,10 +771,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     link.on('relay_expired', ({ reason }) => {
       for (const s of this.sessions.values()) {
-        if (s.relayGrant) {
-          s.dropServerRelay();
-          this.store.set({ relayEnded: { sessionId: s.sessionId, reason } });
-        }
+        // Only connections that went through the relay are interrupted (and
+        // worth asking about); those that found a direct path carry on.
+        if (s.dropServerRelay()) this.store.set({ relayEnded: { sessionId: s.sessionId, reason } });
       }
     });
     link.start();
@@ -1909,6 +1921,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       relay: grant ? { server: grant.server, expiresAt: grant.expiresAt } : null,
       route: session.status === 'connected' ? session.route : null,
       trouble: session.trouble,
+      connectedAt: session.connectedAt,
+      attempts: session.attempts.map((a) => ({
+        ...a,
+        host: peerIds.user(a.host),
+        steps: [...a.steps],
+        ...(a.end ? { end: { ...a.end } } : {}),
+      })),
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
     this.noteTrouble(view);
@@ -2163,22 +2182,34 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!probe) return Promise.resolve();
     if (this.networkCheck) return this.networkCheck;
     this.store.set((s) => ({
-      network: {
-        verdict: s.network?.verdict ?? 'unknown',
-        checkedAt: s.network?.checkedAt ?? 0,
-        checking: true,
-      },
+      network: s.network
+        ? { ...s.network, checking: true }
+        : { verdict: 'unknown', checkedAt: 0, checking: true },
     }));
     this.networkCheck = probe(fresh)
       .then((result) => {
         const verdict = networkVerdict(result);
-        this.log('network check', { ...result, verdict });
-        this.store.set({ network: { verdict, checking: false, checkedAt: Date.now() } });
+        const { items, reason } = networkChecklist(result);
+        // Addresses stay out of the log (it goes into bug reports).
+        this.log('network check', {
+          nat: result.nat,
+          udp: result.udp,
+          verdict,
+          checks: Object.fromEntries(items.map((i) => [i.id, i.status])),
+        });
+        this.store.set({
+          network: { verdict, checking: false, checkedAt: Date.now(), checks: items, reason },
+        });
       })
       .catch((err) => {
         this.log('network check failed', { err: String(err) });
         this.store.set((s) => ({
-          network: { verdict: 'unknown', checking: false, checkedAt: s.network?.checkedAt ?? 0 },
+          network: {
+            verdict: 'unknown',
+            checking: false,
+            checkedAt: s.network?.checkedAt ?? 0,
+            reason: `The check itself failed (${String(err)}).`,
+          },
         }));
       })
       .finally(() => {
@@ -2202,6 +2233,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private troubleDismissed = new Set<string>();
+
+  /** Live WebRTC numbers for a session's connection to its host (debug panel). */
+  async sessionStats(sessionId: string): Promise<LinkStats | null> {
+    return (await this.sessions.get(sessionId)?.stats()) ?? null;
+  }
 
   private historyChannels(sessionId: string): string[] {
     const scope = parseSessionId(sessionId);

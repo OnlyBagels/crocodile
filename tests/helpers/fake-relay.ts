@@ -142,9 +142,11 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     super();
   }
 
+  /** Like ICE: a direct path when one exists, even with the server relay on offer. */
   async route() {
     if (!this.isOpen) return null;
-    return this.viaTurn ? ('relay' as const) : ('lan' as const);
+    const direct = !this.net.blocksDirect(this.userId, this.relay!.host);
+    return direct ? ('lan' as const) : ('relay' as const);
   }
 
   get isOpen() {
@@ -152,9 +154,11 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   }
 
   async connect() {
+    this.emit('progress', { step: 'offer' });
     // Like a real offer, give the host a moment to learn it was elected.
     for (let i = 0; i < 100 && !this.closed; i++) {
       const relay = this.net.find(this.key);
+      if (relay) this.emit('progress', { step: 'answer' });
       if (relay && !this.viaTurn && this.net.blocksDirect(this.userId, relay.host)) {
         // Like ICE with no working candidate pair.
         setTimeout(() => this.drop('connection failed'), 30);
@@ -164,6 +168,7 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
         this.relay = relay;
         setTimeout(() => {
           if (this.closed) return;
+          this.emit('progress', { step: 'path' });
           if (!relay.attach(this)) return this.drop('not admitted');
           this.emit('open', undefined);
         }, 5);
