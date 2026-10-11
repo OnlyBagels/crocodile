@@ -91,14 +91,21 @@ hotspot, a captive/office network that blocks UDP, and packet loss
 1. `main` is green (CI, including the Electron E2E job).
 2. Manual matrix above done on the release candidate (an unpublished draft
    release, or a `pnpm dist` build).
-3. `docs/releases/<tag>.md` written (what changed, known issues), or rely on
-   `docs/releases/default.md`.
-4. Publish the release in the GitHub UI with a new tag on `main`:
-   `beta-vX.Y.Z` during the beta, `vX.Y.Z` after it. Publish it as a normal
-   release, not a pre-release: the apps' updater, the website and the install
-   scripts only look at the latest release. Only repository admins can create
-   release tags, and nobody can move or delete them. Watch the Release
-   workflow and check every platform's files are attached.
+3. `docs/releases/<tag>.md` written (what changed, known issues) and merged
+   before tagging, or rely on `docs/releases/default.md`. The notes come from
+   the tagged commit.
+4. Tag the latest `main` and push the tag: `beta-vX.Y.Z` during the beta,
+   `vX.Y.Z` after it. Tag `origin/main` explicitly, so the tag can't land on
+   whatever branch is checked out (tags can't be moved or deleted):
+   `git fetch origin && git tag beta-vX.Y.Z origin/main && git push origin beta-vX.Y.Z`.
+   The Release workflow creates a draft with the notes from step 3, uploads
+   every platform's files and publishes it once all are in. (Publishing a release
+   with a new tag in the GitHub UI works too.) It must be a normal release,
+   not a pre-release: the apps' updater, the website and the install scripts
+   only look at the latest release. Only repository admins can create
+   release tags. Watch the workflow and
+   check every platform's files are attached, including the `latest*.yml`
+   files the updater reads.
 5. Install from the release page on each OS once more (smoke: sign in, send a
    message, join voice).
 6. Update the main server (`deploy/main`: `git pull && docker compose up -d --build`).

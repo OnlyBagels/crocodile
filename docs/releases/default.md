@@ -18,8 +18,14 @@ These builds are not code-signed yet:
 - **Windows:** SmartScreen says "Windows protected your PC" → _More info_ →
   _Run anyway_.
 - **macOS:** open the app once, then _System Settings → Privacy & Security →
-  Open Anyway_. macOS updates are not automatic in unsigned builds; the app
-  tells you when a new version is available.
+  Open Anyway_.
+
+The app tells you when a new version is out: click **Update** in the top bar,
+then **Restart to update** once it has downloaded. Two exceptions: the Linux
+`.tar.gz` can't update itself, so **Download update** opens this page; and a
+Mac app that can't replace itself (still on the disk image, or in a folder you
+can't write to) downloads the new `.dmg` and shows **Install update**, which
+opens it so you can drag Crocodile into Applications.
 
 ## Getting started
 

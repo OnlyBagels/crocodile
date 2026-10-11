@@ -36,13 +36,15 @@ services:
     # would start a proxy process for each. It listens on:
     # - TCP 7443 on 127.0.0.1 only (CROC_HOST): WebSocket traffic comes through
     #   the proxy, and the server trusts X-Forwarded-For (below), so a public
-    #   TCP port would let clients fake their address and dodge the per-IP limit;
+    #   TCP port would let clients fake their address and dodge the per-IP limit.
+    #   A proxy running in a container can't reach the host's 127.0.0.1: set
+    #   CROC_COORD_HOST in .env to its Docker network's gateway (README.md);
     # - UDP 7443 (STUN and the opt-in relay) and 7444 (second STUN port, lets
     #   apps detect their NAT type without third-party servers);
     # - UDP 49160-49259 (relayed traffic, one port per relayed connection).
     network_mode: host
     environment:
-      CROC_HOST: 127.0.0.1
+      CROC_HOST: ${CROC_COORD_HOST:-127.0.0.1}
       CROC_NAME: ${CROC_COORD_NAME:-Crocodile main}
       CROC_PUBLIC_URL: https://coord.${CROC_DOMAIN:?set CROC_DOMAIN in .env}
       CROC_DIRECTORY: https://${CROC_DOMAIN}
