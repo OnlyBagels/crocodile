@@ -84,7 +84,8 @@ UDP port; the other end of each relayed connection gets its own UDP port,
 from `--relay-ports` if you set it. Behind a firewall or Docker, set a range
 and open it (four ports per relay user is plenty: 49160-49259 covers the
 default 25 users), or relayed connections never get through. Each
-grant lasts at most one hour, `--relay-max-users` caps how many people use
+grant lasts at most one hour (apps renew it while their connection still
+goes through the relay), `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server

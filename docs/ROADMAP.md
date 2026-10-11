@@ -22,7 +22,8 @@ report what matters most; issues and discussions are welcome.
 - Multiple devices per account: linking with a code and security check,
   per-device keys for message delivery, renaming and removal.
 - Opt-in relay through coordination servers for networks that block direct
-  connections (one hour at a time, capped users per server).
+  connections (hour-long windows renewed while still needed, capped users
+  per server).
 - Offline delivery: a per-device outbox exchanged peer-to-peer with
   acknowledgements, and an opt-in server mailbox for DMs (sealed per device,
   up to 7 days, works across the server mesh).

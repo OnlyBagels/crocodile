@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
+  AlertTriangle,
   AppWindow,
   ArrowDownCircle,
+  Bug,
   Check,
+  CheckCircle2,
   Code,
   Coffee,
   Copy,
   Eye,
   Globe,
   Heart,
+  HelpCircle,
   Info,
   Laptop,
   LogOut,
@@ -29,6 +33,7 @@ import {
   Users,
   Wifi,
   X,
+  XCircle,
 } from 'lucide-react';
 import {
   ACCENTS,
@@ -53,9 +58,11 @@ const SPONSORS_URL = 'https://github.com/sponsors/pwalda';
 const KOFI_URL = 'https://ko-fi.com/pwalda';
 const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other-people-use-your-server`;
 import { isOperatorContact } from '@crocodile/protocol';
+import type { NetworkCheckItem } from '@crocodile/client-core';
 import { desktop } from '../platform';
 import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
 import { Logo } from '../components/Logo';
+import { DebugTab } from './ConnectionModals';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
 import { relayPorts } from '../../main/coordinator-config';
 
@@ -68,6 +75,7 @@ const TABS = [
   { id: 'connection', label: 'Network', icon: Wifi },
   { id: 'host', label: 'Host a server', icon: Server },
   { id: 'about', label: 'About', icon: Info },
+  { id: 'debug', label: 'Debug', icon: Bug },
 ] as const;
 type Tab = (typeof TABS)[number]['id'];
 
@@ -126,6 +134,14 @@ export function SettingsModal({ tab: initial }: { tab?: string }) {
             {tab === 'connection' && <ConnectionTab />}
             {tab === 'host' && <HostTab />}
             {tab === 'about' && <AboutTab />}
+            {tab === 'debug' && (
+              <>
+                <H sub="Live state of every connection, to see what goes wrong and where. Copy diagnostics into a bug report: it has no messages, keys or addresses.">
+                  Debug
+                </H>
+                <DebugTab />
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -810,6 +826,7 @@ function NetworkTest() {
             {network?.checkedAt ? text.detail : 'Crocodile tests your network when it connects.'}
             {!ok && network?.checkedAt && relayOn ? ' The relay is on.' : ''}
           </p>
+          {network?.checks && <NetworkChecklist checks={network.checks} reason={network.reason} />}
           {!ok &&
             network?.checkedAt &&
             !relayOn &&
@@ -832,6 +849,42 @@ function NetworkTest() {
         </Button>
       </Card>
     </section>
+  );
+}
+
+const CHECK_ICON = {
+  ok: { Icon: CheckCircle2, className: 'text-accent', label: 'Passed' },
+  warn: { Icon: AlertTriangle, className: 'text-warn', label: 'Warning' },
+  fail: { Icon: XCircle, className: 'text-danger', label: 'Failed' },
+  unknown: { Icon: HelpCircle, className: 'text-faint', label: 'Unknown' },
+  info: { Icon: Info, className: 'text-faint', label: 'Information' },
+} as const;
+
+/** What the network check looked at, one line per check, and why it decided what it did. */
+function NetworkChecklist({ checks, reason }: { checks: NetworkCheckItem[]; reason?: string }) {
+  return (
+    <div className="mt-3 rounded-2xl border border-line p-3">
+      <ul aria-label="What was checked" className="space-y-2">
+        {checks.map((c) => {
+          const { Icon, className, label } = CHECK_ICON[c.status];
+          return (
+            <li key={c.id} className="flex gap-2.5 text-xs">
+              <Icon size={15} className={cx('mt-px shrink-0', className)} aria-label={label} />
+              <div>
+                <div className="font-semibold text-text">{c.label}</div>
+                <div className="leading-relaxed text-muted">{c.detail}</div>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      {reason && (
+        <p className="mt-3 border-t border-line pt-2 text-xs leading-relaxed text-text-2">
+          <span className="font-semibold">Result: </span>
+          {reason}
+        </p>
+      )}
+    </div>
   );
 }
 

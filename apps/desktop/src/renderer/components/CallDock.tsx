@@ -10,7 +10,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { parseSessionId } from '@crocodile/protocol';
-import { getClient, navigate, useCroc, useUi } from '../croc';
+import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
 import { Avatar, IconButton, cx } from './ui';
 import { ROUTE_TEXT } from '../lib/network';
 
@@ -94,9 +94,10 @@ export function CallDock() {
           ))}
         </div>
         {session && (
-          <div
-            className="hidden items-center gap-1.5 rounded-full bg-raised px-3 py-1.5 text-[11px] text-muted lg:flex"
-            title="Voice goes peer-to-peer through the host's device and is end-to-end encrypted."
+          <button
+            className="hidden items-center gap-1.5 rounded-full bg-raised px-3 py-1.5 text-[11px] text-muted hover:text-text lg:flex"
+            title="Connection details. Voice goes peer-to-peer through the host's device and is end-to-end encrypted."
+            onClick={() => openModal({ kind: 'connection', sessionId: session.id })}
           >
             <ShieldCheck size={12} className="text-accent" />
             {relayLeft !== null ? (
@@ -115,7 +116,7 @@ export function CallDock() {
                   : ''}
               </span>
             )}
-          </div>
+          </button>
         )}
         <div className="flex items-center gap-1">
           <IconButton

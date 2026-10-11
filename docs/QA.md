@@ -59,28 +59,28 @@ Use at least two machines on **different networks** (e.g. home Wi-Fi and a
 phone hotspot) and one on the same network. Record results in the release
 issue.
 
-| #   | Scenario                                                                                  | Win | macOS | Linux |
-| --- | ----------------------------------------------------------------------------------------- | --- | ----- | ----- |
-| 1   | Fresh install, first launch, create account, save recovery key                            |     |       |       |
-| 2   | Install over the previous version; data and account kept                                  |     |       |       |
-| 3   | Add a friend by `name#tag`, accept, DM both ways                                          |     |       |       |
-| 4   | DM while the friend is offline; delivered when both are online                            |     |       |       |
-| 5   | Same with the mailbox on: delivered while the sender is offline                           |     |       |       |
-| 6   | Create a space, invite by link, join from another machine                                 |     |       |       |
-| 7   | Voice room with 3+ people on different networks; audio both ways                          |     |       |       |
-| 8   | Host leaves the room; others keep talking within a few seconds                            |     |       |       |
-| 9   | DM call: ring, accept, hang up; decline                                                   |     |       |       |
-| 10  | Push-to-talk with another app focused; mouse side button                                  |     |       |       |
-| 11  | Mute, deafen, device switching, output volume                                             |     |       |       |
-| 12  | Link a second device; messages and spaces appear on both                                  |     |       |       |
-| 13  | Remove a device; it stops receiving                                                       |     |       |       |
-| 14  | Restore an account from the recovery key                                                  |     |       |       |
-| 15  | Host a server from Settings; a friend connects by address                                 |     |       |       |
-| 16  | Strict network (UDP blocked except the relay): relay opt-in works, 1-hour prompt appears  |     |       |       |
-| 17  | Laptop sleep / Wi-Fi off and on: reconnects, messages catch up                            |     |       |       |
-| 18  | Light/dark theme, accent, compact messages; window resizing                               |     |       |       |
-| 19  | Unsigned-build warnings match docs/DISTRIBUTION.md                                        |     |       |       |
-| 20  | From the previous release: Update appears, downloads, Restart to update opens the new one |     |       |       |
+| #   | Scenario                                                                                                         | Win | macOS | Linux |
+| --- | ---------------------------------------------------------------------------------------------------------------- | --- | ----- | ----- |
+| 1   | Fresh install, first launch, create account, save recovery key                                                   |     |       |       |
+| 2   | Install over the previous version; data and account kept                                                         |     |       |       |
+| 3   | Add a friend by `name#tag`, accept, DM both ways                                                                 |     |       |       |
+| 4   | DM while the friend is offline; delivered when both are online                                                   |     |       |       |
+| 5   | Same with the mailbox on: delivered while the sender is offline                                                  |     |       |       |
+| 6   | Create a space, invite by link, join from another machine                                                        |     |       |       |
+| 7   | Voice room with 3+ people on different networks; audio both ways                                                 |     |       |       |
+| 8   | Host leaves the room; others keep talking within a few seconds                                                   |     |       |       |
+| 9   | DM call: ring, accept, hang up; decline                                                                          |     |       |       |
+| 10  | Push-to-talk with another app focused; mouse side button                                                         |     |       |       |
+| 11  | Mute, deafen, device switching, output volume                                                                    |     |       |       |
+| 12  | Link a second device; messages and spaces appear on both                                                         |     |       |       |
+| 13  | Remove a device; it stops receiving                                                                              |     |       |       |
+| 14  | Restore an account from the recovery key                                                                         |     |       |       |
+| 15  | Host a server from Settings; a friend connects by address                                                        |     |       |       |
+| 16  | Strict network: relay opt-in works and a relayed call outlasts the hour; Connection details show where it failed |     |       |       |
+| 17  | Laptop sleep / Wi-Fi off and on: reconnects, messages catch up                                                   |     |       |       |
+| 18  | Light/dark theme, accent, compact messages; window resizing                                                      |     |       |       |
+| 19  | Unsigned-build warnings match docs/DISTRIBUTION.md                                                               |     |       |       |
+| 20  | From the previous release: Update appears, downloads, Restart to update opens the new one                        |     |       |       |
 
 Useful network conditions to try: two NATs (home + mobile), a VPN, IPv6-only
 hotspot, a captive/office network that blocks UDP, and packet loss
@@ -114,6 +114,14 @@ hotspot, a captive/office network that blocks UDP, and packet loss
 
 Testers use the issue form (Bug report). The most useful attachment is
 Settings → About → **Copy diagnostics**: versions, connection and session
-state and the last 300 client log lines, without message content or keys.
+state (with each connection attempt's steps and where it failed) and the last
+300 client log lines, without message content, keys or peer addresses.
+
+For connection problems, **Settings → Debug** shows everything live: the
+coordination server link, the network check as a checklist, every session
+(host, route, relay grant, attempts step by step, and WebRTC numbers: the
+candidate pair in use, round-trip time, traffic, audio packet loss) and the
+client log with a filter. The chat header and the call dock open the same
+connection details for one conversation.
 Triage labels: `bug`, area (voice, chat, offline, devices, network,
 install), and `release-blocker` for anything in the manual matrix.

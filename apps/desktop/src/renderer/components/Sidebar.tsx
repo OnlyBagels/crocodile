@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
+import { dmStatusLabel } from '../lib/connection';
 import { colorFor, initials } from '../lib/format';
 import { Avatar, Menu, MenuItem, UserName, cx } from './ui';
 
@@ -280,6 +281,7 @@ export function HomeSidebar() {
   const unread = useCroc((s) => s.unread);
   const incoming = useCroc((s) => s.friends.incoming.length);
   const presence = useCroc((s) => s.presence);
+  const sessions = useCroc((s) => s.sessions);
   return (
     <aside className="island flex w-[272px] shrink-0 flex-col overflow-hidden">
       <div className="p-4">
@@ -342,7 +344,7 @@ export function HomeSidebar() {
                   )}
                 />
                 <div className="text-xs text-faint">
-                  {online ? 'Online · peer-to-peer' : 'Offline · delivers when online'}
+                  {dmStatusLabel(!!online, me ? sessions[sessionIds.dm(me, userId)] : undefined)}
                 </div>
               </div>
               {count > 0 && (

@@ -25,6 +25,8 @@ export type ModalState =
   | { kind: 'profile'; userId: string }
   | { kind: 'new-dm' }
   | { kind: 'link-device' }
+  /** How a session's connection stands, step by step. */
+  | { kind: 'connection'; sessionId: string }
   | {
       kind: 'confirm';
       title: string;
@@ -189,6 +191,11 @@ export function installUpdate() {
 // ---------------------------------------------------------------------------
 
 const recentLog: string[] = [];
+
+/** The client's recent log lines, oldest first (debug panel). */
+export function recentLogLines(): string[] {
+  return [...recentLog];
+}
 function remember(msg: string, extra?: Record<string, unknown>) {
   recentLog.push(`${new Date().toISOString()} ${msg}${extra ? ` ${JSON.stringify(extra)}` : ''}`);
   if (recentLog.length > 300) recentLog.shift();
@@ -233,7 +240,21 @@ export async function diagnostics(): Promise<string> {
       peers: v.peers.length,
       iAmHost: v.iAmHost,
       relayed: !!v.relay,
+      route: v.route,
+      // Steps and failure stages only: no addresses.
+      attempts: v.attempts.map((a) => ({
+        at: new Date(a.startedAt).toISOString(),
+        viaRelay: a.viaRelay,
+        steps: a.steps.map((st) => `${st.step}+${st.at - a.startedAt}ms`),
+        end: a.end ? (a.end.ok ? 'ok' : `${a.end.stage}: ${a.end.reason}`) : 'pending',
+      })),
     })),
+    network: s.network
+      ? {
+          verdict: s.network.verdict,
+          checks: Object.fromEntries((s.network.checks ?? []).map((c) => [c.id, c.status])),
+        }
+      : null,
     voice: s.voiceSession ? { muted: s.muted, deafened: s.deafened } : null,
     hostingServer: hosting
       ? { enabled: hosting.settings.enabled, status: hosting.status.state }
