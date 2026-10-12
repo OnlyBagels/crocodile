@@ -3,7 +3,7 @@ import { Activity, CheckCircle2, Circle, Copy, RefreshCw, XCircle } from 'lucide
 import { parseSessionId } from '@crocodile/protocol';
 import type { ClientState, ConnectAttempt, LinkStats, SessionView } from '@crocodile/client-core';
 import { closeModal, diagnostics, getClient, recentLogLines, useCroc } from '../croc';
-import { STAGE_TEXT, STEPS, attemptSummary, duration } from '../lib/connection';
+import { NAT_TEXT, STAGE_TEXT, STEPS, attemptSummary, duration } from '../lib/connection';
 import { NETWORK_TEXT, ROUTE_TEXT } from '../lib/network';
 import { copyText } from '../lib/format';
 import { Button, Input, Modal, cx } from '../components/ui';
@@ -103,6 +103,14 @@ export function ConnectionDetails({ session }: { session: SessionView }) {
             ? ` · relay through ${session.relay.server} until ${time(session.relay.expiresAt)}`
             : ''}
         </div>
+        {Object.keys(session.networks).length > 0 && (
+          <div className="mt-0.5 text-xs text-muted" aria-label="Members' networks">
+            Networks (what decides who hosts):{' '}
+            {Object.entries(session.networks)
+              .map(([u, nat]) => `${name(u)} ${NAT_TEXT[nat]}`)
+              .join(' · ')}
+          </div>
+        )}
       </div>
       {failure?.end && !failure.end.ok && (
         <div className="rounded-2xl border border-line p-3">

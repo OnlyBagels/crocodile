@@ -307,6 +307,8 @@ await shot(a.page, '15-dark-chat');
 await a.page.getByTitle('Connection details').first().click();
 const details = a.page.getByRole('dialog');
 await details.getByRole('region', { name: 'Connection attempts' }).waitFor();
+// The network types host election went by.
+await details.getByLabel("Members' networks").waitFor();
 await shot(a.page, '15b-connection');
 await a.page.keyboard.press('Escape');
 await details.waitFor({ state: 'detached' });

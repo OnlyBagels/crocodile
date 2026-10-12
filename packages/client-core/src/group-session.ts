@@ -485,7 +485,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.route = null;
       this.setStatus('reconnecting');
       this.emit('update', undefined);
-      if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
+      // Two failures, or one where the host answered but no network path
+      // worked: that won't change by trying again, so say so at once and let
+      // the coordinator pick another host.
+      const report = this.failures >= 2 || where === 'no-path';
+      if (report && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
         void this.ctx
           .link()

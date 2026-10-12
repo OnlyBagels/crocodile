@@ -48,6 +48,7 @@ import {
   utf8,
   type SealedBox,
   type HostCaps,
+  type NatType,
   type LegacyFriendsBody,
   type NoteBody,
   type PresenceStatus,
@@ -191,6 +192,11 @@ export interface SessionView {
   connectedAt: number | null;
   /** Recent attempts to connect to the host, newest last (host as a user id). */
   attempts: ConnectAttempt[];
+  /**
+   * The network type each member reported when joining, by user id: what
+   * host election goes by (a symmetric NAT makes a poor host).
+   */
+  networks: Record<string, NatType>;
 }
 
 /** What the network allows for direct connections (see checkNetwork). */
@@ -1922,6 +1928,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       route: session.status === 'connected' ? session.route : null,
       trouble: session.trouble,
       connectedAt: session.connectedAt,
+      networks: Object.fromEntries(
+        (st?.members ?? []).map((m) => [peerIds.user(m.peer), m.caps.nat] as const),
+      ),
       attempts: session.attempts.map((a) => ({
         ...a,
         host: peerIds.user(a.host),

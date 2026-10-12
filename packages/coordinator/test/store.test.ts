@@ -183,6 +183,17 @@ describe('election', () => {
     expect(
       elect({ members, host: 'callee', backup: 'caller', penalties: new Map(), now: 0 }).host,
     ).toBe('callee');
+    // A member whose network check couldn't finish is still a better bet.
+    const untested = [
+      member('caller', 'symmetric'),
+      {
+        ...member('callee', 'open'),
+        caps: { canHost: true, platform: 'desktop' as const, nat: 'unknown' as const },
+      },
+    ];
+    expect(
+      elect({ members: untested, host: 'caller', backup: null, penalties: new Map(), now: 0 }).host,
+    ).toBe('callee');
     // Two symmetric NATs: nobody better, the current host stays.
     const both = [member('caller', 'symmetric'), member('callee', 'symmetric')];
     expect(

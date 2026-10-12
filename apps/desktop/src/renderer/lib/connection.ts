@@ -1,4 +1,5 @@
 import type { ConnectAttempt, FailStage, SessionView } from '@crocodile/client-core';
+import type { NatType } from '@crocodile/protocol';
 import { ROUTE_TEXT } from './network';
 
 /** The steps of connecting to a session's host, in order, as the user reads them. */
@@ -45,6 +46,14 @@ export const STAGE_TEXT: Record<FailStage, { title: string; detail: string }> = 
     detail:
       "Its signature didn't match the host's identity, so Crocodile refused it. If this keeps happening, report it.",
   },
+};
+
+/** A member's network type as election sees it, in the network check's words. */
+export const NAT_TEXT: Record<NatType, string> = {
+  open: 'open',
+  cone: 'direct connections work',
+  symmetric: 'limited',
+  unknown: 'not fully tested',
 };
 
 /** "2 min", "45 s", "1 h 5 min". */

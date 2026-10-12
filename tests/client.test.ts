@@ -37,7 +37,7 @@ function makeClient(
   coordinator: Coordinator,
   opts: {
     canHost?: boolean;
-    nat?: 'open' | 'cone' | 'symmetric';
+    nat?: 'open' | 'cone' | 'symmetric' | 'unknown';
     kv?: MemoryKeyValueStore;
     directories?: string[];
     /** How far this device's clock is off, in ms (a number, or read each time). */
@@ -547,6 +547,29 @@ describe('strict networks', () => {
       'the open side receives it',
     );
     expect(strict.state.sessions[dm]?.host).toBe(open.userId);
+  });
+});
+
+describe('host reports', () => {
+  it('reports a host it has no network path to after one try, not two', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    // The strict side's own network check couldn't finish, so the election
+    // can't tell it is a poor host: only members' reports can move it.
+    const strict = await signUp(makeClient(net, coord, { nat: 'unknown' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    const dm = await strict.openDm(open.userId);
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(() => open.state.sessions[dm]?.iAmHost, 12000, 'the open side hosts');
+    const toStrict = open.state.sessions[dm]!.attempts.filter((a) => a.host === strict.userId);
+    expect(toStrict).toHaveLength(1);
+    expect(toStrict[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
   });
 });
 
