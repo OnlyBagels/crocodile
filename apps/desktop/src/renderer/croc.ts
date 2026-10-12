@@ -241,6 +241,9 @@ export async function diagnostics(): Promise<string> {
       iAmHost: v.iAmHost,
       relayed: !!v.relay,
       route: v.route,
+      // The network types election went by, for the host and this device.
+      hostNetwork: v.networks.find((n) => n.host)?.nat ?? null,
+      myNetwork: v.networks.find((n) => n.self)?.nat ?? null,
       // Steps and failure stages only: no addresses.
       attempts: v.attempts.map((a) => ({
         at: new Date(a.startedAt).toISOString(),

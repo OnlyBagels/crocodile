@@ -216,7 +216,7 @@ CPU cores, battery, RTT. `coordinator/src/election.ts` scores members:
   clients never host.
 - The current host is kept while it is healthy (no flapping when a slightly
   better peer joins), except that a host behind a symmetric NAT hands over to
-  a member with an open or cone NAT. Whoever calls or opens a channel first
+  the best member whose NAT isn't symmetric (open, cone, or not fully tested). Whoever calls or opens a channel first
   is elected while alone, and others often can't reach a symmetric-NAT host
   while it can reach them. A device whose UDP is blocked reports itself as
   symmetric.
@@ -226,8 +226,9 @@ Failover triggers:
 
 1. The host's coordinator connection drops, so it leaves the session and the
    backup is promoted (epoch + 1).
-2. Members fail to connect to the host twice and report it. Once half of
-   them agree, the host is penalised for 60 s and the backup promoted.
+2. Members fail to connect to the host twice, or once with no network path
+   at all from a member whose own network isn't symmetric, and report it.
+   Once half of them agree, the host is penalised for 60 s and the backup promoted.
 3. The owner server dies. Ownership moves (see above) and the host is kept.
 
 Every host change bumps the **epoch**; signals carry it, so stale offers and

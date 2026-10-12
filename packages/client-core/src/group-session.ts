@@ -485,7 +485,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.route = null;
       this.setStatus('reconnecting');
       this.emit('update', undefined);
-      if (this.failures >= 2 && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
+      // Two failures, or one direct attempt where the host answered but no
+      // network path worked: that won't change by trying again, so say so at
+      // once and let the coordinator pick another host. Not when our own
+      // network is the limited one (symmetric, or UDP blocked): then the
+      // fault may well be ours, and a report would move the host to us.
+      const myNat = this.state?.members.find((m) => m.peer === this.me)?.caps.nat;
+      const hopeless = where === 'no-path' && !attempt.viaRelay && !!myNat && myNat !== 'symmetric';
+      const report = this.failures >= 2 || hopeless;
+      if (report && this.reportedEpoch !== entry.epoch && entry.host !== this.me) {
         this.reportedEpoch = entry.epoch;
         void this.ctx
           .link()

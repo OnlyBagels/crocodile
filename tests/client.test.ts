@@ -37,7 +37,7 @@ function makeClient(
   coordinator: Coordinator,
   opts: {
     canHost?: boolean;
-    nat?: 'open' | 'cone' | 'symmetric';
+    nat?: 'open' | 'cone' | 'symmetric' | 'unknown';
     kv?: MemoryKeyValueStore;
     directories?: string[];
     /** How far this device's clock is off, in ms (a number, or read each time). */
@@ -522,6 +522,79 @@ describe('connection help', () => {
   });
 });
 
+describe('strict networks', () => {
+  it('a message from behind a symmetric NAT gets through: the reachable side hosts', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // Nobody can reach a relay the strict side hosts; it can reach others.
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    // The strict side starts the conversation (and so is elected first).
+    const dm = await strict.openDm(open.userId);
+    await strict.openChannel(dm);
+    await strict.sendMessage(dm, 'from behind a strict NAT');
+    // The open side gets the invite and opens the conversation.
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(
+      () => bodies(open, dm).includes('from behind a strict NAT'),
+      15000,
+      'the open side receives it',
+    );
+    expect(strict.state.sessions[dm]?.host).toBe(open.userId);
+  });
+});
+
+describe('host reports', () => {
+  it('reports a host it has no network path to after one try, not two', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    // The strict side's own network check couldn't finish, so the election
+    // can't tell it is a poor host: only members' reports can move it.
+    const strict = await signUp(makeClient(net, coord, { nat: 'unknown' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    const dm = await strict.openDm(open.userId);
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(() => open.state.sessions[dm]?.iAmHost, 12000, 'the open side hosts');
+    const toStrict = open.state.sessions[dm]!.attempts.filter((a) => a.host === strict.userId);
+    expect(toStrict).toHaveLength(1);
+    expect(toStrict[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
+  });
+
+  it('tries twice before reporting when its own network is the limited one', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // UDP blocked: the app reports symmetric, and the fault is likely its own.
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    net.blocked.add(strict.userId);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.incoming.includes(open.userId), 12000);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.friends.includes(strict.userId), 12000, 'friends');
+    const dm = await open.openDm(strict.userId);
+    await waitFor(() => strict.state.dms.includes(open.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await strict.openChannel(dm);
+    // One report would have made the strict side host after its first try.
+    const toOpen = () =>
+      strict.state.sessions[dm]?.attempts.filter((a) => a.host === open.userId && a.end) ?? [];
+    await waitFor(() => toOpen().length >= 2, 12000, 'a second try');
+    expect(toOpen()[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
+  });
+});
+
 describe('relay windows', () => {
   /** Alice hosts a DM with Bob, who has the relay on and turned it on for the DM. */
   async function relayedDm(bobBlocked: boolean) {
@@ -832,6 +905,16 @@ describe('multiple devices', () => {
       8000,
       'three peers',
     );
+    // Each device keeps its own network type, and knows which one is itself.
+    const networks = alice2.state.sessions[sid]!.networks;
+    expect(
+      networks
+        .filter((n) => n.user === alice1.userId)
+        .map((n) => n.nat)
+        .sort(),
+    ).toEqual(['cone', 'open']);
+    expect(networks.find((n) => n.self)?.nat).toBe('cone');
+    expect(networks.filter((n) => n.host)).toHaveLength(1);
     await bob.sendMessage(ch, 'to all your devices');
     await waitFor(
       () =>
