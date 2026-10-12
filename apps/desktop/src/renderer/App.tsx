@@ -2,7 +2,18 @@ import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
 import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
-import { closeModal, getClient, navigate, openModal, ui, useCroc, useUi } from './croc';
+import {
+  closeModal,
+  getClient,
+  navigate,
+  openModal,
+  playSound,
+  sounds,
+  ui,
+  useCroc,
+  useUi,
+} from './croc';
+import { messageSound } from './lib/sounds';
 import { desktop } from './platform';
 import { Onboarding } from './components/Onboarding';
 import { TopBar } from './components/TopBar';
@@ -12,6 +23,9 @@ import { RoomStage } from './components/RoomStage';
 import { PeopleView } from './components/PeopleView';
 import { CallDock } from './components/CallDock';
 import { CommandPalette } from './components/CommandPalette';
+import { joinAndOpen, openInvite } from './components/InviteCard';
+import { plain, setInviteLinkHandler } from './lib/format';
+import { mentionsIn } from './lib/markup';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
 import { CrocMark, Logo } from './components/Logo';
 import { NETWORK_TEXT } from './lib/network';
@@ -41,6 +55,7 @@ export function App() {
 
 function Shell() {
   useGlobalBehaviours();
+  useSounds();
   const view = useUi((s) => s.view);
   const showMembers = useUi((s) => s.showMembers);
   const spaces = useCroc((s) => s.spaces);
@@ -382,6 +397,65 @@ function CallPrompts() {
   return null;
 }
 
+/** Ringing, call and message sounds. */
+function useSounds() {
+  const client = getClient();
+  const ringingIn = useCroc((s) => !!s.incomingCall);
+  const ringingOut = useCroc(
+    (s) => !!s.voiceSession && s.outgoingCall?.sessionId === s.voiceSession,
+  );
+  const enabled = useUi((s) => s.sounds.enabled);
+  const busy = useCroc((s) => s.settings.status === 'dnd');
+
+  // Rings repeat until answered, declined or given up.
+  useEffect(() => {
+    if (!enabled || !ringingIn || busy) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ring', 2000);
+  }, [enabled, ringingIn, busy]);
+  useEffect(() => {
+    if (!enabled || !ringingOut) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ringback', 3000);
+  }, [enabled, ringingOut]);
+
+  useEffect(() => {
+    const offMessage = client.on('message', ({ channel, message, mine, update }) => {
+      const s = client.state;
+      const sound = messageSound({
+        mine,
+        update,
+        mentionsMe: !!s.me && mentionsIn(message.body).includes(s.me.userId),
+        busy: s.settings.status === 'dnd',
+        watching: document.hasFocus() && s.activeChannel === channel,
+      });
+      if (sound) playSound(sound);
+    });
+    // Others coming and going in our call.
+    const offCall = client.on('call', ({ event }) => {
+      if (event === 'joined') playSound('join');
+      else if (event === 'left') playSound('leave');
+    });
+    // Our own: joining a call, leaving or being hung up on, muting.
+    let prev = client.state;
+    const offStore = client.store.subscribe(() => {
+      const s = client.state;
+      if (s.voiceSession !== prev.voiceSession) {
+        if (!prev.voiceSession) playSound('join');
+        else if (!s.voiceSession) playSound('hangup');
+      } else if (s.voiceSession && s.muted !== prev.muted) {
+        playSound(s.muted ? 'mute' : 'unmute');
+      }
+      prev = s;
+    });
+    return () => {
+      offMessage();
+      offCall();
+      offStore();
+    };
+  }, [client]);
+}
+
 /** Push-to-talk (in-window), notifications, unread badge and invite deep links. */
 function useGlobalBehaviours() {
   const client = getClient();
@@ -430,8 +504,10 @@ function useGlobalBehaviours() {
           sp.channels.some((c) => c.id === channel),
         );
         const chName = space?.channels.find((c) => c.id === channel)?.name;
-        const n = new Notification(space ? `${author} · ${chName} · ${space.name}` : author, {
-          body: message.body.slice(0, 200),
+        const mentioned = !!s.me && mentionsIn(message.body).includes(s.me.userId);
+        const who = mentioned ? `${author} mentioned you` : author;
+        const n = new Notification(space ? `${who} · ${chName} · ${space.name}` : who, {
+          body: plain(message.body).slice(0, 200),
         });
         n.onclick = () => {
           window.focus();
@@ -450,29 +526,34 @@ function useGlobalBehaviours() {
   }, [totalUnread]);
 
   useEffect(() => {
+    // Invite links clicked in a chat.
+    setInviteLinkHandler(askToJoin);
     if (!desktop) return;
     const handle = (url: string | null) => {
-      if (!url) return;
-      const m = url.match(/^croc:\/\/join\/([a-z2-7]+)/i);
-      if (!m) return;
-      closeModal();
-      openModal({
-        kind: 'confirm',
-        title: 'Join this space?',
-        body: `You were invited with the code ${m[1]!.toLowerCase()}.`,
-        action: 'Join',
-        onConfirm: async () => {
-          const spaceId = await client.joinWithInvite(m[1]!);
-          const space = client.state.spaces[spaceId];
-          navigate({
-            kind: 'space',
-            spaceId,
-            channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null,
-          });
-        },
-      });
+      const m = url?.match(/^croc:\/\/join\/([a-z2-7]+)/i);
+      if (m) askToJoin(m[1]!.toLowerCase());
     };
     void desktop.app.takeDeepLink().then(handle);
     return desktop.app.onDeepLink(handle);
   }, [client]);
+}
+
+/** An invite link was opened: join that space, after asking (or just open it if we're in). */
+function askToJoin(code: string) {
+  const client = getClient();
+  void client
+    .previewInvite(code)
+    .catch(() => null)
+    .then((preview) => {
+      if (preview?.joined) return openInvite(preview);
+      if (preview?.expired) return client.reportError('This invite has expired or was revoked.');
+      closeModal();
+      openModal({
+        kind: 'confirm',
+        title: preview ? `Join ${preview.name}?` : 'Join this space?',
+        body: `You were invited with the code ${code}.`,
+        action: 'Join',
+        onConfirm: () => joinAndOpen(code),
+      });
+    });
 }

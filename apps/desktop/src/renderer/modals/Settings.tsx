@@ -43,7 +43,9 @@ import {
   getClient,
   installUpdate,
   openModal,
+  playSound,
   saveAppearance,
+  saveSounds,
   saveVoiceSettings,
   setPttKey,
   useCroc,
@@ -71,7 +73,7 @@ const TABS = [
   { id: 'devices', label: 'Devices', icon: Laptop },
   { id: 'voice', label: 'Voice', icon: Mic },
   { id: 'appearance', label: 'Appearance', icon: Palette },
-  { id: 'privacy', label: 'Privacy', icon: Shield },
+  { id: 'privacy', label: 'Privacy & alerts', icon: Shield },
   { id: 'connection', label: 'Network', icon: Wifi },
   { id: 'host', label: 'Host a server', icon: Server },
   { id: 'about', label: 'About', icon: Info },
@@ -750,12 +752,13 @@ function AppearanceTab() {
 
 function PrivacyTab() {
   const settings = useCroc((s) => s.settings);
+  const soundPrefs = useUi((s) => s.sounds);
   const blocked = useCroc((s) => s.friends.blocked);
   const client = getClient();
   return (
     <>
-      <H sub="Messages and voice are end-to-end encrypted with keys that change constantly. These choices control what you share with others.">
-        Privacy
+      <H sub="Messages and voice are end-to-end encrypted with keys that change constantly. These choices control what you share with others, and how Crocodile gets your attention.">
+        Privacy & alerts
       </H>
       <Row label="Status">
         <Segmented
@@ -776,6 +779,34 @@ function PrivacyTab() {
           label="Desktop notifications"
         />
       </Row>
+      <Row
+        label="Sounds"
+        hint="Ringing, people joining and leaving calls, new messages and mentions. Quiet while you're busy."
+      >
+        <Toggle
+          checked={soundPrefs.enabled}
+          onChange={(v) => void saveSounds({ enabled: v })}
+          label="Sounds"
+        />
+      </Row>
+      {soundPrefs.enabled && (
+        <div className="flex items-center gap-3 border-b border-line py-4">
+          <Label>Volume · {Math.round(soundPrefs.volume * 100)}%</Label>
+          <input
+            type="range"
+            min={5}
+            max={100}
+            aria-label="Sound volume"
+            value={Math.round(soundPrefs.volume * 100)}
+            onChange={(e) => void saveSounds({ volume: Number(e.target.value) / 100 })}
+            onPointerUp={() => playSound('message')}
+            className="flex-1 accent-[var(--accent)]"
+          />
+          <Button variant="secondary" className="h-8 text-xs" onClick={() => playSound('ring')}>
+            Play
+          </Button>
+        </div>
+      )}
       <h3 className="mb-2 mt-8 text-lg font-bold">Blocked</h3>
       <Card className="py-2">
         {blocked.length === 0 && (

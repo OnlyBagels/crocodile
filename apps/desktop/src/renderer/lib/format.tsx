@@ -1,5 +1,8 @@
 import type { ReactNode } from 'react';
 import { desktop } from '../platform';
+import { getClient, openModal, useCroc } from '../croc';
+import { cx } from '../components/ui';
+import { plainText, tokenize } from './markup';
 
 export function timeOf(ts: number) {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -29,67 +32,84 @@ export function openLink(url: string) {
 }
 
 /**
- * Minimal, safe message formatting: ```code blocks```, `inline code`,
- * **bold**, *italic*, ~~strike~~ and links. Produces React nodes; never HTML.
+ * Safe message formatting (see markup.ts): code, emphasis, links, invite
+ * links and mentions. Produces React nodes; never HTML.
  */
-export function renderMessage(text: string): ReactNode[] {
-  const out: ReactNode[] = [];
-  const blocks = text.split(/```/);
-  blocks.forEach((block, i) => {
-    if (i % 2 === 1) {
-      out.push(
-        <pre
-          key={`b${i}`}
-          className="selectable my-1 overflow-x-auto rounded-xl border border-line bg-field p-3 font-mono text-[13px]"
-        >
-          {block.replace(/^\w*\n/, '')}
-        </pre>,
-      );
-    } else if (block) {
-      out.push(...renderInline(block, `i${i}`));
+export function renderMessage(text: string, opts: { me?: string } = {}): ReactNode[] {
+  return tokenize(text).map((tok, i) => {
+    const k = `t${i}`;
+    switch (tok.t) {
+      case 'text':
+        return tok.v;
+      case 'block':
+        return (
+          <pre
+            key={k}
+            className="selectable my-1 overflow-x-auto rounded-xl border border-line bg-field p-3 font-mono text-[13px]"
+          >
+            {tok.v}
+          </pre>
+        );
+      case 'code':
+        return (
+          <code key={k} className="rounded-md bg-raised px-1.5 py-0.5 font-mono text-[13px]">
+            {tok.v}
+          </code>
+        );
+      case 'bold':
+        return <strong key={k}>{tok.v}</strong>;
+      case 'italic':
+        return <em key={k}>{tok.v}</em>;
+      case 'strike':
+        return <s key={k}>{tok.v}</s>;
+      case 'mention':
+        return <Mention key={k} userId={tok.user} me={tok.user === opts.me} />;
+      case 'invite':
+      case 'link':
+        return (
+          <a
+            key={k}
+            className="font-semibold text-accent underline-offset-2 hover:underline"
+            href={tok.t === 'link' ? tok.href : tok.v}
+            title={tok.t === 'link' ? tok.href : 'Invite to a space'}
+            onClick={(e) => {
+              e.preventDefault();
+              if (tok.t === 'link') openLink(tok.href);
+              else onInviteLink?.(tok.code);
+            }}
+          >
+            {tok.v}
+          </a>
+        );
     }
   });
-  return out;
 }
 
-const INLINE =
-  /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|~~[^~\n]+~~|https?:\/\/[^\s<]+[^\s<.,:;"')\]!?])/g;
+/** A message as plain text, mentions as @names: for quotes, notifications and copying. */
+export function plain(text: string): string {
+  const profiles = getClient().state.profiles;
+  return plainText(text, (id) => profiles[id]?.username ?? 'someone');
+}
 
-function renderInline(text: string, key: string): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  let last = 0;
-  let n = 0;
-  for (const m of text.matchAll(INLINE)) {
-    const token = m[0];
-    if (m.index! > last) nodes.push(text.slice(last, m.index));
-    const k = `${key}-${n++}`;
-    if (token.startsWith('`'))
-      nodes.push(
-        <code key={k} className="rounded-md bg-raised px-1.5 py-0.5 font-mono text-[13px]">
-          {token.slice(1, -1)}
-        </code>,
-      );
-    else if (token.startsWith('**')) nodes.push(<strong key={k}>{token.slice(2, -2)}</strong>);
-    else if (token.startsWith('~~')) nodes.push(<s key={k}>{token.slice(2, -2)}</s>);
-    else if (token.startsWith('*')) nodes.push(<em key={k}>{token.slice(1, -1)}</em>);
-    else
-      nodes.push(
-        <a
-          key={k}
-          className="font-semibold text-accent underline-offset-2 hover:underline"
-          href={token}
-          onClick={(e) => {
-            e.preventDefault();
-            openLink(token);
-          }}
-        >
-          {token}
-        </a>,
-      );
-    last = m.index! + token.length;
-  }
-  if (last < text.length) nodes.push(text.slice(last));
-  return nodes;
+/** What clicking an invite link does (set by the app: ask to join). */
+let onInviteLink: ((code: string) => void) | undefined;
+export function setInviteLinkHandler(fn: (code: string) => void) {
+  onInviteLink = fn;
+}
+
+function Mention({ userId, me }: { userId: string; me: boolean }) {
+  const name = useCroc((s) => s.profiles[userId]?.username ?? 'someone');
+  return (
+    <button
+      className={cx(
+        'rounded-md px-1 font-semibold',
+        me ? 'bg-accent text-on-accent' : 'bg-accent-soft text-accent hover:underline',
+      )}
+      onClick={() => openModal({ kind: 'profile', userId })}
+    >
+      @{name}
+    </button>
+  );
 }
 
 const PALETTE = [
@@ -132,7 +152,8 @@ export async function imageToDataUrl(file: File, size = 256): Promise<string> {
 }
 
 export async function copyText(text: string) {
-  await navigator.clipboard.writeText(text).catch(() => {});
+  if (desktop) await desktop.app.copyText(text);
+  else await navigator.clipboard.writeText(text).catch(() => {});
 }
 
 /** Human label for a push-to-talk binding (a KeyboardEvent.code or Mouse4/Mouse5). */

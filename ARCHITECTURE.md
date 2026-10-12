@@ -206,6 +206,14 @@ instead of waiting for WebRTC's 30 s. The chat header and call dock open
 these details; Settings → Debug shows every session live with its WebRTC
 numbers, the network check as a checklist, and the client log.
 
+**Calls.** Each member tells the host's relay its mute state, whether it is
+in the call (a DM's text session isn't) and its round trip to the host,
+which it measures with the relay's ping every 3 s; the relay passes that on
+to everyone, so rooms and calls show each member's latency. A call is live
+once connected and, in a DM, once the other side is in it; hanging up sends
+an end signal, and a DM call also ends when the other side leaves it or
+stays gone for 20 s.
+
 ## 5. Host election and failover
 
 Members report `HostCaps` when joining: whether they can and may host (desktop

@@ -204,6 +204,12 @@ describe('HostRelay', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(c.received.length).toBe(cCount);
 
+    // Whether a member is in the call, and its latency to the host, reach everyone.
+    c.dc.send(JSON.stringify({ t: 'state', muted: false, deafened: true, voice: true, rtt: 42 }));
+    await waitFor(() =>
+      b.inbox.some((m) => m.t === 'peer_state' && m.peer.voice === true && m.peer.rtt === 42),
+    );
+
     // Leaving members say goodbye through signalling (crashes are caught by ICE consent checks).
     await relay.handleSignal(P(c.identity), { type: 'bye', epoch: 1, dir: 'toRelay' });
     await c.pc.close();

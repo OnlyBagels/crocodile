@@ -288,7 +288,13 @@ export class HostRelay {
         this.send(peer, { t: 'pong', ts: msg.ts });
         return;
       case 'state': {
-        peer.state = { id: peer.id, muted: msg.muted, deafened: msg.deafened };
+        peer.state = {
+          id: peer.id,
+          muted: msg.muted,
+          deafened: msg.deafened,
+          ...(msg.voice !== undefined ? { voice: msg.voice } : {}),
+          ...(msg.rtt !== undefined ? { rtt: msg.rtt } : {}),
+        };
         if (msg.muted) this.lastLoud.delete(peer.id);
         for (const p of this.peers.values())
           if (p.ready) this.send(p, { t: 'peer_state', peer: peer.state });

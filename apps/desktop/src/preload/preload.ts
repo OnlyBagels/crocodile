@@ -79,6 +79,8 @@ const api = {
         cpuCores: number;
       }>,
     openExternal: (url: string) => ipcRenderer.invoke('app:open-external', url) as Promise<void>,
+    /** Copy text, focused or not (the web clipboard needs the window focused). */
+    copyText: (text: string) => ipcRenderer.invoke('app:copy-text', text) as Promise<void>,
     setBadge: (count: number) => ipcRenderer.invoke('app:badge', count) as Promise<void>,
     takeDeepLink: () => ipcRenderer.invoke('app:take-deeplink') as Promise<string | null>,
     onDeepLink: (fn: (url: string) => void) => {

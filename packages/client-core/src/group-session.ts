@@ -108,6 +108,8 @@ export interface ConnectAttempt {
 
 /** Attempts kept per session. */
 const ATTEMPTS_KEPT = 8;
+/** How often a call measures its round trip to the host. */
+const PING_INTERVAL_MS = 3000;
 /** Renew a relay grant this long before it ends (the server extends grants in their last 10 minutes). */
 const RELAY_RENEW_BEFORE_MS = 5 * 60_000;
 /** How soon a failed renewal is tried again. */
@@ -151,6 +153,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   status: RelayStatus = 'idle';
   /** Peers connected to the relay, by peer id. */
   peers = new Map<string, PeerState>();
+  /** The host said hello on the current connection: `peers` is complete. */
+  welcomed = false;
   /** Speaking peers (peer ids). */
   speaking: string[] = [];
   /** Peer id occupying each of our speaker slots. */
@@ -249,6 +253,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
     clearTimeout(this.expiryTimer);
+    clearInterval(this.pingTimer);
     this.closeTransport();
     this.stopHosting();
     this.keyring.dispose();
@@ -422,6 +427,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.emit('update', undefined);
     });
     this.peers.clear();
+    this.welcomed = false;
     this.slots = [];
     this.speaking = [];
     this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
@@ -448,7 +454,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
           })
           .catch(() => {});
       for (const ms of [0, 1000, 3000, 10_000]) setTimeout(readRoute, ms);
-      t.send({ t: 'state', muted: this.voiceState.muted, deafened: this.voiceState.deafened });
+      this.rttMs = null;
+      this.sendState();
+      this.startPings(entry);
     });
     t.on('message', (msg) => {
       if (this.transport === entry) this.onRelayMessage(msg);
@@ -650,10 +658,48 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   voiceState = { muted: false, deafened: false };
+  /** Our round trip to the host, measured over the relay's data channel (ms). */
+  rttMs: number | null = null;
+  private sentRtt: number | null = null;
+  private pingTimer?: ReturnType<typeof setInterval>;
 
   setVoiceState(muted: boolean, deafened: boolean) {
     this.voiceState = { muted, deafened };
-    this.transport?.t.send({ t: 'state', muted, deafened });
+    this.sendState();
+  }
+
+  /** Tell the relay (and through it, everyone) our mute state, call presence and latency. */
+  private sendState() {
+    this.sentRtt = this.rttMs;
+    this.transport?.t.send({
+      t: 'state',
+      ...this.voiceState,
+      voice: this.isVoice,
+      ...(this.rttMs !== null ? { rtt: this.rttMs } : {}),
+    });
+  }
+
+  /** In calls, measure the round trip to the host every few seconds. */
+  private startPings(entry: NonNullable<GroupSession['transport']>) {
+    clearInterval(this.pingTimer);
+    if (!this.isVoice) return;
+    const ping = () => {
+      if (this.transport !== entry || this.left) return clearInterval(this.pingTimer);
+      entry.t.send({ t: 'ping', ts: Date.now() });
+    };
+    ping();
+    this.pingTimer = setInterval(ping, PING_INTERVAL_MS);
+    this.pingTimer.unref?.();
+  }
+
+  private onPong(ts: number) {
+    const rtt = Math.max(0, Date.now() - ts);
+    if (rtt > 60_000) return;
+    this.rttMs = rtt;
+    // Others only need to hear about a change they would notice.
+    if (this.sentRtt === null || Math.abs(rtt - this.sentRtt) >= Math.max(3, this.sentRtt * 0.1))
+      this.sendState();
+    this.emit('update', undefined);
   }
 
   async setMicTrack(track: MediaStreamTrack | null) {
@@ -667,6 +713,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private onRelayMessage(msg: RelayToClient) {
     switch (msg.t) {
       case 'hello':
+        this.welcomed = true;
         this.peers = new Map(msg.peers.map((p) => [p.id, p]));
         this.slots = new Array(msg.slots).fill(null);
         this.historyAsked.clear();
@@ -700,6 +747,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         void this.onEnvelope(msg.from, msg.d);
         return;
       case 'pong':
+        this.onPong(msg.ts);
         return;
     }
     this.emit('update', undefined);

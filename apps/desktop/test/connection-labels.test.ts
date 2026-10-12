@@ -20,6 +20,8 @@ const session = (over: Partial<SessionView>): SessionView => ({
   connectedAt: 1,
   attempts: [],
   networks: [],
+  inCall: [],
+  latency: {},
   ...over,
 });
 

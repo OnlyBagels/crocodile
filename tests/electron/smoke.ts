@@ -147,6 +147,61 @@ await b.page.waitForFunction(
   { timeout: 15_000 },
 );
 await shot(a.page, '06-chat');
+// Links open in the browser; an invite link becomes a card to join the space.
+await a.page
+  .getByPlaceholder('Message general')
+  .fill(`Docs at crocodilechat.com/docs and bring friends: ${inviteText}`);
+await a.page.keyboard.press('Enter');
+await b.app.evaluate(({ shell }) => {
+  const opened: string[] = [];
+  (globalThis as { opened?: string[] }).opened = opened;
+  shell.openExternal = async (url: string) => void opened.push(url);
+});
+await b.page.getByRole('link', { name: 'crocodilechat.com/docs' }).click();
+await b.page.waitForTimeout(300);
+const bobOpened = await b.app.evaluate(() => (globalThis as { opened?: string[] }).opened);
+if (JSON.stringify(bobOpened) !== JSON.stringify(['https://crocodilechat.com/docs']))
+  throw new Error(`a chat link opened ${JSON.stringify(bobOpened)}`);
+const card = b.page.getByLabel('Invite to The Swamp');
+await card.getByRole('button', { name: 'Open' }).waitFor({ timeout: 10_000 });
+await shot(b.page, '06b-links');
+// @mentions and emoji, from the keyboard; a mention of you stands out.
+const bobBox = b.page.getByPlaceholder('Message general');
+await bobBox.click();
+await bobBox.pressSequentially('@Al');
+await b.page.getByRole('option', { name: /Alice/ }).waitFor();
+await b.page.keyboard.press('Enter');
+await bobBox.pressSequentially('ship it :rock');
+await b.page.getByRole('listbox', { name: 'Emoji' }).waitFor();
+await shot(b.page, '06c-emoji-suggest');
+await b.page.keyboard.press('Enter');
+if ((await bobBox.inputValue()) !== '@Alice ship it 🚀 ')
+  throw new Error(`the composer holds ${JSON.stringify(await bobBox.inputValue())}`);
+await b.page.keyboard.press('Enter');
+await a.page.getByRole('button', { name: '@Alice' }).waitFor({ timeout: 10_000 });
+await a.page.getByText('ship it 🚀').waitFor();
+await b.page.getByRole('button', { name: 'Emoji', exact: true }).click();
+await b.page.getByRole('dialog', { name: 'Emoji picker' }).waitFor();
+await shot(b.page, '06d-emoji-picker');
+await b.page.getByRole('button', { name: 'crocodile' }).click();
+if ((await bobBox.inputValue()) !== '🐊') throw new Error('the picker did not insert the emoji');
+await b.page.keyboard.press('Escape');
+await bobBox.fill('');
+await shot(a.page, '06e-mentioned');
+// Right-click a message: its actions, including copying it (mentions as names).
+await a.page.getByText('ship it 🚀').click({ button: 'right' });
+const messageMenu = a.page.getByRole('menu');
+await messageMenu.getByRole('menuitem', { name: 'Reply' }).waitFor();
+await shot(a.page, '06f-message-menu');
+// Bob's window has the focus: copying from Alice's must work all the same.
+await b.page.bringToFront();
+await messageMenu.getByRole('menuitem', { name: 'Copy text' }).click();
+let copied = '';
+for (let i = 0; i < 20 && copied !== '@Alice ship it 🚀'; i++) {
+  await a.page.waitForTimeout(100);
+  copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
+}
+if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(copied)}`);
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));
@@ -186,18 +241,29 @@ await shot(a.page, '10-friend-request');
 await a.page.getByRole('button', { name: 'Accept' }).click();
 await a.page.getByRole('button', { name: /^All/ }).click();
 await a.page.getByRole('button', { name: 'Call', exact: true }).click();
-await a.page.getByText('Ringing…').waitFor({ timeout: 15_000 });
+// The call bar and the DM's call stage both say so.
+await a.page.getByText('Ringing…').first().waitFor({ timeout: 15_000 });
 await b.page.getByText('is calling you').waitFor({ timeout: 15_000 });
 await a.page.waitForTimeout(1500);
-if (!(await a.page.getByText('Ringing…').isVisible()))
+if (!(await a.page.getByText('Ringing…').first().isVisible()))
   throw new Error('the call looks answered before the friend picked up');
 await shot(a.page, '10b-ringing');
 await b.page.getByRole('button', { name: 'Accept' }).click();
-await a.page.getByText('Ringing…').waitFor({ state: 'detached', timeout: 15_000 });
+await a.page.waitForFunction(() => !document.body.innerText.includes('Ringing…'), undefined, {
+  timeout: 15_000,
+});
 await a.page.waitForFunction(() => /\b0:0\d\b/.test(document.body.innerText), undefined, {
   timeout: 15_000,
 });
+// Bob answered from the DM: the call is on a stage above the chat, like a room.
+const stage = b.page.getByRole('region', { name: 'Call' });
+await stage.getByRole('button', { name: 'Hang up' }).waitFor({ timeout: 10_000 });
+await b.page.waitForTimeout(3500);
+await shot(b.page, '10c-dm-call');
+// Hanging up ends the call for the other side too, instead of leaving it "on".
 await a.page.getByRole('button', { name: 'Leave call' }).click();
+await b.page.getByText('Call ended').waitFor({ timeout: 10_000 });
+await b.page.getByRole('button', { name: 'Leave call' }).waitFor({ state: 'detached' });
 
 // Command palette + settings.
 // The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.
@@ -216,6 +282,10 @@ await a.page.getByLabel('Account').click();
 await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
+await a.page.getByRole('button', { name: 'Privacy & alerts' }).click();
+await a.page.getByRole('switch', { name: 'Sounds' }).waitFor();
+await a.page.getByLabel('Sound volume').waitFor();
+await shot(a.page, '12b-settings-sounds');
 await a.page.getByRole('button', { name: 'Network' }).click();
 // The network check ran on connecting, and can run again.
 const test = a.page.getByRole('region', { name: 'Connection test' });

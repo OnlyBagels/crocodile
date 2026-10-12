@@ -777,6 +777,86 @@ describe('calls', () => {
     expect(Date.now() - started).toBeLessThan(3000);
   });
 
+  /** Alice and Bob, friends, both able to take calls. */
+  async function callers(opts: { bobCanHost?: boolean } = {}) {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: opts.bobCanHost ?? true }), 'bob');
+    alice.voiceEngine = silentVoice();
+    bob.voiceEngine = silentVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    return { alice, bob };
+  }
+
+  /** Alice calls, Bob answers, and the call is live on both sides. */
+  async function liveCall(opts: { bobCanHost?: boolean } = {}) {
+    const { alice, bob } = await callers(opts);
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings');
+    // Ringing is not talking: the call is on, but not live.
+    expect(alice.state.callLiveSince).toBeNull();
+    await bob.callDm(alice.userId);
+    await waitFor(
+      () => alice.state.callLiveSince && bob.state.callLiveSince,
+      12000,
+      'live on both sides',
+    );
+    const sid = alice.state.voiceSession!;
+    return { alice, bob, sid };
+  }
+
+  it('ends the call for the other side when one hangs up after answering', async () => {
+    for (const bobCanHost of [true, false]) {
+      const { alice, bob, sid } = await liveCall({ bobCanHost });
+      expect(alice.state.sessions[sid]!.inCall.sort()).toEqual([alice.userId, bob.userId].sort());
+      const started = Date.now();
+      await alice.leaveVoice();
+      await waitFor(() => !bob.state.voiceSession, 6000, 'ended for bob');
+      expect(Date.now() - started).toBeLessThan(3000);
+      expect(bob.state.callLiveSince).toBeNull();
+      expect(bob.state.errors).toContainEqual(
+        expect.objectContaining({ message: 'Call ended', kind: 'info' }),
+      );
+    }
+  });
+
+  it('ends the call when the other side leaves it, even if the hang-up was lost', async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Bob's app leaves the call without a word (the hang-up got lost).
+    await bob.leaveVoice({ quiet: true });
+    await waitFor(() => !alice.state.voiceSession, 6000, 'ended for alice');
+    // Bob is still in the conversation, just not in the call.
+    await waitFor(() => alice.state.sessions[sid]?.peers.includes(bob.userId), 8000, 'chat');
+    expect(alice.state.sessions[sid]!.inCall).toEqual([]);
+  });
+
+  it("stops the call's clock as soon as the other side is gone, while waiting for them", async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Alice's app goes away without hanging up (its hang-up never leaves).
+    (alice as unknown as { sendCallSignal: () => boolean }).sendCallSignal = () => false;
+    await alice.shutdown();
+    // Bob answered the call, but answering doesn't keep it live with nobody there.
+    await waitFor(() => !bob.state.callLiveSince, 6000, 'not live');
+    // Still in the call for a while, in case Alice comes back.
+    expect(bob.state.voiceSession).toBe(sid);
+  });
+
+  it('measures each call member’s latency to the host for everyone to see', async () => {
+    const { alice, bob, sid } = await liveCall();
+    await waitFor(
+      () => {
+        const l = alice.state.sessions[sid]?.latency ?? {};
+        return l[alice.userId] !== undefined && l[bob.userId] !== undefined;
+      },
+      8000,
+      'both latencies',
+    );
+  });
+
   it('stops ringing when the caller goes quiet without hanging up', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -794,6 +874,53 @@ describe('calls', () => {
     clearInterval((alice as unknown as { ringTimer: ReturnType<typeof setInterval> }).ringTimer);
     await waitFor(() => !bob.state.incomingCall, 12000, 'stops ringing for bob');
   }, 30_000);
+});
+
+describe('invites in chat', () => {
+  it('previews the space an invite leads to, before and after joining', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    const code = await alice.createInvite(spaceId);
+    expect(await bob.previewInvite(`croc://join/${code}`)).toEqual({
+      code,
+      spaceId,
+      name: 'Pond',
+      joined: false,
+      expired: false,
+    });
+    // Only seen, not joined: the space stays out of Bob's list.
+    expect(bob.state.spaces[spaceId]).toBeUndefined();
+    await bob.joinWithInvite(code);
+    expect((await bob.previewInvite(code))?.joined).toBe(true);
+    expect(await bob.previewInvite('croc://join/zzzzzzzzzz')).toBeNull();
+  });
+
+  it("doesn't trust a server's invite that the space's owner didn't sign", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    // A lying server answers for a code with an invite to Alice's space,
+    // signed by someone who may not make one.
+    const mallory = createIdentity();
+    const code = 'mmmmmmmmmm';
+    const forged = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const link = bob.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: { keys?: string[] }) =>
+      method === 'records.get' && params.keys?.[0] === recordKey.invite(code)
+        ? { records: [forged] }
+        : request(method as never, params as never)) as typeof link.request;
+    expect(await bob.previewInvite(code)).toBeNull();
+  });
 });
 
 describe('server list', () => {

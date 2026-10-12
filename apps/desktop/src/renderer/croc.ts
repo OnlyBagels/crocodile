@@ -10,6 +10,7 @@ import { StateStore } from '@crocodile/client-core';
 import { createPlatform, desktop, kv } from './platform';
 import FrameWorker from '@crocodile/client-core/frame-worker?worker';
 import type { UpdateStatus } from '../main/ipc-types';
+import { SoundPlayer, type SoundName } from './lib/sounds';
 
 export type View =
   | { kind: 'friends' }
@@ -61,6 +62,8 @@ export interface UiState {
   appVersion: string;
   /** In-app updates (the desktop main process does the work). */
   update: UpdateStatus;
+  /** Ringing, call and message sounds: on or off, and how loud (0–1). */
+  sounds: { enabled: boolean; volume: number };
 }
 
 export const ui = new StateStore<UiState>({
@@ -75,7 +78,25 @@ export const ui = new StateStore<UiState>({
   micLevel: -100,
   appVersion: '',
   update: { state: 'unsupported' },
+  sounds: { enabled: true, volume: 0.6 },
 });
+
+/** The app's sounds; see lib/sounds.ts. */
+export const sounds = new SoundPlayer();
+
+/** Play a sound, if sounds are on. */
+export function playSound(name: SoundName) {
+  const s = ui.get().sounds;
+  if (!s.enabled) return;
+  sounds.volume = s.volume;
+  sounds.play(name);
+}
+
+export async function saveSounds(patch: Partial<UiState['sounds']>) {
+  const next = { ...ui.get().sounds, ...patch };
+  ui.set({ sounds: next });
+  await kv.set('sounds', next);
+}
 
 let client: CrocodileClient;
 /** Server directories this app instance uses (shown in diagnostics). */
@@ -121,6 +142,9 @@ export async function bootClient(): Promise<CrocodileClient> {
   };
   ui.set({ appearance });
   applyAppearance(appearance);
+  ui.set({
+    sounds: { ...ui.get().sounds, ...((await kv.get<UiState['sounds']>('sounds')) ?? {}) },
+  });
   window
     .matchMedia('(prefers-color-scheme: dark)')
     .addEventListener('change', () => applyAppearance(ui.get().appearance));
