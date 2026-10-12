@@ -522,6 +522,34 @@ describe('connection help', () => {
   });
 });
 
+describe('strict networks', () => {
+  it('a message from behind a symmetric NAT gets through: the reachable side hosts', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // Nobody can reach a relay the strict side hosts; it can reach others.
+    net.unreachable.add(strict.userId);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.incoming.includes(strict.userId), 12000);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.friends.includes(open.userId), 12000, 'friends');
+    // The strict side starts the conversation (and so is elected first).
+    const dm = await strict.openDm(open.userId);
+    await strict.openChannel(dm);
+    await strict.sendMessage(dm, 'from behind a strict NAT');
+    // The open side gets the invite and opens the conversation.
+    await waitFor(() => open.state.dms.includes(strict.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await waitFor(
+      () => bodies(open, dm).includes('from behind a strict NAT'),
+      15000,
+      'the open side receives it',
+    );
+    expect(strict.state.sessions[dm]?.host).toBe(open.userId);
+  });
+});
+
 describe('relay windows', () => {
   /** Alice hosts a DM with Bob, who has the relay on and turned it on for the DM. */
   async function relayedDm(bobBlocked: boolean) {

@@ -50,10 +50,17 @@ export class FakeRelayNetwork {
 
   /** Users whose network allows no direct connections (only a TURN relay gets through). */
   readonly blocked = new Set<string>();
+  /**
+   * Users behind a symmetric NAT: they can connect out to others, but others
+   * can't reach them, so nobody else can connect to a relay they host.
+   */
+  readonly unreachable = new Set<string>();
 
-  blocksDirect(peerA: string, peerB: string) {
+  /** Whether `member` can't reach `host`'s relay directly. */
+  blocksDirect(member: string, host: string) {
     const user = (p: string) => p.split('.')[0]!;
-    return this.blocked.has(user(peerA)) || this.blocked.has(user(peerB));
+    if (this.blocked.has(user(member)) || this.blocked.has(user(host))) return true;
+    return user(member) !== user(host) && this.unreachable.has(user(host));
   }
 
   find(key: string) {
