@@ -25,6 +25,10 @@ build compatible clients and bots. Everything else is AGPL so improvements,
 including ones run as a service, come back to everyone. The maintainer also
 offers commercial licences; see [COMMERCIAL.md](COMMERCIAL.md).
 
+The [NOTICE](NOTICE) files (at the root and in `packages/protocol` and
+`packages/crypto`) carry the copyright and attribution that, under the Apache
+licence, must travel with every copy of the protocol and crypto code.
+
 ## Development
 
 See the [README](README.md#development). Before pushing, run what CI runs:

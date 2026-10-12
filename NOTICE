@@ -1,0 +1,8 @@
+Crocodile
+Copyright 2026 Paweł Walda (@pwalda)
+https://github.com/pwalda/crocodile
+
+packages/protocol and packages/crypto are licensed under the Apache License,
+Version 2.0 (see the LICENSE file in each). Everything else is licensed under
+the GNU Affero General Public License, version 3 only (see LICENSE). Commercial
+licences are available; see COMMERCIAL.md.
