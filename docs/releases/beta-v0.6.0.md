@@ -36,8 +36,21 @@ Ringing, people joining and leaving calls, hanging up, new messages and
 mentions. Turn them off or set their volume under _Settings → Privacy &
 alerts_. They're quiet while you're busy.
 
+**Space admins**
+
+A space's owner can now let others help run it: open _Space settings →
+People_ and switch on the members you trust. Admins can rename the space,
+change its icon, add and remove channels and rooms, invite people and ban
+members. Only the owner chooses admins or deletes the space. When the owner
+removes an admin, their later changes are refused and the invites they made
+stop working.
+
+**Updating**
+
 Everyone in a call should update. With an older version on the other end,
-calls still work, but the live state and latency show only partly.
+calls still work, but the live state and latency show only partly. Admins'
+changes need coordination servers that run this version; servers on older
+versions refuse them until they update.
 
 ## Download
 
