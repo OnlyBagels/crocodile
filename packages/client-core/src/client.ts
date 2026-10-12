@@ -193,10 +193,21 @@ export interface SessionView {
   /** Recent attempts to connect to the host, newest last (host as a user id). */
   attempts: ConnectAttempt[];
   /**
-   * The network type each member reported when joining, by user id: what
-   * host election goes by (a symmetric NAT makes a poor host).
+   * The network type each member device reported when joining: what host
+   * election goes by (a symmetric NAT makes a poor host). One entry per
+   * device, so two devices of one user each keep theirs.
    */
-  networks: Record<string, NatType>;
+  networks: MemberNetwork[];
+}
+
+/** One member device's network type, as the coordinator's election sees it. */
+export interface MemberNetwork {
+  user: string;
+  nat: NatType;
+  /** This device is the session's host. */
+  host: boolean;
+  /** This is our own device. */
+  self: boolean;
 }
 
 /** What the network allows for direct connections (see checkNetwork). */
@@ -1928,9 +1939,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       route: session.status === 'connected' ? session.route : null,
       trouble: session.trouble,
       connectedAt: session.connectedAt,
-      networks: Object.fromEntries(
-        (st?.members ?? []).map((m) => [peerIds.user(m.peer), m.caps.nat] as const),
-      ),
+      networks: (st?.members ?? []).map((m) => ({
+        user: peerIds.user(m.peer),
+        nat: m.caps.nat,
+        host: m.peer === st?.host,
+        self: m.peer === this.peer,
+      })),
       attempts: session.attempts.map((a) => ({
         ...a,
         host: peerIds.user(a.host),

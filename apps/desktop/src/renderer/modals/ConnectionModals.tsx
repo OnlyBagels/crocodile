@@ -103,11 +103,14 @@ export function ConnectionDetails({ session }: { session: SessionView }) {
             ? ` · relay through ${session.relay.server} until ${time(session.relay.expiresAt)}`
             : ''}
         </div>
-        {Object.keys(session.networks).length > 0 && (
+        {session.networks.length > 0 && (
           <div className="mt-0.5 text-xs text-muted" aria-label="Members' networks">
             Networks (what decides who hosts):{' '}
-            {Object.entries(session.networks)
-              .map(([u, nat]) => `${name(u)} ${NAT_TEXT[nat]}`)
+            {session.networks
+              .map(
+                (n) =>
+                  `${n.self ? 'you' : n.user === me ? 'your other device' : name(n.user)}${n.host ? ' (host)' : ''} ${NAT_TEXT[n.nat]}`,
+              )
               .join(' · ')}
           </div>
         )}

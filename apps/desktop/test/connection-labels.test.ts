@@ -19,7 +19,7 @@ const session = (over: Partial<SessionView>): SessionView => ({
   trouble: false,
   connectedAt: 1,
   attempts: [],
-  networks: {},
+  networks: [],
   ...over,
 });
 

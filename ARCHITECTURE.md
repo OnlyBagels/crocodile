@@ -227,8 +227,8 @@ Failover triggers:
 1. The host's coordinator connection drops, so it leaves the session and the
    backup is promoted (epoch + 1).
 2. Members fail to connect to the host twice, or once with no network path
-   at all, and report it. Once half of
-   them agree, the host is penalised for 60 s and the backup promoted.
+   at all from a member whose own network isn't symmetric, and report it.
+   Once half of them agree, the host is penalised for 60 s and the backup promoted.
 3. The owner server dies. Ownership moves (see above) and the host is kept.
 
 Every host change bumps the **epoch**; signals carry it, so stale offers and

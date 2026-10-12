@@ -571,6 +571,28 @@ describe('host reports', () => {
     expect(toStrict).toHaveLength(1);
     expect(toStrict[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
   });
+
+  it('tries twice before reporting when its own network is the limited one', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const open = await signUp(makeClient(net, coord, { nat: 'open' }), 'open');
+    // UDP blocked: the app reports symmetric, and the fault is likely its own.
+    const strict = await signUp(makeClient(net, coord, { nat: 'symmetric' }), 'strict');
+    net.blocked.add(strict.userId);
+    await open.addFriend(strict.userId);
+    await waitFor(() => strict.state.friends.incoming.includes(open.userId), 12000);
+    await strict.addFriend(open.userId);
+    await waitFor(() => open.state.friends.friends.includes(strict.userId), 12000, 'friends');
+    const dm = await open.openDm(strict.userId);
+    await waitFor(() => strict.state.dms.includes(open.userId), 12000, 'dm invite');
+    await open.openChannel(dm);
+    await strict.openChannel(dm);
+    // One report would have made the strict side host after its first try.
+    const toOpen = () =>
+      strict.state.sessions[dm]?.attempts.filter((a) => a.host === open.userId && a.end) ?? [];
+    await waitFor(() => toOpen().length >= 2, 12000, 'a second try');
+    expect(toOpen()[0]!.end).toMatchObject({ ok: false, stage: 'no-path' });
+  });
 });
 
 describe('relay windows', () => {
@@ -883,6 +905,16 @@ describe('multiple devices', () => {
       8000,
       'three peers',
     );
+    // Each device keeps its own network type, and knows which one is itself.
+    const networks = alice2.state.sessions[sid]!.networks;
+    expect(
+      networks
+        .filter((n) => n.user === alice1.userId)
+        .map((n) => n.nat)
+        .sort(),
+    ).toEqual(['cone', 'open']);
+    expect(networks.find((n) => n.self)?.nat).toBe('cone');
+    expect(networks.filter((n) => n.host)).toHaveLength(1);
     await bob.sendMessage(ch, 'to all your devices');
     await waitFor(
       () =>
