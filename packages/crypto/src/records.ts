@@ -163,9 +163,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (parts.length !== 2 || body.code !== parts[1]) return reject('invite key mismatch');
       const space = ctx.get(`space:${body.spaceId}`) as SignedRecord<'space'> | undefined;
       if (!space) return reject('unknown space', true);
-      // The owner and admins make invites; whoever made one may still revoke it.
-      const madeIt = existing && userIdFromKey(existing.author) === authorId;
-      if (!canManageSpace(space.body, authorId) && !(madeIt && body.revoked))
+      // The owner and current admins make and revoke invites. (A removed
+      // admin's invites stop working anyway; see 'member' below.)
+      if (!canManageSpace(space.body, authorId))
         return reject('only the space owner or an admin may create invites');
       if (existing && (existing.body as RecordBodies['invite']).spaceId !== body.spaceId) {
         return reject('invite code already used');

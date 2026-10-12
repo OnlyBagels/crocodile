@@ -899,6 +899,12 @@ describe('space admins', () => {
     const bobsInvite = await bob.createInvite(spaceId);
     await carol.joinWithInvite(bobsInvite);
     expect(carol.state.spaces[spaceId]?.name).toBe('Pond');
+    // Admins ban members, but not the owner.
+    await bob.banMember(spaceId, carol.userId);
+    await waitFor(() => !carol.state.spaces[spaceId], 8000, 'carol banned');
+    await bob.banMember(spaceId, alice.userId);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(alice.state.spaces[spaceId]).toBeDefined();
     // But choosing admins and deleting the space stay with the owner.
     await expect(bob.setAdmin(spaceId, carol.userId, true)).rejects.toThrow(/owner/);
     await expect(bob.deleteSpace(spaceId)).rejects.toThrow(/owner/);

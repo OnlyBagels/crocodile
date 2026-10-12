@@ -205,7 +205,8 @@ if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(c
 // The owner makes Bob an admin: he can then invite people and change the space.
 await a.page.getByRole('button', { name: 'Space menu' }).click();
 await a.page.getByText('Space settings').click();
-const admins = a.page.getByRole('region', { name: 'Admins' });
+const admins = a.page.getByRole('region', { name: 'People' });
+await admins.getByRole('button', { name: 'Ban' }).waitFor();
 await admins.getByRole('switch', { name: 'Bob is an admin' }).click();
 await admins.getByRole('switch', { name: 'Bob is an admin', checked: true }).waitFor();
 await shot(a.page, '06g-admins');

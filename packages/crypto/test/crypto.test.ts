@@ -314,12 +314,12 @@ describe('records', () => {
         ok: false,
         reason: 'invite was made by someone who is no longer an admin',
       });
-      // Bob may still revoke what he made.
-      const revoke = signRecord(bob, 'invite', recordKey.invite(code), {
-        ...invite.body,
-        revoked: true,
-      });
-      expect(validateRecord(revoke, ctx([without, invite])).ok).toBe(true);
+      // Revoking it is the owner's (or a current admin's) to do, checked
+      // with nothing but the space: no earlier invite needed.
+      const revoke = (who: typeof bob) =>
+        signRecord(who, 'invite', recordKey.invite(code), { ...invite.body, revoked: true });
+      expect(validateRecord(revoke(bob), ctx([without]))).toMatchObject({ ok: false });
+      expect(validateRecord(revoke(alice), ctx([without])).ok).toBe(true);
     });
   });
 });

@@ -260,7 +260,8 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const client = getClient();
   if (!space) return null;
   const isOwner = space.owner === me;
-  const others = space.members.filter((u) => u !== space.owner);
+  // Members, and admins who are no longer members (so their rights can still be taken back).
+  const people = [...new Set([...space.members, ...space.admins])].filter((u) => u !== space.owner);
   const save = async () => {
     await client.updateSpace(spaceId, (b) => ({
       ...b,
@@ -323,38 +324,57 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           </div>
         ))}
       </div>
-      {isOwner ? (
-        <section aria-label="Admins" className="mt-6">
-          <Label>Admins</Label>
-          <p className="mb-2 text-xs text-muted">
-            Admins can rename the space, change its icon and channels, invite people and ban
-            members. Only you can choose admins or delete the space.
+      <section aria-label="People" className="mt-6">
+        <Label>People</Label>
+        <p className="mb-2 text-xs text-muted">
+          {isOwner
+            ? 'Admins can rename the space, change its icon and channels, invite people and ban members. Only you choose admins or delete the space.'
+            : "You're an admin: you can change this space, invite people and ban members. The owner chooses admins and can delete the space."}
+        </p>
+        {people.length === 0 && (
+          <p className="rounded-xl bg-field px-3 py-2 text-sm text-muted">
+            Invite people first; then you can make them admins.
           </p>
-          {others.length === 0 && (
-            <p className="rounded-xl bg-field px-3 py-2 text-sm text-muted">
-              Invite people first; then you can make them admins.
-            </p>
-          )}
-          {others.map((u) => (
+        )}
+        {people.map((u) => {
+          const name = client.state.profiles[u]?.username ?? 'Member';
+          const admin = space.admins.includes(u);
+          const gone = !space.members.includes(u);
+          return (
             <div key={u} className="flex items-center gap-3 rounded-xl px-2 py-1.5 hover:bg-hover">
               <Avatar userId={u} size={28} />
               <UserName userId={u} className="flex-1 truncate text-sm font-semibold" />
-              <Toggle
-                checked={space.admins.includes(u)}
-                label={`${client.state.profiles[u]?.username ?? 'Member'} is an admin`}
-                onChange={(v) =>
-                  void client.setAdmin(spaceId, u, v).catch((e) => client.reportError(e.message))
-                }
-              />
+              {gone && <span className="text-xs text-muted">not a member</span>}
+              {!admin && !gone && (
+                <button
+                  className="text-xs text-danger hover:underline"
+                  onClick={() =>
+                    openModal({
+                      kind: 'confirm',
+                      title: `Ban ${name}?`,
+                      body: `${name} leaves ${space.name} and can't join again, even with an invite.`,
+                      action: 'Ban',
+                      danger: true,
+                      onConfirm: () => client.banMember(spaceId, u),
+                    })
+                  }
+                >
+                  Ban
+                </button>
+              )}
+              {isOwner && (
+                <Toggle
+                  checked={admin}
+                  label={`${name} is an admin`}
+                  onChange={(v) =>
+                    void client.setAdmin(spaceId, u, v).catch((e) => client.reportError(e.message))
+                  }
+                />
+              )}
             </div>
-          ))}
-        </section>
-      ) : (
-        <p className="mt-6 rounded-xl bg-accent-soft px-3 py-2 text-sm text-text-2">
-          You're an admin: you can change this space and invite people. The owner chooses admins and
-          can delete the space.
-        </p>
-      )}
+          );
+        })}
+      </section>
       {isOwner && (
         <div className="mt-6 rounded-2xl border border-danger/40 p-4">
           <div className="font-semibold text-text">Delete space</div>
