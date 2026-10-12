@@ -5,7 +5,7 @@ independent security audit yet.
 ## What's new in 0.7.0
 
 **Space admins.** A space's owner can now let others help run it: open
-_Space settings → Admins_ and switch on the members you trust. Admins can
+_Space settings → People_ and switch on the members you trust. Admins can
 rename the space, change its icon, add and remove channels and rooms,
 invite people and ban members. Only the owner chooses admins or deletes the
 space. When the owner removes an admin, their later changes are refused and
