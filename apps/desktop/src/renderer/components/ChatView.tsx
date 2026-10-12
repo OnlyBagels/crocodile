@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AtSign,
   Clock,
+  Copy,
   MailCheck,
   MessageSquareText,
   Pencil,
@@ -16,7 +17,8 @@ import {
 } from 'lucide-react';
 import type { MessageView } from '@crocodile/client-core';
 import { getClient, openModal, ui, useCroc, useUi } from '../croc';
-import { colorFor, dayOf, plain, renderMessage, timeOf } from '../lib/format';
+import { colorFor, copyText, dayOf, plain, renderMessage, timeOf } from '../lib/format';
+import { useContextMenu } from './ContextMenu';
 import { ROUTE_TEXT } from '../lib/network';
 import { Avatar, IconButton, UserName, cx } from './ui';
 import { DmCallStage } from './DmCallStage';
@@ -312,6 +314,37 @@ function Message({
   const right = bubbles && mine;
   const invites = useMemo(() => inviteCodes(m.body).slice(0, 3), [m.body]);
   const mentionsMe = useMemo(() => !!me && mentionsIn(m.body).includes(me), [m.body, me]);
+  const menu = useContextMenu();
+  const startEdit = () => {
+    setDraft(plain(m.body));
+    setEditing(m.id);
+  };
+  const onContextMenu = (e: React.MouseEvent) => {
+    if (isEditing) return;
+    // Selected text and links get the system menu (copy, copy link).
+    const selection = window.getSelection();
+    if ((selection && !selection.isCollapsed) || (e.target as HTMLElement).closest('a,input'))
+      return;
+    menu.open(e, [
+      { label: 'Reply', icon: <Reply size={15} />, onSelect: () => onReply(m) },
+      {
+        label: 'Copy text',
+        icon: <Copy size={15} />,
+        onSelect: () => void copyText(plain(m.body)),
+      },
+      ...(mine
+        ? [
+            { label: 'Edit', icon: <Pencil size={15} />, onSelect: startEdit },
+            {
+              label: 'Delete',
+              icon: <Trash2 size={15} />,
+              danger: true,
+              onSelect: () => void client.deleteMessage(channel, m.id),
+            },
+          ]
+        : []),
+    ]);
+  };
 
   const actions = !isEditing && (
     <div
@@ -324,14 +357,7 @@ function Message({
         <Reply size={14} />
       </IconButton>
       {mine && (
-        <IconButton
-          label="Edit"
-          size={28}
-          onClick={() => {
-            setDraft(plain(m.body));
-            setEditing(m.id);
-          }}
-        >
+        <IconButton label="Edit" size={28} onClick={startEdit}>
           <Pencil size={14} />
         </IconButton>
       )}
@@ -412,12 +438,14 @@ function Message({
   if (!bubbles) {
     return (
       <div
+        onContextMenu={onContextMenu}
         className={cx(
           'group flex gap-3 rounded-xl px-2 hover:bg-hover/50',
           first ? 'mt-3 py-1' : 'py-0.5',
           mentionsMe && 'bg-accent-soft hover:bg-accent-soft',
         )}
       >
+        {menu.element}
         <div className="w-9 shrink-0">{first && <Avatar userId={m.author} size={36} />}</div>
         <div className="min-w-0 flex-1">
           {first && (
@@ -439,12 +467,14 @@ function Message({
 
   return (
     <div
+      onContextMenu={onContextMenu}
       className={cx(
         'group flex items-end gap-2',
         right ? 'justify-end' : 'justify-start',
         first ? 'mt-3' : 'mt-0.5',
       )}
     >
+      {menu.element}
       {!right && (
         <div className="w-8 shrink-0">{last && <Avatar userId={m.author} size={32} />}</div>
       )}
@@ -517,11 +547,18 @@ function Composer({
     setPicker(false);
     ref.current?.focus();
   }, [channel]);
+  /** Where the caret goes once an insertion has rendered (before any more typing). */
+  const caret = useRef<number | null>(null);
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
     el.style.height = '0px';
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
+    if (caret.current !== null) {
+      el.focus();
+      el.setSelectionRange(caret.current, caret.current);
+      caret.current = null;
+    }
   }, [text]);
 
   const trigger = typedTrigger(text, cursor);
@@ -541,10 +578,7 @@ function Composer({
     const at = from + insert.length;
     setText(next);
     setCursor(at);
-    requestAnimationFrame(() => {
-      el?.focus();
-      el?.setSelectionRange(at, at);
-    });
+    caret.current = at;
   };
   const apply = (s: Suggestion) => {
     if (!trigger) return;

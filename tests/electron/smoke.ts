@@ -188,6 +188,14 @@ if ((await bobBox.inputValue()) !== '🐊') throw new Error('the picker did not 
 await b.page.keyboard.press('Escape');
 await bobBox.fill('');
 await shot(a.page, '06e-mentioned');
+// Right-click a message: its actions, including copying it (mentions as names).
+await a.page.getByText('ship it 🚀').click({ button: 'right' });
+const messageMenu = a.page.getByRole('menu');
+await messageMenu.getByRole('menuitem', { name: 'Reply' }).waitFor();
+await shot(a.page, '06f-message-menu');
+await messageMenu.getByRole('menuitem', { name: 'Copy text' }).click();
+const copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
+if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(copied)}`);
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));

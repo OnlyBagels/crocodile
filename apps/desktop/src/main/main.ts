@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   ipcMain,
   Menu,
   nativeImage,
@@ -15,6 +16,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { cpus } from 'node:os';
+import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
 import { SecureStore } from './secure-store';
 import { createUpdateEngine } from './update-engines';
@@ -249,6 +251,17 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
+  });
+  win.webContents.on('context-menu', (_e, params) => {
+    const contents = win?.webContents;
+    if (!contents) return;
+    const template = contextMenuTemplate(params, {
+      replaceMisspelling: (word) => contents.replaceMisspelling(word),
+      addToDictionary: (word) => contents.session.addWordToSpellCheckerDictionary(word),
+      openLink: (url) => void shell.openExternal(url),
+      copy: (text) => clipboard.writeText(text),
+    });
+    if (template.length) Menu.buildFromTemplate(template).popup({ window: win! });
   });
   win.webContents.on('will-navigate', (e, url) => {
     if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!)))
