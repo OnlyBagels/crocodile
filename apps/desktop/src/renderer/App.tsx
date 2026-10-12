@@ -546,6 +546,7 @@ function askToJoin(code: string) {
     .catch(() => null)
     .then((preview) => {
       if (preview?.joined) return openInvite(preview);
+      if (preview?.expired) return client.reportError('This invite has expired or was revoked.');
       closeModal();
       openModal({
         kind: 'confirm',

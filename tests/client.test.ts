@@ -834,6 +834,17 @@ describe('calls', () => {
     expect(alice.state.sessions[sid]!.inCall).toEqual([]);
   });
 
+  it("stops the call's clock as soon as the other side is gone, while waiting for them", async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Alice's app goes away without hanging up (its hang-up never leaves).
+    (alice as unknown as { sendCallSignal: () => boolean }).sendCallSignal = () => false;
+    await alice.shutdown();
+    // Bob answered the call, but answering doesn't keep it live with nobody there.
+    await waitFor(() => !bob.state.callLiveSince, 6000, 'not live');
+    // Still in the call for a while, in case Alice comes back.
+    expect(bob.state.voiceSession).toBe(sid);
+  });
+
   it('measures each call member’s latency to the host for everyone to see', async () => {
     const { alice, bob, sid } = await liveCall();
     await waitFor(
@@ -885,6 +896,30 @@ describe('invites in chat', () => {
     await bob.joinWithInvite(code);
     expect((await bob.previewInvite(code))?.joined).toBe(true);
     expect(await bob.previewInvite('croc://join/zzzzzzzzzz')).toBeNull();
+  });
+
+  it("doesn't trust a server's invite that the space's owner didn't sign", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    // A lying server answers for a code with an invite to Alice's space,
+    // signed by someone who may not make one.
+    const mallory = createIdentity();
+    const code = 'mmmmmmmmmm';
+    const forged = signRecord(mallory, 'invite', recordKey.invite(code), {
+      spaceId,
+      code,
+      expiresAt: null,
+    });
+    const link = bob.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: { keys?: string[] }) =>
+      method === 'records.get' && params.keys?.[0] === recordKey.invite(code)
+        ? { records: [forged] }
+        : request(method as never, params as never)) as typeof link.request;
+    expect(await bob.previewInvite(code)).toBeNull();
   });
 });
 

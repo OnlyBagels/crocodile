@@ -33,9 +33,6 @@ const INLINE = new RegExp(
   'gi',
 );
 
-/** Invite links as people paste them: croc://join/<code>. */
-export const INVITE_LINK = /croc:\/\/join\/([a-z2-7]{8,16})\b/gi;
-
 export function tokenize(text: string): Token[] {
   const out: Token[] = [];
   text.split('```').forEach((part, i) => {
@@ -65,14 +62,14 @@ function inline(text: string): Token[] {
   return out;
 }
 
-/** Invite codes in a message, each once, in order. */
+/** Invite codes a message shows as invites (not ones quoted in code), each once, in order. */
 export function inviteCodes(text: string): string[] {
-  return [...new Set([...text.matchAll(INVITE_LINK)].map((m) => m[1]!.toLowerCase()))];
+  return [...new Set(tokenize(text).flatMap((t) => (t.t === 'invite' ? [t.code] : [])))];
 }
 
-/** Users a message mentions. */
+/** Users a message mentions (not in code). */
 export function mentionsIn(text: string): string[] {
-  return [...new Set([...text.matchAll(/<@([a-z2-7]{8,64})>/gi)].map((m) => m[1]!.toLowerCase()))];
+  return [...new Set(tokenize(text).flatMap((t) => (t.t === 'mention' ? [t.user] : [])))];
 }
 
 /** The message as plain text: mentions as @names (copying, notifications, quotes). */

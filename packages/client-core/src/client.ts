@@ -1850,17 +1850,23 @@ export class CrocodileClient extends Emitter<ClientEvents> {
    */
   async previewInvite(input: string): Promise<InvitePreview | null> {
     const code = inviteCodeOf(input);
-    const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
-    const invite = res.records[0] as SignedRecord<'invite'> | undefined;
-    if (!invite || invite.kind !== 'invite' || invite.body.code !== code) return null;
-    const { spaceId } = invite.body;
-    let space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
-    if (!space) {
-      const got = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
-      // Checked like any record, but kept only in memory: we haven't joined.
+    const key = recordKey.invite(code);
+    const res = await this.link!.request('records.get', { keys: [key] });
+    const claimed = res.records[0] as SignedRecord<'invite'> | undefined;
+    if (!claimed || claimed.kind !== 'invite' || claimed.key !== key) return null;
+    // Only what the cache accepts counts: the invite must be signed by its
+    // space's owner (or an admin), so a server can't point it elsewhere.
+    // Checked like any record, but kept only in memory: we haven't joined.
+    const spaceKey = recordKey.space(claimed.body.spaceId);
+    if (!this.records.get(spaceKey)) {
+      const got = await this.link!.request('records.get', { keys: [spaceKey] });
       this.records.ingestAll(got.records, false);
-      space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     }
+    this.records.ingest(claimed, false);
+    const invite = this.records.get(key) as SignedRecord<'invite'> | undefined;
+    if (!invite || invite.body.code !== code) return null;
+    const { spaceId } = invite.body;
+    const space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
     if (!space || space.body.deleted) return null;
     const expired =
       !!invite.body.revoked ||
@@ -2044,6 +2050,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private callAnswered: string | null = null;
   /** Users who were in the DM call and dropped out of the conversation altogether. */
   private callMissing = new Set<string>();
+  /** Someone in this call has said they are in it (apps from 0.6 on do). */
+  private callPresenceSeen = false;
   private callLostTimer?: ReturnType<typeof setTimeout>;
 
   /**
@@ -2066,7 +2074,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.callOthers = others;
     for (const u of others) this.callMissing.delete(u);
 
-    const live = !isDm || others.size > 0 || this.callAnswered === view.id;
+    // Once the other side has said it is in the call, its presence decides;
+    // only an older app that never says counts as live on being answered.
+    if (others.size > 0) this.callPresenceSeen = true;
+    const live =
+      !isDm || others.size > 0 || (this.callAnswered === view.id && !this.callPresenceSeen);
     if (live && !this.state.callLiveSince) {
       this.store.set({ callLiveSince: Date.now() });
       this.emit('call', { sessionId: view.id, event: 'live' });
@@ -2745,6 +2757,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.callLostTimer = undefined;
     this.callOthers.clear();
     this.callMissing.clear();
+    this.callPresenceSeen = false;
     this.callAnswered = null;
     this.store.set({ voiceSession: null, callLiveSince: null });
     const session = this.sessions.get(sessionId);

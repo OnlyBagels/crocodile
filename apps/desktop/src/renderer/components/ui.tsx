@@ -339,7 +339,11 @@ export function Toasts() {
       {errors.map((e) => (
         <div
           key={e.id}
-          className="rise pointer-events-auto rounded-full bg-danger px-5 py-2.5 text-sm font-semibold text-white shadow-lg"
+          role={e.kind === 'info' ? 'status' : 'alert'}
+          className={cx(
+            'rise pointer-events-auto rounded-full px-5 py-2.5 text-sm font-semibold shadow-lg',
+            e.kind === 'info' ? 'island text-text' : 'bg-danger text-white',
+          )}
         >
           {e.message}
         </div>

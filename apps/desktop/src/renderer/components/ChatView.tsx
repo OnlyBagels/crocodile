@@ -542,9 +542,12 @@ function Composer({
   const [picker, setPicker] = useState(false);
   const lastTyping = useRef(0);
   const ref = useRef<HTMLTextAreaElement>(null);
+  /** People picked from the suggestions: they win over others with the same name. */
+  const chosen = useRef<Person[]>([]);
   useEffect(() => {
     setText('');
     setPicker(false);
+    chosen.current = [];
     ref.current?.focus();
   }, [channel]);
   /** Where the caret goes once an insertion has rendered (before any more typing). */
@@ -582,12 +585,16 @@ function Composer({
   };
   const apply = (s: Suggestion) => {
     if (!trigger) return;
+    if (s.kind === '@')
+      chosen.current = [...chosen.current.filter((p) => p.name !== s.person.name), s.person];
     insertAt(s.kind === '@' ? `@${s.person.name} ` : `${s.emoji} `, trigger.start);
     setPick(0);
   };
   const send = () => {
     if (!text.trim()) return;
-    const value = encodeMentions(replaceShortcodes(text), people);
+    const picked = encodeMentions(replaceShortcodes(text), chosen.current);
+    const value = encodeMentions(picked, people);
+    chosen.current = [];
     setText('');
     setCursor(0);
     void onSend(value).catch((err) => getClient().reportError(err.message));
