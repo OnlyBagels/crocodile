@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionView } from '@crocodile/client-core';
-import { callPhase, callStatusText, clock, latencyQuality } from '../src/renderer/lib/call';
+import {
+  callPhase,
+  callStatusText,
+  clock,
+  latencyQuality,
+  showDmCallStage,
+} from '../src/renderer/lib/call';
 
 const session = (over: Partial<SessionView>): SessionView => ({
   id: 'dm:a:b',
@@ -54,5 +60,16 @@ describe('call status', () => {
     expect(latencyQuality(40)).toBe('good');
     expect(latencyQuality(180)).toBe('fair');
     expect(latencyQuality(400)).toBe('poor');
+  });
+});
+
+describe('DM call stage', () => {
+  it("doesn't show a call while it only rings for us: the prompt answers it", () => {
+    expect(showDmCallStage({ joined: false, ringingIn: true, otherInCall: true })).toBe(false);
+    expect(showDmCallStage({ joined: false, ringingIn: true, otherInCall: false })).toBe(false);
+    // In it, or they're in it and it no longer rings for us (to join).
+    expect(showDmCallStage({ joined: true, ringingIn: false, otherInCall: false })).toBe(true);
+    expect(showDmCallStage({ joined: false, ringingIn: false, otherInCall: true })).toBe(true);
+    expect(showDmCallStage({ joined: false, ringingIn: false, otherInCall: false })).toBe(false);
   });
 });
