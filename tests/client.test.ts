@@ -893,8 +893,14 @@ describe('space admins', () => {
     await waitFor(() => bob.state.spaces[spaceId]?.admins.includes(bob.userId), 8000, 'admin');
     await bob.updateSpace(spaceId, (b) => ({ ...b, name: 'Pond' }));
     await bob.addChannel(spaceId, 'lily pads', 'text');
-    await waitFor(() => alice.state.spaces[spaceId]?.name === 'Pond', 8000, 'renamed');
-    expect(alice.state.spaces[spaceId]!.channels.map((c) => c.name)).toContain('lily-pads');
+    // Two changes, each its own update: Alice gets both, in either order.
+    await waitFor(
+      () =>
+        alice.state.spaces[spaceId]?.name === 'Pond' &&
+        alice.state.spaces[spaceId]?.channels.some((c) => c.name === 'lily-pads'),
+      8000,
+      'renamed, with the new channel',
+    );
     // Bob's invites work for others.
     const bobsInvite = await bob.createInvite(spaceId);
     await carol.joinWithInvite(bobsInvite);
