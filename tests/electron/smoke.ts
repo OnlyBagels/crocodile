@@ -264,7 +264,10 @@ if (!(await a.page.getByText('Ringing…').first().isVisible()))
   throw new Error('the call looks answered before the friend picked up');
 await shot(a.page, '10b-ringing');
 // One place to answer: the prompt. The conversation doesn't look like a call yet.
-if ((await b.page.getByRole('button', { name: 'Accept' }).count()) !== 1)
+if (
+  (await b.page.getByRole('button', { name: 'Accept' }).count()) !== 1 ||
+  (await b.page.getByRole('button', { name: 'Start a call' }).count()) !== 0
+)
   throw new Error('the call can be answered in more than one place');
 if (await b.page.getByRole('region', { name: 'Call' }).count())
   throw new Error("the conversation shows a call that hasn't started");

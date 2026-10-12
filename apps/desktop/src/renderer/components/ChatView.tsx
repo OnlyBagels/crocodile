@@ -43,6 +43,7 @@ export function ChatView({
   const sessionId = kind === 'dm' ? channel : getClient().sessionOfChannel(channel);
   const session = useCroc((s) => (sessionId ? s.sessions[sessionId] : undefined));
   const typing = useCroc((s) => s.typing[channel]);
+  const ringingIn = useCroc((s) => kind === 'dm' && s.incomingCall?.sessionId === channel);
   const showMembers = useUi((s) => s.showMembers);
   const density = useUi((s) => s.appearance.density);
   const me = useCroc((s) => s.me?.userId);
@@ -126,7 +127,8 @@ export function ChatView({
           </div>
         </div>
         <div className="ml-auto flex items-center gap-1">
-          {kind === 'dm' && otherUserId && (
+          {/* While it rings for us, the incoming-call prompt is where to answer. */}
+          {kind === 'dm' && otherUserId && !ringingIn && (
             <IconButton
               label="Start a call"
               onClick={() =>
