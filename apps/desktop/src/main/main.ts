@@ -182,6 +182,10 @@ ipcMain.handle('app:open-external', (_e, url: string) => {
   if (/^https?:\/\//i.test(url)) void shell.openExternal(url);
 });
 
+ipcMain.handle('app:copy-text', (_e, text: unknown) => {
+  if (typeof text === 'string' && text.length <= 100_000) clipboard.writeText(text);
+});
+
 ipcMain.handle('app:badge', (_e, count: number) => {
   if (process.platform === 'darwin') app.dock?.setBadge(count > 0 ? String(count) : '');
   else app.setBadgeCount(count);

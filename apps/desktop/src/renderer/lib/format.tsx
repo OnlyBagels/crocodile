@@ -152,7 +152,8 @@ export async function imageToDataUrl(file: File, size = 256): Promise<string> {
 }
 
 export async function copyText(text: string) {
-  await navigator.clipboard.writeText(text).catch(() => {});
+  if (desktop) await desktop.app.copyText(text);
+  else await navigator.clipboard.writeText(text).catch(() => {});
 }
 
 /** Human label for a push-to-talk binding (a KeyboardEvent.code or Mouse4/Mouse5). */

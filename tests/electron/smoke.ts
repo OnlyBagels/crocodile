@@ -193,8 +193,14 @@ await a.page.getByText('ship it 🚀').click({ button: 'right' });
 const messageMenu = a.page.getByRole('menu');
 await messageMenu.getByRole('menuitem', { name: 'Reply' }).waitFor();
 await shot(a.page, '06f-message-menu');
+// Bob's window has the focus: copying from Alice's must work all the same.
+await b.page.bringToFront();
 await messageMenu.getByRole('menuitem', { name: 'Copy text' }).click();
-const copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
+let copied = '';
+for (let i = 0; i < 20 && copied !== '@Alice ship it 🚀'; i++) {
+  await a.page.waitForTimeout(100);
+  copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
+}
 if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(copied)}`);
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
