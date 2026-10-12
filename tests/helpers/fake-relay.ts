@@ -112,15 +112,20 @@ class FakeRelay {
     return true;
   }
 
-  detach(userId: string) {
-    if (!this.peers.delete(userId)) return;
+  detach(t: FakeTransport) {
+    const userId = t.userId;
+    if (this.peers.get(userId)?.t !== t) return;
+    this.peers.delete(userId);
     for (const o of this.peers.values()) o.t.deliver({ t: 'peer_leave', peer: userId });
   }
 
-  route(from: string, msg: ClientToRelay) {
+  route(sender: FakeTransport, msg: ClientToRelay) {
+    // Like the real relay, a message belongs to the connection it came on:
+    // one from a connection since replaced (same device) goes nowhere.
+    const from = sender.userId;
+    const me = this.peers.get(from);
+    if (me?.t !== sender) return;
     if (msg.t === 'state') {
-      const me = this.peers.get(from);
-      if (!me) return;
       const { t: _, ...state } = msg;
       me.state = { id: from, ...state };
       for (const o of this.peers.values()) o.t.deliver({ t: 'peer_state', peer: me.state });
@@ -206,21 +211,21 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     if (size > MAX_MESSAGE_SIZE)
       throw new Error(`max-message-size exceeded: ${size} > ${MAX_MESSAGE_SIZE}`);
     const relay = this.relay!;
-    setTimeout(() => relay.route(this.userId, msg as ClientToRelay), 1);
+    setTimeout(() => relay.route(this, msg as ClientToRelay), 1);
     return true;
   }
 
   drop(reason: string) {
     if (this.closed) return;
     this.closed = true;
-    this.relay?.detach(this.userId);
+    this.relay?.detach(this);
     this.emit('failed', { reason });
   }
 
   close() {
     if (this.closed) return;
     this.closed = true;
-    this.relay?.detach(this.userId);
+    this.relay?.detach(this);
     this.emit('closed', undefined);
   }
 }

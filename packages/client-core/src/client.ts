@@ -2719,8 +2719,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     let session = this.sessions.get(sessionId);
     if (session && sessionId.startsWith('dm:') && !session.isVoice) {
       // Upgrade the DM's text-only session to one with audio.
-      await session.leave();
       this.sessions.delete(sessionId);
+      await session.leave();
       session = undefined;
     }
     session = session ?? this.ensureSession(sessionId);
@@ -2750,9 +2750,23 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const session = this.sessions.get(sessionId);
     this.voiceEngine?.stopSession(sessionId);
     if (sessionId.startsWith('dm:')) {
-      // Keep the DM open for text.
-      await session?.leave();
+      // Keep the DM open for text. The call's session goes first, so its
+      // last updates while it closes don't show us still in the call.
       this.sessions.delete(sessionId);
+      // Until the text session is up: out of the call, reconnecting.
+      this.store.set((st) => {
+        const v = st.sessions[sessionId];
+        if (!v) return {};
+        const view: SessionView = {
+          ...v,
+          status: 'connecting',
+          peers: [],
+          inCall: [],
+          latency: {},
+        };
+        return { sessions: { ...st.sessions, [sessionId]: view } };
+      });
+      await session?.leave();
       const s = this.ensureSession(sessionId);
       await s.join().catch(() => {});
     } else {
