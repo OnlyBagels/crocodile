@@ -2,7 +2,18 @@ import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
 import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
-import { closeModal, getClient, navigate, openModal, ui, useCroc, useUi } from './croc';
+import {
+  closeModal,
+  getClient,
+  navigate,
+  openModal,
+  playSound,
+  sounds,
+  ui,
+  useCroc,
+  useUi,
+} from './croc';
+import { messageSound } from './lib/sounds';
 import { desktop } from './platform';
 import { Onboarding } from './components/Onboarding';
 import { TopBar } from './components/TopBar';
@@ -44,6 +55,7 @@ export function App() {
 
 function Shell() {
   useGlobalBehaviours();
+  useSounds();
   const view = useUi((s) => s.view);
   const showMembers = useUi((s) => s.showMembers);
   const spaces = useCroc((s) => s.spaces);
@@ -383,6 +395,65 @@ function CallPrompts() {
     );
   }
   return null;
+}
+
+/** Ringing, call and message sounds. */
+function useSounds() {
+  const client = getClient();
+  const ringingIn = useCroc((s) => !!s.incomingCall);
+  const ringingOut = useCroc(
+    (s) => !!s.voiceSession && s.outgoingCall?.sessionId === s.voiceSession,
+  );
+  const enabled = useUi((s) => s.sounds.enabled);
+  const busy = useCroc((s) => s.settings.status === 'dnd');
+
+  // Rings repeat until answered, declined or given up.
+  useEffect(() => {
+    if (!enabled || !ringingIn || busy) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ring', 2000);
+  }, [enabled, ringingIn, busy]);
+  useEffect(() => {
+    if (!enabled || !ringingOut) return;
+    sounds.volume = ui.get().sounds.volume;
+    return sounds.loop('ringback', 3000);
+  }, [enabled, ringingOut]);
+
+  useEffect(() => {
+    const offMessage = client.on('message', ({ channel, message, mine, update }) => {
+      const s = client.state;
+      const sound = messageSound({
+        mine,
+        update,
+        mentionsMe: !!s.me && mentionsIn(message.body).includes(s.me.userId),
+        busy: s.settings.status === 'dnd',
+        watching: document.hasFocus() && s.activeChannel === channel,
+      });
+      if (sound) playSound(sound);
+    });
+    // Others coming and going in our call.
+    const offCall = client.on('call', ({ event }) => {
+      if (event === 'joined') playSound('join');
+      else if (event === 'left') playSound('leave');
+    });
+    // Our own: joining a call, leaving or being hung up on, muting.
+    let prev = client.state;
+    const offStore = client.store.subscribe(() => {
+      const s = client.state;
+      if (s.voiceSession !== prev.voiceSession) {
+        if (!prev.voiceSession) playSound('join');
+        else if (!s.voiceSession) playSound('hangup');
+      } else if (s.voiceSession && s.muted !== prev.muted) {
+        playSound(s.muted ? 'mute' : 'unmute');
+      }
+      prev = s;
+    });
+    return () => {
+      offMessage();
+      offCall();
+      offStore();
+    };
+  }, [client]);
 }
 
 /** Push-to-talk (in-window), notifications, unread badge and invite deep links. */

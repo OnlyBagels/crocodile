@@ -276,6 +276,10 @@ await a.page.getByLabel('Account').click();
 await a.page.getByText('Settings', { exact: true }).click();
 await a.page.getByRole('button', { name: 'Voice' }).click();
 await shot(a.page, '12-settings-voice');
+await a.page.getByRole('button', { name: 'Privacy & alerts' }).click();
+await a.page.getByRole('switch', { name: 'Sounds' }).waitFor();
+await a.page.getByLabel('Sound volume').waitFor();
+await shot(a.page, '12b-settings-sounds');
 await a.page.getByRole('button', { name: 'Network' }).click();
 // The network check ran on connecting, and can run again.
 const test = a.page.getByRole('region', { name: 'Connection test' });
