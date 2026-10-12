@@ -165,6 +165,29 @@ if (JSON.stringify(bobOpened) !== JSON.stringify(['https://crocodilechat.com/doc
 const card = b.page.getByLabel('Invite to The Swamp');
 await card.getByRole('button', { name: 'Open' }).waitFor({ timeout: 10_000 });
 await shot(b.page, '06b-links');
+// @mentions and emoji, from the keyboard; a mention of you stands out.
+const bobBox = b.page.getByPlaceholder('Message general');
+await bobBox.click();
+await bobBox.pressSequentially('@Al');
+await b.page.getByRole('option', { name: /Alice/ }).waitFor();
+await b.page.keyboard.press('Enter');
+await bobBox.pressSequentially('ship it :rock');
+await b.page.getByRole('listbox', { name: 'Emoji' }).waitFor();
+await shot(b.page, '06c-emoji-suggest');
+await b.page.keyboard.press('Enter');
+if ((await bobBox.inputValue()) !== '@Alice ship it 🚀 ')
+  throw new Error(`the composer holds ${JSON.stringify(await bobBox.inputValue())}`);
+await b.page.keyboard.press('Enter');
+await a.page.getByRole('button', { name: '@Alice' }).waitFor({ timeout: 10_000 });
+await a.page.getByText('ship it 🚀').waitFor();
+await b.page.getByRole('button', { name: 'Emoji', exact: true }).click();
+await b.page.getByRole('dialog', { name: 'Emoji picker' }).waitFor();
+await shot(b.page, '06d-emoji-picker');
+await b.page.getByRole('button', { name: 'crocodile' }).click();
+if ((await bobBox.inputValue()) !== '🐊') throw new Error('the picker did not insert the emoji');
+await b.page.keyboard.press('Escape');
+await bobBox.fill('');
+await shot(a.page, '06e-mentioned');
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));

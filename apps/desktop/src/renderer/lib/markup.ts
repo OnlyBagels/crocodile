@@ -79,3 +79,42 @@ export function mentionsIn(text: string): string[] {
 export function plainText(text: string, nameOf: (userId: string) => string): string {
   return text.replace(/<@([a-z2-7]{8,64})>/gi, (_, id: string) => `@${nameOf(id.toLowerCase())}`);
 }
+
+/**
+ * Mentions as typed ("@alice") to the form messages carry ("<@userId>"), for
+ * the people who can be mentioned here. A name two of them share stays text.
+ */
+export function encodeMentions(text: string, people: { id: string; name: string }[]): string {
+  const byName = new Map<string, string | null>();
+  for (const p of people) {
+    const key = p.name.toLowerCase();
+    byName.set(key, byName.has(key) && byName.get(key) !== p.id ? null : p.id);
+  }
+  // Longest names first, so "@ann marie" wins over "@ann".
+  const names = [...byName.keys()].sort((a, b) => b.length - a.length);
+  if (names.length === 0) return text;
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp(`(^|[^\\w@])@(${escaped.join('|')})(?![\\w-])`, 'gi');
+  return text.replace(re, (all, pre: string, name: string) => {
+    const id = byName.get(name.toLowerCase());
+    return id ? `${pre}<@${id}>` : all;
+  });
+}
+
+/**
+ * The "@que" or ":que" being typed just before the cursor, if any: what the
+ * composer suggests mentions or emoji for.
+ */
+export function typedTrigger(
+  text: string,
+  cursor: number,
+): { kind: '@' | ':'; query: string; start: number } | null {
+  const before = text.slice(0, cursor);
+  const m = before.match(/(?:^|\s)([@:])([\w+-]*)$/);
+  if (!m) return null;
+  const kind = m[1] as '@' | ':';
+  const query = m[2]!;
+  // ":" suggests from the second letter on, so "re: x" or times don't pop up a list.
+  if (kind === ':' && query.length < 2) return null;
+  return { kind, query, start: cursor - query.length - 1 };
+}

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { inviteCodes, mentionsIn, plainText, tokenize } from '../src/renderer/lib/markup';
+import {
+  encodeMentions,
+  inviteCodes,
+  mentionsIn,
+  plainText,
+  tokenize,
+  typedTrigger,
+} from '../src/renderer/lib/markup';
 
 const alice = 'aaaaaaaaaaaaaaaaaaaaaaaaaa';
 
@@ -66,5 +73,36 @@ describe('message markup', () => {
       { t: 'text', v: ' ' },
       { t: 'strike', v: 'no' },
     ]);
+  });
+});
+
+describe('composing mentions', () => {
+  const people = [
+    { id: 'a'.repeat(26), name: 'Ann' },
+    { id: 'b'.repeat(26), name: 'Ann Marie' },
+    { id: 'c'.repeat(26), name: 'Bob' },
+    { id: 'd'.repeat(26), name: 'bob' },
+  ];
+
+  it('turns @names into mentions, longest name first', () => {
+    expect(encodeMentions('@ann marie and @Ann, hi', people)).toBe(
+      `<@${'b'.repeat(26)}> and <@${'a'.repeat(26)}>, hi`,
+    );
+  });
+
+  it('leaves e-mail addresses, unknown and shared names alone', () => {
+    expect(encodeMentions('mail ann@ann.org, @carol, @bob', people)).toBe(
+      'mail ann@ann.org, @carol, @bob',
+    );
+  });
+
+  it('finds what is being typed before the cursor', () => {
+    expect(typedTrigger('hi @an', 6)).toEqual({ kind: '@', query: 'an', start: 3 });
+    expect(typedTrigger('@', 1)).toEqual({ kind: '@', query: '', start: 0 });
+    expect(typedTrigger('nice :thu', 9)).toEqual({ kind: ':', query: 'thu', start: 5 });
+    // Not for e-mail addresses, times or a lone colon.
+    expect(typedTrigger('ann@an', 6)).toBeNull();
+    expect(typedTrigger('at 10:30', 8)).toBeNull();
+    expect(typedTrigger('re: x', 5)).toBeNull();
   });
 });
