@@ -93,6 +93,11 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 
 ## Known gaps
 
+- Space admins: a removed admin's change made just before the removal
+  reaches a server can stay on that server until the owner's next change
+  (versions are last-writer-wins, and a record may be dated up to 5 minutes
+  ahead). Servers that already hold the removal refuse it.
+
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

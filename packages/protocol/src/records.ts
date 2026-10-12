@@ -179,10 +179,23 @@ export const SpaceBody = z.object({
   /** userId of the owner. spaceId = hash(owner key, nonce), so it cannot change. */
   owner: id,
   nonce: z.string().min(8).max(64),
+  /** Members who may change the space (not delete it, nor change who the admins are). */
   admins: z.array(id).max(100),
   bans: z.array(id).max(10_000),
   channels: z.array(Channel).max(LIMITS.channelsPerSpace),
   deleted: z.boolean().optional(),
+  /**
+   * The owner's signature on `admins`, with the owner's key: lets anyone
+   * check an admin's edit on its own. `at` grows each time the owner
+   * changes the list, so an edit under an older list is refused.
+   */
+  authority: z
+    .object({
+      ownerKey: z.string().max(64),
+      at: z.number().int().min(0),
+      sig: z.string().max(200),
+    })
+    .optional(),
 });
 export type SpaceBody = z.infer<typeof SpaceBody>;
 

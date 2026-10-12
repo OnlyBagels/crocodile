@@ -20,7 +20,10 @@ import {
   sealToDevice,
   userIdFromKey,
   signMailProof,
+  canManageSpace,
   signRecord,
+  signSpaceAuthority,
+  spaceAuthorityValid,
   spaceIdFor,
   userTag,
   verifyChatMessage,
@@ -164,6 +167,8 @@ export interface SpaceView {
   channels: Channel[];
   members: string[];
   bans: string[];
+  /** Members the owner lets change the space. */
+  admins: string[];
 }
 
 /** A session as the UI sees it: user ids (devices collapsed). */
@@ -1277,6 +1282,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           channels: body.channels,
           members: [...members],
           bans: body.bans,
+          admins: spaceAuthorityValid(id, body) ? body.admins : [],
         };
       }
       patch.spaces = spaces;
@@ -1764,17 +1770,63 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       .catch((err) => this.log('space session join failed', { err: String(err) }));
   }
 
-  private spaceBody(spaceId: string): SpaceBody {
-    const r = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+  /**
+   * Change a space, as its owner or one of its admins. The owner's version
+   * carries a fresh signature on the admin list whenever it changes; an
+   * admin's keeps the owner's list and signature as they are.
+   */
+  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
+    const key = recordKey.space(spaceId);
+    const r = this.records.get(key) as SignedRecord<'space'> | undefined;
     if (!r) throw new Error('unknown space');
-    if (r.body.owner !== this.userId) throw new Error('only the owner can change this space');
-    return structuredClone(r.body);
+    const me = this.userId;
+    if (
+      !canManageSpace(r.body, me) ||
+      (r.body.owner !== me && !spaceAuthorityValid(spaceId, r.body))
+    )
+      throw new Error('only the owner or an admin can change this space');
+    let body = mutate(structuredClone(r.body));
+    if (r.body.owner === me) {
+      const admins = [...new Set(body.admins)].filter((u) => u !== me);
+      const unchanged =
+        !!r.body.authority &&
+        admins.length === r.body.admins.length &&
+        admins.every((u, i) => u === r.body.admins[i]);
+      body = {
+        ...body,
+        admins,
+        authority: unchanged
+          ? r.body.authority
+          : signSpaceAuthority(
+              this.identity!,
+              spaceId,
+              admins,
+              Math.max(Date.now(), (r.body.authority?.at ?? 0) + 1),
+            ),
+      };
+    } else {
+      // What only the owner decides stays as the owner left it.
+      const { owner, nonce, admins, authority } = r.body;
+      body = { ...body, owner, nonce, admins, authority, deleted: r.body.deleted };
+      if (body.deleted === undefined) delete body.deleted;
+      body.bans = body.bans.filter((u) => u !== owner && !admins.includes(u));
+    }
+    await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
   }
 
-  async updateSpace(spaceId: string, mutate: (b: SpaceBody) => SpaceBody) {
-    const body = mutate(this.spaceBody(spaceId));
-    const key = recordKey.space(spaceId);
-    await this.putRecord(signRecord(this.identity!, 'space', key, body, this.nextVersion(key)));
+  private spaceOwner(spaceId: string): string | undefined {
+    return (this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined)?.body
+      .owner;
+  }
+
+  /** Let a member change the space, or stop them (owner only). */
+  async setAdmin(spaceId: string, userId: string, admin: boolean) {
+    if (this.spaceOwner(spaceId) !== this.userId)
+      throw new Error('only the owner can choose admins');
+    return this.updateSpace(spaceId, (b) => ({
+      ...b,
+      admins: admin ? [...b.admins, userId] : b.admins.filter((u) => u !== userId),
+    }));
   }
 
   addChannel(spaceId: string, name: string, kind: ChannelKind) {
@@ -1803,7 +1855,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return this.updateSpace(spaceId, (b) => ({ ...b, bans: [...new Set([...b.bans, userId])] }));
   }
 
-  deleteSpace(spaceId: string) {
+  async deleteSpace(spaceId: string) {
+    if (this.spaceOwner(spaceId) !== this.userId)
+      throw new Error('only the owner can delete a space');
     return this.updateSpace(spaceId, (b) => ({ ...b, deleted: true }));
   }
 

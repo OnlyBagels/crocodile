@@ -136,10 +136,26 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
     }
     case 'space': {
       const body = record.body as SpaceBody;
+      const spaceId = parts[1]!;
       if (parts.length !== 2) return reject('bad space key');
-      if (body.owner !== authorId) return reject('only the owner may write a space');
-      if (spaceIdFor(record.author, body.nonce) !== parts[1])
-        return reject('space id does not match owner');
+      const authority = body.authority;
+      if (authority && !spaceAuthorityValid(spaceId, body))
+        return reject('bad admin list signature');
+      // An edit made under an admin list the owner has since replaced.
+      const before = (existing?.body as SpaceBody | undefined)?.authority?.at ?? 0;
+      if (authority && authority.at < before) return reject('the admin list has changed');
+      if (body.owner === authorId) {
+        if (spaceIdFor(record.author, body.nonce) !== spaceId)
+          return reject('space id does not match owner');
+        return { ok: true, authorId };
+      }
+      // An admin: allowed by the owner's signed list, carried in the record itself.
+      if (!authority || !body.admins.includes(authorId))
+        return reject('only the owner or an admin may change a space');
+      if (body.deleted || (existing?.body as SpaceBody | undefined)?.deleted)
+        return reject('only the owner may delete a space');
+      if (body.bans.some((u) => u === body.owner || body.admins.includes(u)))
+        return reject('admins cannot ban the owner or other admins');
       return { ok: true, authorId };
     }
     case 'invite': {
@@ -147,7 +163,10 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (parts.length !== 2 || body.code !== parts[1]) return reject('invite key mismatch');
       const space = ctx.get(`space:${body.spaceId}`) as SignedRecord<'space'> | undefined;
       if (!space) return reject('unknown space', true);
-      if (space.body.owner !== authorId) return reject('only the space owner may create invites');
+      // The owner and current admins make and revoke invites. (A removed
+      // admin's invites stop working anyway; see 'member' below.)
+      if (!canManageSpace(space.body, authorId))
+        return reject('only the space owner or an admin may create invites');
       if (existing && (existing.body as RecordBodies['invite']).spaceId !== body.spaceId) {
         return reject('invite code already used');
       }
@@ -173,6 +192,9 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
       if (invite.body.spaceId !== body.spaceId) return reject('invite is for another space');
       if (ctx.fresh) {
         if (invite.body.revoked) return reject('invite was revoked');
+        // An invite from someone no longer an admin stops working.
+        if (!canManageSpace(space.body, userIdFromKey(invite.author)))
+          return reject('invite was made by someone who is no longer an admin');
         if (invite.body.expiresAt !== null && invite.body.expiresAt < ctx.now)
           return reject('invite expired');
       }
@@ -205,6 +227,47 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
 }
 
 const USER_ID = /^[a-z2-7]{26}$/;
+
+/** May change the space: its owner, or one of its admins. */
+export function canManageSpace(space: SpaceBody, userId: string): boolean {
+  return space.owner === userId || (!!space.authority && space.admins.includes(userId));
+}
+
+function authorityPayload(spaceId: string, admins: string[], at: number) {
+  return { spaceId, admins, at };
+}
+
+/** The owner's signature on a space's admin list, for its `authority`. */
+export function signSpaceAuthority(
+  owner: Identity,
+  spaceId: string,
+  admins: string[],
+  at: number,
+): NonNullable<SpaceBody['authority']> {
+  return {
+    ownerKey: owner.publicKey,
+    at,
+    sig: sign(owner, SIG_DOMAIN.spaceAdmins, authorityPayload(spaceId, admins, at)),
+  };
+}
+
+/** The space's `authority` is the owner's signature on exactly its admin list. */
+export function spaceAuthorityValid(spaceId: string, body: SpaceBody): boolean {
+  const a = body.authority;
+  if (!a) return false;
+  try {
+    if (userIdFromKey(a.ownerKey) !== body.owner) return false;
+    if (spaceIdFor(a.ownerKey, body.nonce) !== spaceId) return false;
+    return verifyPayload(
+      a.ownerKey,
+      SIG_DOMAIN.spaceAdmins,
+      authorityPayload(spaceId, body.admins, a.at),
+      a.sig,
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** True if the user currently belongs to the space (owner or active, non-banned member). */
 export function isSpaceMember(lookup: RecordLookup, spaceId: string, userId: string): boolean {
