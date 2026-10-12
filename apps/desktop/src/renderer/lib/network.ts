@@ -10,7 +10,7 @@ export const NETWORK_TEXT: Record<NetworkVerdict, { title: string; detail: strin
   limited: {
     title: 'Direct connections are limited',
     detail:
-      'Your network gives every connection a different address (common on mobile hotspots and some office, school and carrier networks). Connecting to people on similar networks may fail. With the relay on, those connections go through a coordination server instead, still end-to-end encrypted.',
+      'Your router gives every destination a different port (common on mobile hotspots and some office, school and carrier networks). Direct connections still work with most people, but not with someone whose network is limited too. With the relay on, those connections go through a coordination server instead, still end-to-end encrypted.',
   },
   blocked: {
     title: 'Direct connections are blocked',

@@ -25,7 +25,8 @@ enforced by your own apps. They pass on signalling (SDP and
 ICE candidates), which includes IP addresses. They never receive message or
 voice content, except that a user who turned on the **opt-in relay** sends
 their already end-to-end encrypted media through one; that server then also
-sees packet sizes and timing, for at most an hour at a time. Users who turn
+sees packet sizes and timing, in windows of up to an hour that the app
+renews only while the connection still needs the relay. Users who turn
 on the **mailbox** let their server hold direct messages for offline friends
 as boxes sealed to the friend's devices; the server sees sender, recipient,
 size and time, keeps them at most 7 days, and cannot read them.
@@ -62,7 +63,7 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 | Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content. |
 | Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                               |
 | Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
-| Relay operator (opt-in relay)      | See relayed packet sizes and timing for up to an hour.                                 | Read or alter content.                                                                                                                                                       |
+| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                       |
 | Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
 | Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
 | Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |

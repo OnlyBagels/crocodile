@@ -82,9 +82,13 @@ on "Relay through a coordination server", your server can relay their
 already end-to-end encrypted media (TURN). Apps reach the relay on the STUN
 UDP port; the other end of each relayed connection gets its own UDP port,
 from `--relay-ports` if you set it. Behind a firewall or Docker, set a range
-and open it (four ports per relay user is plenty: 49160-49259 covers the
-default 25 users), or relayed connections never get through. Each
-grant lasts at most one hour, `--relay-max-users` caps how many people use
+and open it, or relayed connections never get through. About four ports per
+relay user covers typical use (a chat, a DM and a call), so 49160-49259 suits
+the default 25 users. A user may hold up to eight relayed connections; when
+the range is full, a user's newest connection takes the port of their own
+oldest, so stale ones never lock anyone out. Each
+grant lasts at most one hour (apps renew it while their connection still
+goes through the relay), `--relay-max-users` caps how many people use
 it at once, and each allocation is rate-limited (about 100 kbit/s of voice
 per person). Your server only ever sees ciphertext. Turn it off with
 `--relay off` if bandwidth is scarce. The desktop app's built-in server

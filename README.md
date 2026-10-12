@@ -16,7 +16,7 @@ the people in the conversation. Servers never see them.
   typing a short code.
 - **Works on strict networks too.** If a direct connection is impossible you
   can opt in to relaying your (still encrypted) traffic through a volunteer
-  server, an hour at a time.
+  server, only while a direct connection is impossible.
 - **Messages wait for offline friends.** Your device keeps them until you're
   both online; optionally a server holds them sealed for up to a few days.
 - **Community-run coordination.** Volunteer coordination servers introduce

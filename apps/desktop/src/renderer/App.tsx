@@ -1,3 +1,4 @@
+import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
 import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
@@ -210,6 +211,8 @@ function Modals() {
       return <LinkDeviceModal />;
     case 'confirm':
       return <ConfirmModal {...modal} />;
+    case 'connection':
+      return <ConnectionModal sessionId={modal.sessionId} />;
   }
 }
 
@@ -281,9 +284,16 @@ function CallPrompts() {
         <p className="mt-2 text-sm text-muted">
           Your network or theirs blocks a direct connection. Relay through a coordination server?
           Voice and messages stay end-to-end encrypted; the server sees only their size and timing,
-          for up to an hour at a time.
+          and only while a direct connection doesn't work.
         </p>
         <div className="mt-4 flex justify-end gap-2">
+          <Button
+            variant="ghost"
+            className="mr-auto"
+            onClick={() => openModal({ kind: 'connection', sessionId: trouble.sessionId })}
+          >
+            Details
+          </Button>
           <Button variant="ghost" onClick={() => client.dismissConnectionTrouble()}>
             Not now
           </Button>
@@ -296,17 +306,17 @@ function CallPrompts() {
     return (
       <div className="island rise fixed right-5 top-20 z-[55] w-96 rounded-3xl p-5">
         <div className="flex items-center gap-2 font-bold">
-          <Server size={18} className="text-warn" /> Relay hour is over
+          <Server size={18} className="text-warn" /> The relay stopped
         </div>
         <p className="mt-2 text-sm text-muted">
           Your connection went through a volunteer coordination server because no direct path
-          worked. Relays are limited to an hour at a time. Continue for another hour?
+          worked, and the server ended it ({relayEnded.reason}). Connect through the relay again?
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => client.dismissRelayNotice()}>
             Not now
           </Button>
-          <Button onClick={() => void client.extendRelay(relayEnded.sessionId)}>Continue</Button>
+          <Button onClick={() => void client.extendRelay(relayEnded.sessionId)}>Reconnect</Button>
         </div>
       </div>
     );

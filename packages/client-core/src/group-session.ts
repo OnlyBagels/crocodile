@@ -20,8 +20,11 @@ import { GroupKeyring } from './keyring';
 import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
 import {
   RelayLink,
+  type ConnectStep,
   type ConnectionRoute,
+  type FailStage,
   type FrameCryptoHooks,
+  type LinkStats,
   type RelayLinkEvents,
   type RelayLinkOptions,
 } from './relay-link';
@@ -84,7 +87,31 @@ export interface RelayTransport extends Emitter<RelayLinkEvents> {
   setMicTrack?(track: MediaStreamTrack | null): Promise<void>;
   /** How the connection travels once it is up. */
   route?(): Promise<ConnectionRoute | null>;
+  /** Live WebRTC numbers (debug panel). */
+  stats?(): Promise<LinkStats | null>;
 }
+
+/** One try at connecting to the host, for showing where connections fail. */
+export interface ConnectAttempt {
+  startedAt: number;
+  /** Host peer id. */
+  host: string;
+  /** The server relay was offered to ICE for this try. */
+  viaRelay: boolean;
+  steps: { step: ConnectStep; at: number }[];
+  /**
+   * How it ended: `ok` once it connected (and replaced by a `lost` failure
+   * if it later drops); absent while still trying.
+   */
+  end?: { at: number; ok: false; stage: FailStage; reason: string } | { at: number; ok: true };
+}
+
+/** Attempts kept per session. */
+const ATTEMPTS_KEPT = 8;
+/** Renew a relay grant this long before it ends (the server extends grants in their last 10 minutes). */
+const RELAY_RENEW_BEFORE_MS = 5 * 60_000;
+/** How soon a failed renewal is tried again. */
+const RELAY_RENEW_RETRY_MS = 30_000;
 
 export type TransportFactory = (
   opts: Omit<RelayLinkOptions, 'RTCPeerConnection'>,
@@ -135,13 +162,18 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   relayGrant: RelayGrant | null = null;
 
   private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
-  private transport?: { epoch: number; host: string; t: RelayTransport };
+  private transport?: { epoch: number; host: string; t: RelayTransport; attempt?: ConnectAttempt };
   private failures = 0;
   /** How the connection to the host travels, once known. */
   route: ConnectionRoute | null = null;
 
   /** Failed connection attempts since the last one that worked, whoever hosted. */
   private failedInARow = 0;
+  /** Recent connection attempts, newest last. */
+  attempts: ConnectAttempt[] = [];
+  /** When the current connection to the host opened. */
+  connectedAt: number | null = null;
+  private renewTimer?: ReturnType<typeof setTimeout>;
   /** Peer id of the host we last failed to reach. */
   unreachable: string | null = null;
 
@@ -215,6 +247,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (this.left) return;
     this.left = true;
     clearTimeout(this.retryTimer);
+    clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
     this.closeTransport();
     this.stopHosting();
     this.keyring.dispose();
@@ -372,8 +406,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
           .link()
           .request('signal.send', { to: state.host!, sessionId: this.sessionId, data }),
     });
-    const entry = { epoch: state.epoch, host: state.host, t };
+    const attempt: ConnectAttempt = {
+      startedAt: Date.now(),
+      host: state.host,
+      viaRelay: !!grant,
+      steps: [],
+    };
+    const entry = { epoch: state.epoch, host: state.host, t, attempt };
     this.transport = entry;
+    this.attempts = [...this.attempts, attempt].slice(-ATTEMPTS_KEPT);
+    this.connectedAt = null;
+    t.on('progress', ({ step }) => {
+      if (this.transport !== entry || attempt.steps.some((s) => s.step === step)) return;
+      attempt.steps.push({ step, at: Date.now() });
+      this.emit('update', undefined);
+    });
     this.peers.clear();
     this.slots = [];
     this.speaking = [];
@@ -382,6 +429,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.route = null;
     t.on('open', () => {
       if (this.transport !== entry) return;
+      if (!attempt.steps.some((s) => s.step === 'open'))
+        attempt.steps.push({ step: 'open', at: Date.now() });
+      attempt.end = { at: Date.now(), ok: true };
+      this.connectedAt = Date.now();
       this.failures = 0;
       this.failedInARow = 0;
       this.unreachable = null;
@@ -403,10 +454,31 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (this.transport === entry) this.onRelayMessage(msg);
     });
     t.on('track', (ev) => this.emit('track', ev));
-    t.on('failed', ({ reason }) => {
+    t.on('failed', ({ reason, stage }) => {
       if (this.transport !== entry) return;
       this.transport = undefined;
-      this.ctx.log('relay connection failed', { sessionId: this.sessionId, reason });
+      const reached = (step: ConnectStep) => attempt.steps.some((s) => s.step === step);
+      const where: FailStage =
+        stage ??
+        (this.connectedAt || reached('open')
+          ? 'lost'
+          : reached('path')
+            ? 'no-channel'
+            : reached('answer')
+              ? 'no-path'
+              : 'no-answer');
+      // An attempt that connected and was then lost keeps its steps: "open" at
+      // one time, "lost" at another says how long it lasted.
+      attempt.end = { at: Date.now(), ok: false, stage: where, reason };
+      const connectedFor = this.connectedAt ? Date.now() - this.connectedAt : 0;
+      this.connectedAt = null;
+      this.ctx.log('relay connection failed', {
+        sessionId: this.sessionId,
+        reason,
+        stage: where,
+        ...(connectedFor ? { connectedForS: Math.round(connectedFor / 1000) } : {}),
+        viaRelay: attempt.viaRelay,
+      });
       this.failures += 1;
       this.failedInARow += 1;
       this.unreachable = entry.host;
@@ -456,6 +528,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         server: this.relayGrant.server,
         until: this.relayGrant.expiresAt,
       });
+      this.scheduleRelayRenewal();
       this.emit('update', undefined);
       this.failures = 1;
       this.connectTransport();
@@ -467,17 +540,104 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
   }
 
-  /** The grant ended: go back to direct connections only. */
-  dropServerRelay() {
-    if (!this.relayGrant) return;
+  /** Whether the connection we have depends on the server relay. */
+  get dependsOnRelay() {
+    return this.status !== 'connected' || this.route === 'relay' || this.route === null;
+  }
+
+  /**
+   * Shortly before the grant ends: extend it if the connection still goes
+   * through the relay (the server keeps the relayed connection running), or
+   * let it go if ICE found a direct path after all.
+   */
+  private scheduleRelayRenewal() {
+    clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
+    const grant = this.relayGrant;
+    if (!grant) return;
+    const left = grant.expiresAt - Date.now();
+    this.renewTimer = setTimeout(
+      () => void this.renewRelay(grant),
+      Math.max(0, left - Math.min(RELAY_RENEW_BEFORE_MS, left / 2)),
+    );
+    // At its end the grant goes, whether or not the server's notice reaches
+    // us (it doesn't while our link is down): a stale grant would keep its
+    // dead credentials in every reconnect and block asking for a new one.
+    this.expiryTimer = setTimeout(
+      () => {
+        if (this.left || this.relayGrant !== grant) return;
+        this.ctx.log('relay grant ran out', { at: grant.expiresAt });
+        this.dropServerRelay();
+      },
+      Math.max(0, left),
+    );
+  }
+
+  private expiryTimer?: ReturnType<typeof setTimeout>;
+
+  private async renewRelay(grant: RelayGrant) {
+    if (this.left || this.relayGrant !== grant) return;
+    if (!this.dependsOnRelay) {
+      this.ctx.log('relay not needed any more: connected directly', { route: this.route });
+      clearTimeout(this.expiryTimer);
+      this.relayGrant = null;
+      this.emit('update', undefined);
+      return;
+    }
+    try {
+      const renewed = await this.ctx.relay.request(this.sessionId);
+      if (this.left || this.relayGrant !== grant) return;
+      this.relayGrant = renewed;
+      this.ctx.log('relay renewed', { until: renewed.expiresAt });
+      this.scheduleRelayRenewal();
+      this.emit('update', undefined);
+    } catch (err) {
+      // Try again while the grant lasts (the link may be down for a moment);
+      // if it runs out first, the expiry timer drops it.
+      const left = grant.expiresAt - Date.now();
+      this.ctx.log('relay renewal failed', { err: String(err), leftS: Math.round(left / 1000) });
+      if (this.left || this.relayGrant !== grant || left <= 0) return;
+      clearTimeout(this.renewTimer);
+      this.renewTimer = setTimeout(
+        () => void this.renewRelay(grant),
+        Math.min(RELAY_RENEW_RETRY_MS, left / 2),
+      );
+    }
+  }
+
+  /**
+   * The grant ended: go back to direct connections only. A connection that
+   * found a direct path keeps running; one that went through the relay is
+   * set up again. Returns whether the connection had to be interrupted.
+   */
+  dropServerRelay(): boolean {
+    if (!this.relayGrant) return false;
+    clearTimeout(this.renewTimer);
+    clearTimeout(this.expiryTimer);
+    const interrupted = !!this.transport && this.dependsOnRelay;
     this.relayGrant = null;
     this.emit('update', undefined);
-    if (this.transport) this.connectTransport();
+    if (interrupted) this.connectTransport();
+    return interrupted;
+  }
+
+  /** Live WebRTC numbers for the connection to the host, if any. */
+  async stats(): Promise<LinkStats | null> {
+    return (await this.transport?.t.stats?.().catch(() => null)) ?? null;
   }
 
   private closeTransport() {
     const t = this.transport;
     this.transport = undefined;
+    // An attempt still under way when we move on (another host, a new epoch,
+    // leaving) ends here; it must not show as "trying" forever.
+    if (t?.attempt && !t.attempt.end)
+      t.attempt.end = {
+        at: Date.now(),
+        ok: false,
+        stage: 'superseded',
+        reason: 'stopped: the session moved on (another host, or the session closed)',
+      };
     t?.t.close();
   }
 

@@ -86,16 +86,23 @@ export function ChatView({
           <h1 className="truncate text-[16px] font-bold">{title}</h1>
           <div className="flex items-center gap-1.5 text-xs text-muted">
             <ShieldCheck size={12} className="text-accent" />
-            {topic ? (
-              <span className="truncate">{topic}</span>
-            ) : (
-              <span>
-                End-to-end encrypted · {peers} peer{peers === 1 ? '' : 's'} connected
-                {session?.route && !session.iAmHost && peers > 0
-                  ? ` · ${ROUTE_TEXT[session.route]}`
-                  : ''}
-              </span>
+            {topic && (
+              <>
+                <span className="truncate">{topic}</span>
+                <span aria-hidden>·</span>
+              </>
             )}
+            <button
+              className="shrink-0 whitespace-nowrap hover:text-text hover:underline"
+              title="Connection details"
+              onClick={() => sessionId && openModal({ kind: 'connection', sessionId })}
+            >
+              {topic ? '' : 'End-to-end encrypted · '}
+              {peers} peer{peers === 1 ? '' : 's'} connected
+              {session?.route && !session.iAmHost && peers > 0
+                ? ` · ${ROUTE_TEXT[session.route]}`
+                : ''}
+            </button>
           </div>
         </div>
         <div className="ml-auto flex items-center gap-1">
@@ -122,8 +129,16 @@ export function ChatView({
       </header>
 
       {connection && (
-        <div className="border-b border-line bg-warn/10 px-5 py-1.5 text-xs font-medium text-warn">
+        <div className="flex items-center gap-2 border-b border-line bg-warn/10 px-5 py-1.5 text-xs font-medium text-warn">
           {connection}
+          {sessionId && (
+            <button
+              className="ml-auto underline hover:text-text"
+              onClick={() => openModal({ kind: 'connection', sessionId })}
+            >
+              Details
+            </button>
+          )}
         </div>
       )}
 

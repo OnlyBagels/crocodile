@@ -499,6 +499,11 @@ describe('connection help', () => {
     const trouble = await waitFor(() => bob.state.connectionTrouble, 12000, 'trouble noticed');
     expect(trouble).toEqual({ sessionId: dm, with: alice.userId });
     expect(bob.state.sessions[dm]!.trouble).toBe(true);
+    // Where it fails: Alice answers, but no network path works.
+    const failed = bob.state.sessions[dm]!.attempts.filter((a) => a.end).at(-1)!;
+    expect(failed).toMatchObject({ host: alice.userId, viaRelay: false });
+    expect(failed.end).toMatchObject({ ok: false, stage: 'no-path' });
+    expect(failed.steps.map((s) => s.step)).toEqual(['offer', 'answer']);
 
     await bob.useRelay(dm);
     expect(bob.state.settings.allowServerRelay).toBe(true);
@@ -506,10 +511,72 @@ describe('connection help', () => {
     expect(bob.state.sessions[dm]!.route).toBe('relay');
     expect(bob.state.sessions[dm]!.relay).not.toBeNull();
     expect(bob.state.connectionTrouble).toBeNull();
+    const relayed = bob.state.sessions[dm]!.attempts.at(-1)!;
+    expect(relayed).toMatchObject({ viaRelay: true, end: { ok: true } });
+    expect(relayed.steps.map((s) => s.step)).toEqual(['offer', 'answer', 'path', 'open']);
+    expect(bob.state.sessions[dm]!.connectedAt).toBeGreaterThan(0);
     await bob.sendMessage(dm, 'through the relay');
     await waitFor(() => bodies(alice, dm).includes('through the relay'), 12000, 'delivered');
     // Alice reached her own relay directly.
     expect(alice.state.sessions[dm]!.trouble).toBe(false);
+  });
+});
+
+describe('relay windows', () => {
+  /** Alice hosts a DM with Bob, who has the relay on and turned it on for the DM. */
+  async function relayedDm(bobBlocked: boolean) {
+    const coord = await server({ relay: { enabled: true, maxUsers: 5 }, stunPort: 0 });
+    // Short windows; the server extends grants asked for in their last minutes.
+    coord.turn!.limits.maxGrantMs = 3000;
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    if (bobBlocked) net.blocked.add(bob.userId);
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
+    await alice.openChannel(dm);
+    await bob.openChannel(dm);
+    await bob.useRelay(dm);
+    await waitFor(
+      () =>
+        bob.state.sessions[dm]?.status === 'connected' &&
+        bob.state.sessions[dm]?.relay &&
+        bob.state.sessions[dm]?.route,
+      12000,
+      'connected with the relay offered',
+    );
+    return { bob, dm };
+  }
+
+  it('renews the relay while the connection goes through it, without dropping the call', async () => {
+    const { bob, dm } = await relayedDm(true);
+    const view = () => bob.state.sessions[dm]!;
+    expect(view().route).toBe('relay');
+    const first = view().relay!.expiresAt;
+    const attempts = view().attempts.length;
+    // Past the first window's end.
+    await new Promise((r) => setTimeout(r, first - Date.now() + 700));
+    expect(view().relay!.expiresAt).toBeGreaterThan(first);
+    expect(view().status).toBe('connected');
+    expect(view().attempts).toHaveLength(attempts);
+    expect(bob.state.relayEnded).toBeNull();
+  });
+
+  it("lets the relay go when ICE found a direct path, and doesn't reconnect", async () => {
+    const { bob, dm } = await relayedDm(false);
+    const view = () => bob.state.sessions[dm]!;
+    expect(view().route).toBe('lan');
+    const first = view().relay!.expiresAt;
+    const attempts = view().attempts.length;
+    await waitFor(() => view().relay === null, 5000, 'relay let go');
+    // The server's window ends too; the direct connection carries on.
+    await new Promise((r) => setTimeout(r, first - Date.now() + 700));
+    expect(view().status).toBe('connected');
+    expect(view().attempts).toHaveLength(attempts);
+    expect(bob.state.relayEnded).toBeNull();
   });
 });
 

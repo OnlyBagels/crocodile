@@ -1,18 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import {
   createNetworkProber,
+  networkChecklist,
   networkVerdict,
   probeNetwork,
   routeFromStats,
 } from '@crocodile/client-core';
 
-type Gathered = { candidates: string[]; errors?: { address?: string; port?: number }[] };
+type Gathered = {
+  candidates: string[];
+  errors?: { address?: string; port?: number; url?: string }[];
+  /** Server URL each candidate came from, in order (null: not said). */
+  urls?: (string | null)[];
+  withDetails?: boolean;
+};
 
 /** A stand-in RTCPeerConnection: what gathering finds, given the STUN servers it was handed. */
 function fakePeerConnection(gather: (servers: string[]) => Gathered) {
   return class {
-    onicecandidate: ((ev: { candidate: { candidate: string } | null }) => void) | null = null;
-    onicecandidateerror: ((ev: { address?: string; port?: number }) => void) | null = null;
+    onicecandidate:
+      ((ev: { candidate: { candidate: string } | null; url?: string | null }) => void) | null =
+      null;
+    onicecandidateerror: ((ev: { address?: string; port?: number; url?: string }) => void) | null =
+      null;
     private servers: string[];
     constructor(config: { iceServers: { urls: string }[] }) {
       this.servers = config.iceServers.map((s) => s.urls);
@@ -23,7 +33,9 @@ function fakePeerConnection(gather: (servers: string[]) => Gathered) {
     }
     async setLocalDescription() {
       const found = gather(this.servers);
-      for (const c of found.candidates) this.onicecandidate?.({ candidate: { candidate: c } });
+      found.candidates.forEach((c, i) =>
+        this.onicecandidate?.({ candidate: { candidate: c }, url: found.urls?.[i] ?? null }),
+      );
       for (const e of found.errors ?? []) this.onicecandidateerror?.(e);
       this.onicecandidate?.({ candidate: null });
     }
@@ -37,11 +49,11 @@ const srflx = (ip: string, port: number) =>
 const STUN = ['stun:coord.example:7443', 'stun:coord.example:7444'];
 
 async function check(found: Gathered) {
-  const probe = await probeNetwork(
+  const { details, ...probe } = await probeNetwork(
     fakePeerConnection(() => found),
     STUN,
   );
-  return { probe, verdict: networkVerdict(probe) };
+  return { probe, verdict: networkVerdict(probe), ...(found.withDetails ? { details } : {}) };
 }
 
 describe('network check', () => {
@@ -180,6 +192,70 @@ describe('network check', () => {
     expect(gathered).toBe(2);
     await probe(true);
     expect(gathered).toBe(3);
+  });
+
+  it('records what each check found', async () => {
+    // Behind a symmetric NAT, both ports answered (one says so on its candidate).
+    const sym = await check({
+      candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001), srflx('203.0.113.9', 40777)],
+      urls: [null, STUN[0]!, STUN[1]!],
+      withDetails: true,
+    });
+    expect(sym.details).toEqual({
+      servers: [
+        { url: STUN[0], answered: true },
+        { url: STUN[1], answered: true },
+      ],
+      publicIps: ['203.0.113.9'],
+      ipv6: false,
+      complete: true,
+    });
+    // The second port is firewalled: only it fails, on our only socket.
+    const half = await check({
+      candidates: [host('10.0.0.2'), host('2001:db8::5', 50001), srflx('203.0.113.9', 40001)],
+      errors: [
+        { address: '10.0.0.2', port: 50000, url: STUN[1] },
+        { address: '2001:db8::5', port: 50001, url: STUN[1] },
+      ],
+      withDetails: true,
+    });
+    expect(half.details!.servers).toEqual([
+      { url: STUN[0], answered: true },
+      { url: STUN[1], answered: false },
+    ]);
+    expect(half.details!.ipv6).toBe(true);
+  });
+
+  it('explains the result as a checklist', async () => {
+    const statuses = (r: ReturnType<typeof networkChecklist>) =>
+      Object.fromEntries(r.items.map((i) => [i.id, i.status]));
+    const { details: sd, ...symmetric } = await probeNetwork(
+      fakePeerConnection(() => ({
+        candidates: [host('10.0.0.2'), srflx('203.0.113.9', 40001), srflx('203.0.113.9', 40777)],
+      })),
+      STUN,
+    );
+    const limited = networkChecklist({ ...symmetric, details: sd });
+    expect(statuses(limited)).toEqual({
+      udp: 'ok',
+      ports: 'ok',
+      address: 'ok',
+      mapping: 'warn',
+      ipv6: 'info',
+    });
+    expect(limited.items.find((i) => i.id === 'address')!.detail).toContain('203.0.113.9');
+    // Limited is not "can't connect": it says who it still works with.
+    expect(limited.reason).toMatch(/still work with most people/);
+
+    const blocked = networkChecklist({ nat: 'unknown', udp: false });
+    expect(statuses(blocked)).toMatchObject({ udp: 'fail', mapping: 'unknown' });
+    expect(blocked.reason).toMatch(/^Blocked/);
+    // A result without details (an older cached one) still gives the basics.
+    expect(networkChecklist({ nat: 'cone', udp: true }).items.map((i) => i.id)).toEqual([
+      'udp',
+      'address',
+      'mapping',
+    ]);
   });
 
   it('reads how a connection travels from WebRTC stats', () => {

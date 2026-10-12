@@ -224,6 +224,10 @@ await test.getByText(verdicts).waitFor({ timeout: 15_000 });
 await test.getByRole('button', { name: 'Test again' }).click();
 await test.getByRole('button', { name: 'Test again' }).waitFor({ timeout: 15_000 });
 await test.getByText(verdicts).waitFor({ timeout: 15_000 });
+// What the check looked at, one line each, and why it decided what it did.
+const checked = test.getByRole('list', { name: 'What was checked' });
+await checked.getByText('UDP reaches the coordination server').waitFor();
+await test.getByText(/^Result:/).waitFor();
 // Who runs the connected server, as it says.
 await a.page.getByRole('button', { name: 'https://example.org/privacy/' }).waitFor();
 // The public server list from the directory, with the connected server marked.
@@ -286,9 +290,26 @@ if (JSON.stringify(report.connection.directories) !== JSON.stringify([directory.
   throw new Error(`expected the test directory, got ${report.connection.directories}`);
 if (JSON.stringify(report).includes('This never touches a server'))
   throw new Error('diagnostics must not contain message content');
+if (!report.sessions.some((x: { attempts?: unknown[] }) => x.attempts?.length))
+  throw new Error('diagnostics must say how connections went');
+// Debug: every connection, live.
+await a.page.getByRole('button', { name: 'Debug' }).click();
+const debugSessions = a.page.getByRole('region', { name: 'Sessions' });
+await debugSessions.getByText('The Swamp (chat)').waitFor({ timeout: 10_000 });
+await a.page.getByRole('region', { name: 'Client log' }).getByLabel('Log lines').waitFor();
+await debugSessions.getByText('The Swamp (chat)').click();
+await debugSessions.getByRole('region', { name: 'Connection attempts' }).first().waitFor();
+await shot(a.page, '14e-debug');
 await a.page.getByRole('button', { name: 'Close settings' }).click();
 await a.page.getByRole('button', { name: 'The Swamp' }).click();
 await shot(a.page, '15-dark-chat');
+// Where a connection stands, step by step.
+await a.page.getByTitle('Connection details').first().click();
+const details = a.page.getByRole('dialog');
+await details.getByRole('region', { name: 'Connection attempts' }).waitFor();
+await shot(a.page, '15b-connection');
+await a.page.keyboard.press('Escape');
+await details.waitFor({ state: 'detached' });
 
 // Link a second device to Alice's account.
 const c = await launch('alice-laptop');

@@ -171,9 +171,15 @@ default), so the ecosystem does not depend on third-party STUN. Apps compare
 the public port both report: the same port means a cone NAT (good for
 hosting), different ports a symmetric one. The main port can act as a TURN relay (RFC 5766) for users who turned on "Relay through
 a coordination server" and whose direct connection failed. Grants use
-short-lived credentials, last at most one hour (the app asks before
-continuing), are capped per server (`--relay-max-users`, 25 by default, 10 in
-the desktop app) and rate-limited per allocation. The relayed packets are the
+short-lived credentials in windows of at most an hour. The app renews a grant
+shortly before it ends only while its connection still goes through the
+relay; if ICE found a direct path after all, it lets the grant lapse without
+touching the connection. The TURN server honours a renewed grant for
+allocations made under the old credentials, so a relayed call carries on.
+Grants are capped per server (`--relay-max-users`, 25 by default, 10 in the
+desktop app) and rate-limited per allocation; a user's newest allocation
+replaces their oldest past eight, so allocations left behind by dropped
+connections can't lock them out. The relayed packets are the
 same DTLS-SRTP-wrapped, end-to-end encrypted frames: the server sees only
 ciphertext, sizes and timing.
 
@@ -190,6 +196,16 @@ with the relay off, it names the person it couldn't reach and offers the
 relay for that connection. Once connected, the selected ICE candidate pair
 shows how the connection travels: same network, direct, or relayed.
 
+**Seeing where a connection fails.** Each connection to a host goes through
+four steps: the offer goes out through the coordination server, the host
+answers, ICE finds a network path, the encrypted channel opens. The app
+records each attempt's steps and, for a failure, the stage it stopped at
+(no answer, no path, no channel, lost later, host left, bad signature). A
+connection that stays "disconnected" for 8 s counts as lost, as on the host,
+instead of waiting for WebRTC's 30 s. The chat header and call dock open
+these details; Settings → Debug shows every session live with its WebRTC
+numbers, the network check as a checklist, and the client log.
+
 ## 5. Host election and failover
 
 Members report `HostCaps` when joining: whether they can and may host (desktop
@@ -199,7 +215,11 @@ CPU cores, battery, RTT. `coordinator/src/election.ts` scores members:
 - Open or cone NAT scores highest and symmetric NAT lowest; web and mobile
   clients never host.
 - The current host is kept while it is healthy (no flapping when a slightly
-  better peer joins).
+  better peer joins), except that a host behind a symmetric NAT hands over to
+  a member with an open or cone NAT. Whoever calls or opens a channel first
+  is elected while alone, and others often can't reach a symmetric-NAT host
+  while it can reach them. A device whose UDP is blocked reports itself as
+  symmetric.
 - The backup is the best other candidate, kept stable unless clearly beaten.
 
 Failover triggers:

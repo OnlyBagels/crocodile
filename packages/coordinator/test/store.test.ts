@@ -174,6 +174,27 @@ describe('election', () => {
     expect(failover).toEqual({ host: 'b', backup: 'c' });
   });
 
+  it('a host behind a symmetric NAT hands over to a member others can reach', () => {
+    // The caller was elected alone; the person they call is on an open network.
+    const members = [member('caller', 'symmetric'), member('callee', 'open')];
+    const r = elect({ members, host: 'caller', backup: null, penalties: new Map(), now: 0 });
+    expect(r).toEqual({ host: 'callee', backup: 'caller' });
+    // ...and keeps it: no flapping back.
+    expect(
+      elect({ members, host: 'callee', backup: 'caller', penalties: new Map(), now: 0 }).host,
+    ).toBe('callee');
+    // Two symmetric NATs: nobody better, the current host stays.
+    const both = [member('caller', 'symmetric'), member('callee', 'symmetric')];
+    expect(
+      elect({ members: both, host: 'caller', backup: null, penalties: new Map(), now: 0 }).host,
+    ).toBe('caller');
+    // A cone or open host stays even when a slightly better member joins.
+    const fine = [member('a', 'cone'), member('b', 'open')];
+    expect(
+      elect({ members: fine, host: 'a', backup: null, penalties: new Map(), now: 0 }).host,
+    ).toBe('a');
+  });
+
   it('rendezvous ownership is stable and moves minimally', () => {
     const servers = ['s1', 's2', 's3', 's4'];
     const sessions = Array.from({ length: 400 }, (_, i) => `space:session${i}`);

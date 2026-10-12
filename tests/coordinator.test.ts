@@ -268,7 +268,7 @@ describe('sessions and host election', () => {
 
   it('elects the best-connected member as host and a runner-up as backup', async () => {
     const { alice, bob, carol, sessionId } = await setup();
-    await bob.conn.request('session.join', { sessionId, caps: caps({ nat: 'symmetric' }) });
+    await bob.conn.request('session.join', { sessionId, caps: caps({ nat: 'cone' }) });
     const { state } = await alice.conn.request('session.join', {
       sessionId,
       caps: caps({ nat: 'open' }),
@@ -286,6 +286,23 @@ describe('sessions and host election', () => {
     });
     expect(seen.host).toBe(bob.conn.peer);
     expect(seen.backup).toBe(alice.conn.peer);
+  });
+
+  it('moves the host away from a symmetric NAT when someone others can reach joins', async () => {
+    const { alice, bob, sessionId } = await setup();
+    // Bob calls first from a strict network and is elected while alone.
+    const first = await bob.conn.request('session.join', {
+      sessionId,
+      caps: caps({ nat: 'symmetric' }),
+    });
+    expect(first.state.host).toBe(bob.conn.peer);
+    const { state } = await alice.conn.request('session.join', {
+      sessionId,
+      caps: caps({ nat: 'open' }),
+    });
+    expect(state.host).toBe(alice.conn.peer);
+    expect(state.backup).toBe(bob.conn.peer);
+    expect(state.epoch).toBe(first.state.epoch + 1);
   });
 
   it('fails over to the backup when the host disconnects', async () => {
@@ -641,6 +658,24 @@ describe('opt-in server relay', () => {
     await alice.conn.request('relay.request', { sessionId });
     await waitFor(() => alice.events.find((e) => e.ev === 'relay_expired'), 3000, 'expiry event');
     expect(c.relayStats().activeUsers).toBe(0);
+  });
+
+  it('extends a grant asked for again near its end, so a relayed call carries on', async () => {
+    const c = await server({ stunPort: 0 });
+    c.turn!.limits.maxGrantMs = 1500;
+    const alice = await user(c);
+    const s = await createSpace(alice);
+    const sessionId = `space:${s.spaceId}`;
+    await alice.conn.request('session.join', { sessionId, caps: caps() });
+    const first = (await alice.conn.request('relay.request', { sessionId })).grant;
+    await new Promise((r) => setTimeout(r, 800));
+    const renewed = (await alice.conn.request('relay.request', { sessionId })).grant;
+    expect(renewed.expiresAt).toBeGreaterThan(first.expiresAt);
+    // The first window's end passes without the relay being taken away.
+    await new Promise((r) => setTimeout(r, first.expiresAt - Date.now() + 300));
+    expect(alice.events.some((e) => e.ev === 'relay_expired')).toBe(false);
+    expect(c.relayStats().activeUsers).toBe(1);
+    await waitFor(() => alice.events.find((e) => e.ev === 'relay_expired'), 3000, 'renewed end');
   });
 });
 
