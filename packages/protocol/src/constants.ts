@@ -43,4 +43,6 @@ export const SIG_DOMAIN = {
   anon: 'croc/v1/anon',
   beacon: 'croc/v1/beacon',
   mail: 'croc/v1/mail',
+  /** A space owner's signature on its admin list. */
+  spaceAdmins: 'croc/v1/space-admins',
 } as const;

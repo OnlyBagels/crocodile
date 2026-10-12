@@ -876,6 +876,41 @@ describe('calls', () => {
   }, 30_000);
 });
 
+describe('space admins', () => {
+  it('lets an admin change the space and invite people, until the owner says otherwise', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const dave = await signUp(makeClient(net, coord), 'dave');
+    const spaceId = await alice.createSpace('Swamp');
+    await bob.joinWithInvite(await alice.createInvite(spaceId));
+    // A member can't change the space.
+    await expect(bob.addChannel(spaceId, 'mine', 'text')).rejects.toThrow(/owner or an admin/);
+
+    await alice.setAdmin(spaceId, bob.userId, true);
+    await waitFor(() => bob.state.spaces[spaceId]?.admins.includes(bob.userId), 8000, 'admin');
+    await bob.updateSpace(spaceId, (b) => ({ ...b, name: 'Pond' }));
+    await bob.addChannel(spaceId, 'lily pads', 'text');
+    await waitFor(() => alice.state.spaces[spaceId]?.name === 'Pond', 8000, 'renamed');
+    expect(alice.state.spaces[spaceId]!.channels.map((c) => c.name)).toContain('lily-pads');
+    // Bob's invites work for others.
+    const bobsInvite = await bob.createInvite(spaceId);
+    await carol.joinWithInvite(bobsInvite);
+    expect(carol.state.spaces[spaceId]?.name).toBe('Pond');
+    // But choosing admins and deleting the space stay with the owner.
+    await expect(bob.setAdmin(spaceId, carol.userId, true)).rejects.toThrow(/owner/);
+    await expect(bob.deleteSpace(spaceId)).rejects.toThrow(/owner/);
+
+    await alice.setAdmin(spaceId, bob.userId, false);
+    await waitFor(() => bob.state.spaces[spaceId]?.admins.length === 0, 8000, 'no longer admin');
+    await expect(bob.addChannel(spaceId, 'again', 'text')).rejects.toThrow(/owner or an admin/);
+    // His invite stopped working with his rights.
+    await expect(dave.joinWithInvite(bobsInvite)).rejects.toThrow(/no longer an admin/);
+  });
+});
+
 describe('invites in chat', () => {
   it('previews the space an invite leads to, before and after joining', async () => {
     const coord = await server();

@@ -3,7 +3,7 @@ import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import type { ChannelKind } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { copyText, imageToDataUrl, initials } from '../lib/format';
-import { Button, Input, Label, Modal, cx } from '../components/ui';
+import { Avatar, Button, Input, Label, Modal, Toggle, UserName, cx } from '../components/ui';
 
 export function AddSpaceModal() {
   const [mode, setMode] = useState<'choose' | 'create' | 'join'>('choose');
@@ -254,10 +254,13 @@ export function CreateChannelModal({ spaceId }: { spaceId: string }) {
 
 export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
   const space = useCroc((s) => s.spaces[spaceId]);
+  const me = useCroc((s) => s.me?.userId);
   const [name, setName] = useState(space?.name ?? '');
   const [icon, setIcon] = useState(space?.icon);
   const client = getClient();
   if (!space) return null;
+  const isOwner = space.owner === me;
+  const others = space.members.filter((u) => u !== space.owner);
   const save = async () => {
     await client.updateSpace(spaceId, (b) => ({
       ...b,
@@ -320,33 +323,67 @@ export function SpaceSettingsModal({ spaceId }: { spaceId: string }) {
           </div>
         ))}
       </div>
-      <div className="mt-6 rounded-2xl border border-danger/40 p-4">
-        <div className="font-semibold text-text">Delete space</div>
-        <p className="mt-1 text-sm text-muted">
-          Everyone loses access. Messages stay only on members' devices.
+      {isOwner ? (
+        <section aria-label="Admins" className="mt-6">
+          <Label>Admins</Label>
+          <p className="mb-2 text-xs text-muted">
+            Admins can rename the space, change its icon and channels, invite people and ban
+            members. Only you can choose admins or delete the space.
+          </p>
+          {others.length === 0 && (
+            <p className="rounded-xl bg-field px-3 py-2 text-sm text-muted">
+              Invite people first; then you can make them admins.
+            </p>
+          )}
+          {others.map((u) => (
+            <div key={u} className="flex items-center gap-3 rounded-xl px-2 py-1.5 hover:bg-hover">
+              <Avatar userId={u} size={28} />
+              <UserName userId={u} className="flex-1 truncate text-sm font-semibold" />
+              <Toggle
+                checked={space.admins.includes(u)}
+                label={`${client.state.profiles[u]?.username ?? 'Member'} is an admin`}
+                onChange={(v) =>
+                  void client.setAdmin(spaceId, u, v).catch((e) => client.reportError(e.message))
+                }
+              />
+            </div>
+          ))}
+        </section>
+      ) : (
+        <p className="mt-6 rounded-xl bg-accent-soft px-3 py-2 text-sm text-text-2">
+          You're an admin: you can change this space and invite people. The owner chooses admins and
+          can delete the space.
         </p>
-        <Button
-          variant="danger"
-          className="mt-3"
-          onClick={() =>
-            openModal({
-              kind: 'confirm',
-              title: `Delete ${space.name}?`,
-              body: 'Everyone loses access, for good. This cannot be undone.',
-              action: 'Delete space',
-              danger: true,
-              confirmText: space.name,
-              onConfirm: async () => {
-                await client.deleteSpace(spaceId);
-                closeModal();
-                navigate({ kind: 'friends' });
-              },
-            })
-          }
-        >
-          Delete space
-        </Button>
-      </div>
+      )}
+      {isOwner && (
+        <div className="mt-6 rounded-2xl border border-danger/40 p-4">
+          <div className="font-semibold text-text">Delete space</div>
+          <p className="mt-1 text-sm text-muted">
+            Everyone loses access. Messages stay only on members' devices.
+          </p>
+          <Button
+            variant="danger"
+            className="mt-3"
+            onClick={() =>
+              openModal({
+                kind: 'confirm',
+                title: `Delete ${space.name}?`,
+                body: 'Everyone loses access, for good. This cannot be undone.',
+                action: 'Delete space',
+                danger: true,
+                confirmText: space.name,
+                onConfirm: async () => {
+                  await client.deleteSpace(spaceId);
+                  closeModal();
+                  navigate({ kind: 'friends' });
+                },
+              })
+            }
+          >
+            Delete space
+          </Button>
+        </div>
+      )}
     </Modal>
   );
 }

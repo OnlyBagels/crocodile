@@ -12,6 +12,7 @@ import {
   UserPlus,
   Users,
   X,
+  ShieldCheck,
 } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
@@ -27,6 +28,8 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
   const client = getClient();
   if (!space) return <aside className="island w-[272px] shrink-0" />;
   const isOwner = space.owner === me;
+  // The owner and admins change the space and invite people (servers refuse others).
+  const canManage = isOwner || (!!me && space.admins.includes(me));
   const text = space.channels.filter((c) => c.kind === 'text');
   const rooms = space.channels.filter((c) => c.kind === 'voice');
   const activeChannel = view.kind === 'space' ? view.channelId : null;
@@ -62,8 +65,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
         >
           {(close) => (
             <>
-              {/* Only the owner can make invites (servers refuse anyone else's). */}
-              {isOwner && (
+              {canManage && (
                 <MenuItem
                   icon={<UserPlus size={16} />}
                   label="Invite people"
@@ -73,7 +75,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
                   }}
                 />
               )}
-              {isOwner && (
+              {canManage && (
                 <MenuItem
                   icon={<Plus size={16} />}
                   label="New channel or room"
@@ -83,7 +85,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
                   }}
                 />
               )}
-              {isOwner && (
+              {canManage && (
                 <MenuItem
                   icon={<Settings size={16} />}
                   label="Space settings"
@@ -118,7 +120,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
           )}
         </Menu>
       </div>
-      {isOwner && (
+      {canManage && (
         <button
           onClick={() => openModal({ kind: 'invite', spaceId })}
           className="mx-4 mb-3 flex items-center justify-center gap-2 rounded-xl bg-accent-soft py-2 text-sm font-semibold text-accent transition hover:brightness-125"
@@ -130,7 +132,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
       <div className="flex-1 overflow-y-auto px-3 pb-4">
         <Section
           title="Rooms"
-          onAdd={isOwner ? () => openModal({ kind: 'create-channel', spaceId }) : undefined}
+          onAdd={canManage ? () => openModal({ kind: 'create-channel', spaceId }) : undefined}
         />
         <div className="flex flex-col gap-2">
           {rooms.map((c) => (
@@ -147,7 +149,7 @@ export function SpaceSidebar({ spaceId }: { spaceId: string }) {
         <div className="mt-5" />
         <Section
           title="Channels"
-          onAdd={isOwner ? () => openModal({ kind: 'create-channel', spaceId }) : undefined}
+          onAdd={canManage ? () => openModal({ kind: 'create-channel', spaceId }) : undefined}
         />
         {text.map((c) => {
           const active = activeChannel === c.id;
@@ -399,6 +401,11 @@ export function DetailsPanel({ spaceId }: { spaceId: string }) {
             {u === space.owner && (
               <span title="Space owner" className="ml-auto">
                 <Crown size={14} className="text-amber" />
+              </span>
+            )}
+            {space.admins.includes(u) && (
+              <span title="Admin: can change the space and invite people" className="ml-auto">
+                <ShieldCheck size={14} className="text-accent" />
               </span>
             )}
           </button>

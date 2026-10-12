@@ -45,6 +45,7 @@ import {
   safetyNumber,
   signRecord,
   signSdp,
+  signSpaceAuthority,
   spaceIdFor,
   validateRecord,
   verifyChatMessage,
@@ -211,6 +212,115 @@ describe('records', () => {
     expect(isSpaceMember(lookup, spaceId, alice.userId)).toBe(true);
     expect(isSpaceMember(lookup, spaceId, bob.userId)).toBe(true);
     expect(isSpaceMember(lookup, spaceId, mallory.userId)).toBe(false);
+  });
+
+  describe('space admins', () => {
+    const carol = createIdentity();
+    const nonce = randomId();
+    const spaceId = spaceIdFor(alice.publicKey, nonce);
+    const key = recordKey.space(spaceId);
+    const now = Date.now();
+    const base = {
+      name: 'Swamp',
+      owner: alice.userId,
+      nonce,
+      bans: [] as string[],
+      channels: [{ id: randomId(), name: 'general', kind: 'text' as const }],
+    };
+    /** Alice makes Bob an admin. */
+    const withBob = signRecord(
+      alice,
+      'space',
+      key,
+      {
+        ...base,
+        admins: [bob.userId],
+        authority: signSpaceAuthority(alice, spaceId, [bob.userId], now - 2000),
+      },
+      now - 2000,
+    );
+
+    it("lets an admin change the space, checked on its own, without the owner's record", () => {
+      const renamed = signRecord(bob, 'space', key, { ...withBob.body, name: 'Pond' }, now - 1000);
+      expect(validateRecord(renamed, ctx([withBob])).ok).toBe(true);
+      // A server or client that never saw the owner's version can check it too.
+      expect(validateRecord(renamed, ctx([])).ok).toBe(true);
+      // Someone not on the owner's list can't, signature or not.
+      const byMallory = signRecord(mallory, 'space', key, { ...withBob.body, name: 'Mine' });
+      expect(validateRecord(byMallory, ctx([withBob]))).toMatchObject({ ok: false });
+    });
+
+    it('keeps the admin list, deletion and the owner out of admins’ hands', () => {
+      const v = now - 1000;
+      const promoted = signRecord(
+        bob,
+        'space',
+        key,
+        { ...withBob.body, admins: [bob.userId, mallory.userId] },
+        v,
+      );
+      expect(validateRecord(promoted, ctx([withBob]))).toMatchObject({
+        ok: false,
+        reason: 'bad admin list signature',
+      });
+      const deleted = signRecord(bob, 'space', key, { ...withBob.body, deleted: true }, v);
+      expect(validateRecord(deleted, ctx([withBob]))).toMatchObject({
+        reason: 'only the owner may delete a space',
+      });
+      const banOwner = signRecord(bob, 'space', key, { ...withBob.body, bans: [alice.userId] }, v);
+      expect(validateRecord(banOwner, ctx([withBob]))).toMatchObject({ ok: false });
+      const banCarol = signRecord(bob, 'space', key, { ...withBob.body, bans: [carol.userId] }, v);
+      expect(validateRecord(banCarol, ctx([withBob])).ok).toBe(true);
+    });
+
+    it('refuses an edit under an admin list the owner has replaced', () => {
+      // Alice removes Bob; Bob still holds the old signed list.
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      const late = signRecord(bob, 'space', key, { ...withBob.body, name: 'Still mine' }, now);
+      expect(validateRecord(late, ctx([without]))).toMatchObject({
+        ok: false,
+        reason: 'the admin list has changed',
+      });
+    });
+
+    it("lets admins make invites, which stop working when they're no longer admins", () => {
+      const code = randomId(5);
+      const invite = signRecord(bob, 'invite', recordKey.invite(code), {
+        spaceId,
+        code,
+        expiresAt: null,
+      });
+      expect(validateRecord(invite, ctx([withBob])).ok).toBe(true);
+      const join = signRecord(carol, 'member', recordKey.member(spaceId, carol.userId), {
+        spaceId,
+        userId: carol.userId,
+        inviteCode: code,
+      });
+      expect(validateRecord(join, { ...ctx([withBob, invite]), fresh: true }).ok).toBe(true);
+      const without = signRecord(
+        alice,
+        'space',
+        key,
+        { ...base, admins: [], authority: signSpaceAuthority(alice, spaceId, [], now - 500) },
+        now - 500,
+      );
+      expect(validateRecord(join, { ...ctx([without, invite]), fresh: true })).toMatchObject({
+        ok: false,
+        reason: 'invite was made by someone who is no longer an admin',
+      });
+      // Bob may still revoke what he made.
+      const revoke = signRecord(bob, 'invite', recordKey.invite(code), {
+        ...invite.body,
+        revoked: true,
+      });
+      expect(validateRecord(revoke, ctx([without, invite])).ok).toBe(true);
+    });
   });
 });
 

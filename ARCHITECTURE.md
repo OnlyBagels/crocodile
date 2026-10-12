@@ -72,18 +72,29 @@ hosts a group. This document explains how the pieces fit and why.
 
 Metadata lives in signed records (`packages/protocol/src/records.ts`):
 
-| Record  | Key                         | Who may write it                                                              |
-| ------- | --------------------------- | ----------------------------------------------------------------------------- |
-| profile | `profile:<userId>`          | the user (name, avatar, bio, X25519 key)                                      |
-| friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)             |
-| space   | `space:<spaceId>`           | the owner; `spaceId = hash(owner key, nonce)` binds ownership without history |
-| invite  | `invite:<code>`             | the space owner                                                               |
-| member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                          |
-| device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)                      |
-| note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it           |
+| Record  | Key                         | Who may write it                                                    |
+| ------- | --------------------------- | ------------------------------------------------------------------- |
+| profile | `profile:<userId>`          | the user (name, avatar, bio, X25519 key)                            |
+| friends | `friends:<userId>`          | the user; sealed, readable only by the user's devices (see below)   |
+| space   | `space:<spaceId>`           | the owner, or an admin the owner signed for (see below)             |
+| invite  | `invite:<code>`             | the space owner or an admin                                         |
+| member  | `member:<spaceId>:<userId>` | the user, referencing a valid invite                                |
+| device  | `device:<userId>:<device>`  | the user (name, platform, current prekeys, revoked flag)            |
+| note    | `note:<userId>:<noteId>`    | anyone, once, with a one-time key; only the recipient may delete it |
 
 Validation (`crypto/src/records.ts`) checks the signature, authority, and
 last-writer-wins versioning, identically on servers and clients.
+
+**Space admins.** `spaceId = hash(owner key, nonce)` binds a space to its
+owner without history. The owner may name admins, who can rename the space,
+change its icon and channels, ban members (not the owner or other admins)
+and make invites; only the owner chooses admins or deletes the space. The
+space record carries the owner's signature on its admin list (`authority`:
+the owner's key, a counter `at`, the signature), so an admin's version can
+be checked on its own, by a server or a client that never saw the owner's.
+Each change of the list raises `at`, and a version signed under a lower `at`
+than the one held is refused. An invite works only while its maker is still
+the owner or an admin.
 
 **Friends without telling the servers.** A friendship exists when both people
 list each other; listing someone who doesn't list you back is a request. No

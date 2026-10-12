@@ -202,6 +202,15 @@ for (let i = 0; i < 20 && copied !== '@Alice ship it 🚀'; i++) {
   copied = await a.app.evaluate(({ clipboard }) => clipboard.readText());
 }
 if (copied !== '@Alice ship it 🚀') throw new Error(`copied ${JSON.stringify(copied)}`);
+// The owner makes Bob an admin: he can then invite people and change the space.
+await a.page.getByRole('button', { name: 'Space menu' }).click();
+await a.page.getByText('Space settings').click();
+const admins = a.page.getByRole('region', { name: 'Admins' });
+await admins.getByRole('switch', { name: 'Bob is an admin' }).click();
+await admins.getByRole('switch', { name: 'Bob is an admin', checked: true }).waitFor();
+await shot(a.page, '06g-admins');
+await a.page.keyboard.press('Escape');
+await b.page.getByRole('button', { name: 'Invite people' }).waitFor({ timeout: 10_000 });
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));
