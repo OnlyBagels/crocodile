@@ -60,3 +60,16 @@ export const LATENCY_CLASS = {
   fair: 'text-warn',
   poor: 'text-danger',
 } as const;
+
+/**
+ * Whether a DM shows its call stage: once we are in the call, or when the
+ * other side is in it without us (to join). Not while it rings for us: the
+ * incoming-call prompt is the one place to answer or decline.
+ */
+export function showDmCallStage(s: {
+  joined: boolean;
+  ringingIn: boolean;
+  otherInCall: boolean;
+}): boolean {
+  return s.joined || (s.otherInCall && !s.ringingIn);
+}

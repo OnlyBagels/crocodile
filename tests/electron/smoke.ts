@@ -250,6 +250,11 @@ await shot(a.page, '10-friend-request');
 // A call shows as ringing, not as on, until the friend picks up.
 await a.page.getByRole('button', { name: 'Accept' }).click();
 await a.page.getByRole('button', { name: /^All/ }).click();
+// Bob has their conversation open when Alice calls.
+await b.page.getByRole('button', { name: 'Home' }).click();
+await b.page.getByRole('button', { name: /^All/ }).click();
+await b.page.getByRole('button', { name: 'Message' }).click();
+await b.page.getByPlaceholder('Message Alice').waitFor();
 await a.page.getByRole('button', { name: 'Call', exact: true }).click();
 // The call bar and the DM's call stage both say so.
 await a.page.getByText('Ringing…').first().waitFor({ timeout: 15_000 });
@@ -258,6 +263,15 @@ await a.page.waitForTimeout(1500);
 if (!(await a.page.getByText('Ringing…').first().isVisible()))
   throw new Error('the call looks answered before the friend picked up');
 await shot(a.page, '10b-ringing');
+// One place to answer: the prompt. The conversation doesn't look like a call yet.
+if ((await b.page.getByRole('button', { name: 'Accept' }).count()) !== 1)
+  throw new Error('the call can be answered in more than one place');
+if (await b.page.getByRole('region', { name: 'Call' }).count())
+  throw new Error("the conversation shows a call that hasn't started");
+// Alice is on the conversation: its stage shows the ringing, without a second prompt.
+if (await a.page.getByText(/^Calling /).count())
+  throw new Error('the caller sees the ringing twice');
+await shot(b.page, '10b2-incoming');
 await b.page.getByRole('button', { name: 'Accept' }).click();
 await a.page.waitForFunction(() => !document.body.innerText.includes('Ringing…'), undefined, {
   timeout: 15_000,

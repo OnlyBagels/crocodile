@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Headphones, HeadphoneOff, Mic, MicOff, Phone, PhoneOff } from 'lucide-react';
 import { getClient, useCroc } from '../croc';
-import { callPhase, callStatusText } from '../lib/call';
+import { callPhase, callStatusText, showDmCallStage } from '../lib/call';
 import { Participant } from './CallParticipants';
 import { IconButton, cx } from './ui';
 
@@ -34,14 +34,12 @@ export function DmCallStage({
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, [liveSince]);
-  if (!me || (!joined && !ringingIn && !otherInCall)) return null;
+  if (!me || !showDmCallStage({ joined, ringingIn, otherInCall })) return null;
   const client = getClient();
   const phase = callPhase(session, { ringing: ringingOut, liveSince });
   const status = joined
     ? callStatusText(phase, { liveSince, now, other: otherName })
-    : ringingIn
-      ? `${otherName} is calling you`
-      : `${otherName} is in a call with you`;
+    : `${otherName} is in a call with you`;
   const live = joined && phase === 'live';
   const call = () => void client.callDm(otherUserId).catch((e) => client.reportError(e.message));
   return (
@@ -102,21 +100,6 @@ export function DmCallStage({
               className="flex h-9 items-center gap-1.5 rounded-full bg-danger px-4 text-sm font-semibold text-white hover:brightness-110"
             >
               <PhoneOff size={16} /> {phase === 'ringing' ? 'Cancel' : 'Hang up'}
-            </button>
-          </>
-        ) : ringingIn ? (
-          <>
-            <button
-              onClick={() => client.declineCall()}
-              className="flex h-9 items-center gap-1.5 rounded-full bg-danger px-4 text-sm font-semibold text-white hover:brightness-110"
-            >
-              <PhoneOff size={16} /> Decline
-            </button>
-            <button
-              onClick={call}
-              className="flex h-9 items-center gap-1.5 rounded-full bg-accent px-4 text-sm font-semibold text-on-accent hover:brightness-110"
-            >
-              <Phone size={16} /> Accept
             </button>
           </>
         ) : (

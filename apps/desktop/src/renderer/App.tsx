@@ -234,6 +234,8 @@ function Modals() {
 function CallPrompts() {
   const incoming = useCroc((s) => s.incomingCall);
   const outgoing = useCroc((s) => s.outgoingCall);
+  const view = useUi((s) => s.view);
+  const me = useCroc((s) => s.me?.userId);
   const relayEnded = useCroc((s) => s.relayEnded);
   const trouble = useCroc((s) => s.connectionTrouble);
   const network = useCroc((s) => s.network);
@@ -336,7 +338,13 @@ function CallPrompts() {
       </div>
     );
   }
-  if (outgoing) {
+  // Looking at the DM, its call stage already shows the ringing (and Cancel).
+  const onStage =
+    !!outgoing &&
+    view.kind === 'dm' &&
+    !!me &&
+    sessionIds.dm(me, view.userId) === outgoing.sessionId;
+  if (outgoing && !onStage) {
     return (
       <div className="island rise fixed right-5 top-20 z-[55] flex items-center gap-3 rounded-full py-2 pl-2 pr-3">
         <Avatar userId={outgoing.to} size={36} round speaking />
