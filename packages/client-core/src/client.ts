@@ -1843,7 +1843,6 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return code;
   }
 
-  /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
   /**
    * What an invite leads to, for showing it in a chat before anyone joins:
    * the space's name and icon, whether we are in it already, and whether it
@@ -1876,6 +1875,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     };
   }
 
+  /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
   async joinWithInvite(input: string): Promise<string> {
     const code = inviteCodeOf(input);
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
