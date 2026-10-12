@@ -8,11 +8,13 @@ import {
   Radio,
   Server,
   ShieldCheck,
+  Signal,
 } from 'lucide-react';
 import { parseSessionId } from '@crocodile/protocol';
 import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
 import { Avatar, IconButton, cx } from './ui';
 import { ROUTE_TEXT } from '../lib/network';
+import { LATENCY_CLASS, callPhase, callStatusText, latencyQuality } from '../lib/call';
 
 /** Floating controls for the active call, visible from anywhere in the app. */
 export function CallDock() {
@@ -27,32 +29,31 @@ export function CallDock() {
   const me = useCroc((s) => s.me?.userId);
   const micLevel = useUi((s) => s.micLevel);
   const vad = useUi((s) => s.voiceSettings.vadThresholdDb);
-  const [since, setSince] = useState(Date.now());
-  const [, tick] = useState(0);
-  // The call's clock starts when the other side picks up.
-  useEffect(() => setSince(Date.now()), [voiceSession, ringing]);
+  const liveSince = useCroc((s) => s.callLiveSince);
+  const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    const t = setInterval(() => tick((n) => n + 1), 1000);
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
   }, []);
   if (!voiceSession) return null;
   const client = getClient();
   const scope = parseSessionId(voiceSession);
   let where = 'Call';
+  let other: string | undefined;
   let go = () => {};
   if (scope?.kind === 'voice') {
     const space = spaces[scope.spaceId];
     where = space?.channels.find((c) => c.id === scope.channelId)?.name ?? 'Room';
     go = () => navigate({ kind: 'space', spaceId: scope.spaceId, channelId: scope.channelId });
   } else if (scope?.kind === 'dm' && me) {
-    const other = scope.users.find((u) => u !== me)!;
-    where = client.state.profiles[other]?.username ?? 'Call';
-    go = () => navigate({ kind: 'dm', userId: other });
+    const otherId = scope.users.find((u) => u !== me)!;
+    other = client.state.profiles[otherId]?.username;
+    where = other ?? 'Call';
+    go = () => navigate({ kind: 'dm', userId: otherId });
   }
-  const status = session?.status ?? 'joining';
-  const connected = status === 'connected' && !ringing;
-  const secs = Math.floor((Date.now() - since) / 1000);
-  const clock = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+  const phase = callPhase(session, { ringing, liveSince });
+  const live = phase === 'live';
+  const myLatency = me ? session?.latency[me] : undefined;
   const talking = !muted && micLevel > vad;
   const relayLeft = session?.relay
     ? Math.max(0, Math.round((session.relay.expiresAt - Date.now()) / 60_000))
@@ -66,32 +67,31 @@ export function CallDock() {
           className="flex items-center gap-2.5 rounded-full py-1 pl-1 pr-3 hover:bg-hover"
         >
           <span
-            className={cx('h-2.5 w-2.5 rounded-full', connected ? 'live-dot bg-accent' : 'bg-warn')}
+            className={cx('h-2.5 w-2.5 rounded-full', live ? 'live-dot bg-accent' : 'bg-warn')}
           />
           <div className="text-left leading-tight">
             <div className="max-w-[160px] truncate text-[13px] font-bold">{where}</div>
-            <div className="text-[11px] text-muted">
-              {ringing
-                ? 'Ringing…'
-                : connected
-                  ? clock
-                  : status === 'no-host'
-                    ? 'Waiting for a host'
-                    : 'Connecting…'}
+            <div
+              aria-label="Call status"
+              className={cx('text-[11px]', live ? 'tabular-nums text-text-2' : 'text-warn')}
+            >
+              {callStatusText(phase, { liveSince, now, ...(other ? { other } : {}) })}
             </div>
           </div>
         </button>
         <div className="flex -space-x-2">
-          {(session?.members ?? []).slice(0, 5).map((u) => (
-            <Avatar
-              key={u}
-              userId={u}
-              size={28}
-              round
-              speaking={!!session?.speaking.includes(u)}
-              className="rounded-full ring-2 ring-[var(--island)]"
-            />
-          ))}
+          {(scope?.kind === 'dm' ? (session?.inCall ?? []) : (session?.members ?? []))
+            .slice(0, 5)
+            .map((u) => (
+              <Avatar
+                key={u}
+                userId={u}
+                size={28}
+                round
+                speaking={!!session?.speaking.includes(u)}
+                className="rounded-full ring-2 ring-[var(--island)]"
+              />
+            ))}
         </div>
         {session && (
           <button
@@ -114,6 +114,14 @@ export function CallDock() {
                 {session.route && !session.iAmHost && !ringing
                   ? ` · ${ROUTE_TEXT[session.route]}`
                   : ''}
+              </span>
+            )}
+            {myLatency !== undefined && !session.iAmHost && (
+              <span
+                className={cx('flex items-center gap-1', LATENCY_CLASS[latencyQuality(myLatency)])}
+                title="Your round trip to the host"
+              >
+                · <Signal size={12} /> {myLatency} ms
               </span>
             )}
           </button>

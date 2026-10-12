@@ -1,4 +1,4 @@
-import type { PeerState, RelayToClient, SignalData } from '@crocodile/protocol';
+import type { ClientToRelay, PeerState, RelayToClient, SignalData } from '@crocodile/protocol';
 import {
   Emitter,
   type HostRelayAdapter,
@@ -108,8 +108,7 @@ class FakeRelay {
       peers: others.map((o) => o.state),
       slots: 0,
     });
-    for (const o of others)
-      o.t.deliver({ t: 'peer_join', peer: { id: t.userId, muted: false, deafened: false } });
+    for (const o of others) o.t.deliver({ t: 'peer_join', peer: this.peers.get(t.userId)!.state });
     return true;
   }
 
@@ -118,8 +117,16 @@ class FakeRelay {
     for (const o of this.peers.values()) o.t.deliver({ t: 'peer_leave', peer: userId });
   }
 
-  route(from: string, msg: { t: string; to?: string; d?: unknown }) {
-    if (msg.t === 'bcast') {
+  route(from: string, msg: ClientToRelay) {
+    if (msg.t === 'state') {
+      const me = this.peers.get(from);
+      if (!me) return;
+      const { t: _, ...state } = msg;
+      me.state = { id: from, ...state };
+      for (const o of this.peers.values()) o.t.deliver({ t: 'peer_state', peer: me.state });
+    } else if (msg.t === 'ping') {
+      this.peers.get(from)?.t.deliver({ t: 'pong', ts: msg.ts });
+    } else if (msg.t === 'bcast') {
       for (const [id, o] of this.peers)
         if (id !== from) o.t.deliver({ t: 'msg', from, direct: false, d: msg.d });
     } else if (msg.t === 'direct' && msg.to) {
@@ -199,7 +206,7 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     if (size > MAX_MESSAGE_SIZE)
       throw new Error(`max-message-size exceeded: ${size} > ${MAX_MESSAGE_SIZE}`);
     const relay = this.relay!;
-    setTimeout(() => relay.route(this.userId, msg as never), 1);
+    setTimeout(() => relay.route(this.userId, msg as ClientToRelay), 1);
     return true;
   }
 

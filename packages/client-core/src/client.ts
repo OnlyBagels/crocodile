@@ -198,6 +198,13 @@ export interface SessionView {
    * device, so two devices of one user each keep theirs.
    */
   networks: MemberNetwork[];
+  /**
+   * Users in the call (audio), us included: in a DM, the other side may be
+   * connected for text only. Empty for sessions without a call.
+   */
+  inCall: string[];
+  /** Each call member's round trip to the host, in ms, as they last measured it. */
+  latency: Record<string, number>;
 }
 
 /** One member device's network type, as the coordinator's election sees it. */
@@ -278,10 +285,16 @@ export interface ClientState {
   incomingCall: { sessionId: string; from: string; at: number } | null;
   /** We are ringing someone and they have not answered yet. */
   outgoingCall: { sessionId: string; to: string; at: number } | null;
+  /**
+   * Since when the call we are in is live: connected, and in a DM with the
+   * other side in it too. Null while ringing, connecting or alone.
+   */
+  callLiveSince: number | null;
   muted: boolean;
   deafened: boolean;
   settings: Settings;
-  errors: { id: number; message: string }[];
+  /** Toasts: problems, and `info` notices such as a call ending. */
+  errors: { id: number; message: string; kind?: 'info' }[];
   /** This account's devices. */
   devices: DeviceView[];
   deviceId: string | null;
@@ -303,6 +316,8 @@ export type ClientEvents = {
   /** `update`: an edit or deletion of an earlier message, not a new one. */
   message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
   error: { message: string };
+  /** A call we are in: went live, someone joined or left it, or it ended. */
+  call: { sessionId: string; event: 'live' | 'joined' | 'left' | 'ended' };
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
@@ -322,6 +337,8 @@ const FRIEND_NOTE_SWEEP_MS = 10 * 60_000;
 const RING_SILENCE_MS = 8000;
 /** Time for a hang-up to go out before the call's connection closes. */
 const HANG_UP_FLUSH_MS = 200;
+/** How long a DM call waits for the other side to come back before it ends. */
+const CALL_LOST_GRACE_MS = 20_000;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -383,6 +400,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       voiceSession: null,
       incomingCall: null,
       outgoingCall: null,
+      callLiveSince: null,
       muted: false,
       deafened: false,
       settings: defaultSettings,
@@ -423,9 +441,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   reportError(message: string) {
-    const id = ++this.errorId;
-    this.store.set((s) => ({ errors: [...s.errors.slice(-4), { id, message }] }));
+    this.toast(message);
     this.emit('error', { message });
+  }
+
+  /** A notice that isn't a problem ("Call ended"). */
+  reportInfo(message: string) {
+    this.toast(message, 'info');
+  }
+
+  private toast(message: string, kind?: 'info') {
+    const id = ++this.errorId;
+    this.store.set((s) => ({
+      errors: [...s.errors.slice(-4), { id, message, ...(kind ? { kind } : {}) }],
+    }));
     setTimeout(
       () => this.store.set((s) => ({ errors: s.errors.filter((e) => e.id !== id) })),
       8000,
@@ -1909,6 +1938,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   private publishSession(session: GroupSession) {
+    // A session we replaced (a DM call back to text) must not overwrite its successor.
+    if (this.sessions.get(session.sessionId) !== session) return;
     const st: SessionState | null = session.state;
     const peers = [...session.peers.values()];
     const users = (ids: string[]) => [...new Set(ids.map((p) => peerIds.user(p)))];
@@ -1951,9 +1982,89 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         steps: [...a.steps],
         ...(a.end ? { end: { ...a.end } } : {}),
       })),
+      // Apps (and hosts) from before calls said who is in them leave it unknown.
+      inCall: [
+        ...(session.isVoice ? [me] : []),
+        ...users(peers.filter((p) => p.voice).map((p) => p.id)).filter((u) => u !== me),
+      ],
+      latency: Object.fromEntries([
+        ...peers
+          .filter((p) => p.rtt !== undefined && peerIds.user(p.id) !== me)
+          .map((p) => [peerIds.user(p.id), p.rtt!] as const),
+        ...(session.isVoice && session.rttMs !== null ? [[me, session.rttMs] as const] : []),
+      ]),
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
     this.noteTrouble(view);
+    if (this.state.voiceSession === session.sessionId) this.followCall(view, session.welcomed);
+  }
+
+  /** Who was in the call we are in, at the last update (users, us excluded). */
+  private callOthers = new Set<string>();
+  /** The DM call we answered, or whose callee answered. */
+  private callAnswered: string | null = null;
+  /** Users who were in the DM call and dropped out of the conversation altogether. */
+  private callMissing = new Set<string>();
+  private callLostTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * Keep the call's live state honest: it is live once connected and, in a
+   * DM, once the other side is in it; it ends when they hang up, or when
+   * they stay gone. Others joining and leaving are events (sounds).
+   */
+  private followCall(view: SessionView, welcomed: boolean) {
+    const me = this.userId;
+    const isDm = view.id.startsWith('dm:');
+    // Who is there is known once the host has said hello on this connection.
+    const connected = view.status === 'connected' && welcomed;
+    if (!connected) return;
+    const others = new Set(view.inCall.filter((u) => u !== me));
+    const before = this.callOthers;
+    const joined = [...others].filter((u) => !before.has(u));
+    const left = [...before].filter((u) => !others.has(u));
+    if (joined.length) this.emit('call', { sessionId: view.id, event: 'joined' });
+    if (left.length) this.emit('call', { sessionId: view.id, event: 'left' });
+    this.callOthers = others;
+    for (const u of others) this.callMissing.delete(u);
+
+    const live = !isDm || others.size > 0 || this.callAnswered === view.id;
+    if (live && !this.state.callLiveSince) {
+      this.store.set({ callLiveSince: Date.now() });
+      this.emit('call', { sessionId: view.id, event: 'live' });
+    } else if (!live && this.state.callLiveSince) {
+      this.store.set({ callLiveSince: null });
+    }
+
+    if (!isDm) return;
+    for (const u of left) this.callMissing.add(u);
+    if (others.size > 0) {
+      this.callMissing.clear();
+      clearTimeout(this.callLostTimer);
+      this.callLostTimer = undefined;
+      return;
+    }
+    if ([...this.callMissing].some((u) => view.peers.includes(u))) {
+      // Connected, but out of the call: they hung up.
+      void this.endCall(view.id, 'Call ended');
+      return;
+    }
+    if (this.callMissing.size === 0 || this.callLostTimer) return;
+    // Gone altogether: their app or network may be back in a moment.
+    this.callLostTimer = setTimeout(() => {
+      this.callLostTimer = undefined;
+      const v = this.state.sessions[view.id];
+      if (this.state.voiceSession === view.id && v && !v.inCall.some((u) => u !== me))
+        void this.endCall(view.id, 'Call ended: the connection was lost');
+    }, CALL_LOST_GRACE_MS);
+    this.callLostTimer.unref?.();
+  }
+
+  /** The call ended from the other side: leave it too. */
+  private async endCall(sessionId: string, notice: string) {
+    if (this.state.voiceSession !== sessionId) return;
+    this.reportInfo(notice);
+    this.emit('call', { sessionId, event: 'ended' });
+    await this.leaveVoice({ quiet: true });
   }
 
   /** Offer the relay when a session can't connect directly and it's off. */
@@ -2473,6 +2584,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const answering = this.state.incomingCall?.sessionId === sessionId;
     await this.joinVoiceSession(sessionId);
     if (answering) {
+      this.callAnswered = sessionId;
       this.store.set({ incomingCall: null });
       this.sendCallSignal(sessionId, 'accept');
       return;
@@ -2540,7 +2652,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }, RING_SILENCE_MS);
       this.ringingTimer.unref?.();
     } else if (action === 'accept') {
-      if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+      if (this.state.outgoingCall?.sessionId === sessionId) {
+        this.callAnswered = sessionId;
+        this.store.set({ outgoingCall: null });
+        const view = this.state.sessions[sessionId];
+        const session = this.sessions.get(sessionId);
+        if (view && session) this.followCall(view, session.welcomed);
+      }
     } else if (action === 'decline') {
       if (this.state.outgoingCall?.sessionId === sessionId) {
         this.store.set({ outgoingCall: null });
@@ -2549,6 +2667,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }
     } else if (action === 'end') {
       if (this.state.incomingCall?.sessionId === sessionId) this.store.set({ incomingCall: null });
+      if (this.state.voiceSession === sessionId) void this.endCall(sessionId, 'Call ended');
     }
   }
 
@@ -2571,17 +2690,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await session.join();
   }
 
-  async leaveVoice() {
+  /** Hang up. `quiet`: the other side already ended it, no need to tell them. */
+  async leaveVoice(opts: { quiet?: boolean } = {}) {
     const sessionId = this.state.voiceSession;
     if (!sessionId) return;
-    if (this.state.outgoingCall?.sessionId === sessionId) {
-      this.store.set({ outgoingCall: null });
-      // Let the hang-up go out first: if we host the call, leaving closes the relay.
+    if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
+    if (sessionId.startsWith('dm:') && !opts.quiet) {
+      // Tell the other side, ringing or talking. Let the hang-up go out
+      // first: if we host the call, leaving closes the relay.
       if (this.sendCallSignal(sessionId, 'end'))
         await new Promise((r) => setTimeout(r, HANG_UP_FLUSH_MS));
       if (this.state.voiceSession !== sessionId) return;
     }
-    this.store.set({ voiceSession: null });
+    clearTimeout(this.callLostTimer);
+    this.callLostTimer = undefined;
+    this.callOthers.clear();
+    this.callMissing.clear();
+    this.callAnswered = null;
+    this.store.set({ voiceSession: null, callLiveSince: null });
     const session = this.sessions.get(sessionId);
     this.voiceEngine?.stopSession(sessionId);
     if (sessionId.startsWith('dm:')) {

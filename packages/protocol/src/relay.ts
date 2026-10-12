@@ -16,8 +16,18 @@ export const ClientToRelay = z.discriminatedUnion('t', [
   z.object({ t: z.literal('bcast'), d: z.unknown() }),
   z.object({ t: z.literal('direct'), to: peerId, d: z.unknown() }),
   z.object({ t: z.literal('ping'), ts: z.number() }),
-  /** Client-side mute state so the relay can skip forwarding and show icons. */
-  z.object({ t: z.literal('state'), muted: z.boolean(), deafened: z.boolean() }),
+  /**
+   * Client-side state: mute (so the relay can skip forwarding and show icons),
+   * whether this member is in the call (a DM's text session isn't), and its
+   * round trip to the host, for everyone's latency display.
+   */
+  z.object({
+    t: z.literal('state'),
+    muted: z.boolean(),
+    deafened: z.boolean(),
+    voice: z.boolean().optional(),
+    rtt: z.number().int().min(0).max(60_000).optional(),
+  }),
 ]);
 export type ClientToRelay = z.infer<typeof ClientToRelay>;
 
@@ -26,6 +36,10 @@ export interface PeerState {
   id: string;
   muted: boolean;
   deafened: boolean;
+  /** In the call (audio), not just in the conversation. Absent from older apps. */
+  voice?: boolean;
+  /** This member's last measured round trip to the host, in ms. */
+  rtt?: number;
 }
 
 export type RelayToClient =

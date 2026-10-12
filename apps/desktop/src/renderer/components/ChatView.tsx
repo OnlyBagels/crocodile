@@ -18,6 +18,7 @@ import { getClient, openModal, ui, useCroc, useUi } from '../croc';
 import { colorFor, dayOf, renderMessage, timeOf } from '../lib/format';
 import { ROUTE_TEXT } from '../lib/network';
 import { Avatar, IconButton, UserName, cx } from './ui';
+import { DmCallStage } from './DmCallStage';
 
 export function ChatView({
   channel,
@@ -127,6 +128,10 @@ export function ChatView({
           )}
         </div>
       </header>
+
+      {kind === 'dm' && otherUserId && (
+        <DmCallStage sessionId={channel} otherUserId={otherUserId} />
+      )}
 
       {connection && (
         <div className="flex items-center gap-2 border-b border-line bg-warn/10 px-5 py-1.5 text-xs font-medium text-warn">

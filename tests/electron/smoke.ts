@@ -186,18 +186,29 @@ await shot(a.page, '10-friend-request');
 await a.page.getByRole('button', { name: 'Accept' }).click();
 await a.page.getByRole('button', { name: /^All/ }).click();
 await a.page.getByRole('button', { name: 'Call', exact: true }).click();
-await a.page.getByText('Ringing…').waitFor({ timeout: 15_000 });
+// The call bar and the DM's call stage both say so.
+await a.page.getByText('Ringing…').first().waitFor({ timeout: 15_000 });
 await b.page.getByText('is calling you').waitFor({ timeout: 15_000 });
 await a.page.waitForTimeout(1500);
-if (!(await a.page.getByText('Ringing…').isVisible()))
+if (!(await a.page.getByText('Ringing…').first().isVisible()))
   throw new Error('the call looks answered before the friend picked up');
 await shot(a.page, '10b-ringing');
 await b.page.getByRole('button', { name: 'Accept' }).click();
-await a.page.getByText('Ringing…').waitFor({ state: 'detached', timeout: 15_000 });
+await a.page.waitForFunction(() => !document.body.innerText.includes('Ringing…'), undefined, {
+  timeout: 15_000,
+});
 await a.page.waitForFunction(() => /\b0:0\d\b/.test(document.body.innerText), undefined, {
   timeout: 15_000,
 });
+// Bob answered from the DM: the call is on a stage above the chat, like a room.
+const stage = b.page.getByRole('region', { name: 'Call' });
+await stage.getByRole('button', { name: 'Hang up' }).waitFor({ timeout: 10_000 });
+await b.page.waitForTimeout(3500);
+await shot(b.page, '10c-dm-call');
+// Hanging up ends the call for the other side too, instead of leaving it "on".
 await a.page.getByRole('button', { name: 'Leave call' }).click();
+await b.page.getByText('Call ended').waitFor({ timeout: 10_000 });
+await b.page.getByRole('button', { name: 'Leave call' }).waitFor({ state: 'detached' });
 
 // Command palette + settings.
 // The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.
