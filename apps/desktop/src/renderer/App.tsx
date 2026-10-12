@@ -12,6 +12,9 @@ import { RoomStage } from './components/RoomStage';
 import { PeopleView } from './components/PeopleView';
 import { CallDock } from './components/CallDock';
 import { CommandPalette } from './components/CommandPalette';
+import { joinAndOpen, openInvite } from './components/InviteCard';
+import { plain, setInviteLinkHandler } from './lib/format';
+import { mentionsIn } from './lib/markup';
 import { Avatar, Button, Toasts, UserName } from './components/ui';
 import { CrocMark, Logo } from './components/Logo';
 import { NETWORK_TEXT } from './lib/network';
@@ -430,8 +433,10 @@ function useGlobalBehaviours() {
           sp.channels.some((c) => c.id === channel),
         );
         const chName = space?.channels.find((c) => c.id === channel)?.name;
-        const n = new Notification(space ? `${author} · ${chName} · ${space.name}` : author, {
-          body: message.body.slice(0, 200),
+        const mentioned = !!s.me && mentionsIn(message.body).includes(s.me.userId);
+        const who = mentioned ? `${author} mentioned you` : author;
+        const n = new Notification(space ? `${who} · ${chName} · ${space.name}` : who, {
+          body: plain(message.body).slice(0, 200),
         });
         n.onclick = () => {
           window.focus();
@@ -450,29 +455,33 @@ function useGlobalBehaviours() {
   }, [totalUnread]);
 
   useEffect(() => {
+    // Invite links clicked in a chat.
+    setInviteLinkHandler(askToJoin);
     if (!desktop) return;
     const handle = (url: string | null) => {
-      if (!url) return;
-      const m = url.match(/^croc:\/\/join\/([a-z2-7]+)/i);
-      if (!m) return;
-      closeModal();
-      openModal({
-        kind: 'confirm',
-        title: 'Join this space?',
-        body: `You were invited with the code ${m[1]!.toLowerCase()}.`,
-        action: 'Join',
-        onConfirm: async () => {
-          const spaceId = await client.joinWithInvite(m[1]!);
-          const space = client.state.spaces[spaceId];
-          navigate({
-            kind: 'space',
-            spaceId,
-            channelId: space?.channels.find((c) => c.kind === 'text')?.id ?? null,
-          });
-        },
-      });
+      const m = url?.match(/^croc:\/\/join\/([a-z2-7]+)/i);
+      if (m) askToJoin(m[1]!.toLowerCase());
     };
     void desktop.app.takeDeepLink().then(handle);
     return desktop.app.onDeepLink(handle);
   }, [client]);
+}
+
+/** An invite link was opened: join that space, after asking (or just open it if we're in). */
+function askToJoin(code: string) {
+  const client = getClient();
+  void client
+    .previewInvite(code)
+    .catch(() => null)
+    .then((preview) => {
+      if (preview?.joined) return openInvite(preview);
+      closeModal();
+      openModal({
+        kind: 'confirm',
+        title: preview ? `Join ${preview.name}?` : 'Join this space?',
+        body: `You were invited with the code ${code}.`,
+        action: 'Join',
+        onConfirm: () => joinAndOpen(code),
+      });
+    });
 }

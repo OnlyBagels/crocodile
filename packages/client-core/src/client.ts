@@ -207,6 +207,18 @@ export interface SessionView {
   latency: Record<string, number>;
 }
 
+/** A space an invite leads to, as shown before joining. */
+export interface InvitePreview {
+  code: string;
+  spaceId: string;
+  name: string;
+  icon?: string;
+  /** We are a member already. */
+  joined: boolean;
+  /** Revoked or past its time: joining with it would fail. */
+  expired: boolean;
+}
+
 /** One member device's network type, as the coordinator's election sees it. */
 export interface MemberNetwork {
   user: string;
@@ -1832,13 +1844,40 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Accepts "abcd1234", "croc://join/abcd1234" or "https://…/join/abcd1234". */
+  /**
+   * What an invite leads to, for showing it in a chat before anyone joins:
+   * the space's name and icon, whether we are in it already, and whether it
+   * still works. Null if the server doesn't know the invite.
+   */
+  async previewInvite(input: string): Promise<InvitePreview | null> {
+    const code = inviteCodeOf(input);
+    const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
+    const invite = res.records[0] as SignedRecord<'invite'> | undefined;
+    if (!invite || invite.kind !== 'invite' || invite.body.code !== code) return null;
+    const { spaceId } = invite.body;
+    let space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    if (!space) {
+      const got = await this.link!.request('records.get', { keys: [recordKey.space(spaceId)] });
+      // Checked like any record, but kept only in memory: we haven't joined.
+      this.records.ingestAll(got.records, false);
+      space = this.records.get(recordKey.space(spaceId)) as SignedRecord<'space'> | undefined;
+    }
+    if (!space || space.body.deleted) return null;
+    const expired =
+      !!invite.body.revoked ||
+      (invite.body.expiresAt !== null && invite.body.expiresAt < Date.now());
+    return {
+      code,
+      spaceId,
+      name: space.body.name,
+      ...(space.body.icon ? { icon: space.body.icon } : {}),
+      joined: !!this.state.spaces[spaceId],
+      expired,
+    };
+  }
+
   async joinWithInvite(input: string): Promise<string> {
-    const code = input
-      .trim()
-      .toLowerCase()
-      .split('/')
-      .pop()!
-      .replace(/[^a-z2-7]/g, '');
+    const code = inviteCodeOf(input);
     const res = await this.link!.request('records.get', { keys: [recordKey.invite(code)] });
     const invite = res.records[0] as SignedRecord<'invite'> | undefined;
     if (!invite) throw new Error('That invite does not exist (yet). Check the code and try again.');
@@ -2757,6 +2796,16 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.link?.stop();
     await this.outbox.flush().catch(() => {});
   }
+}
+
+/** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */
+export function inviteCodeOf(input: string): string {
+  return input
+    .trim()
+    .toLowerCase()
+    .split('/')
+    .pop()!
+    .replace(/[^a-z2-7]/g, '');
 }
 
 export function defaultDeviceName(platform: string): string {

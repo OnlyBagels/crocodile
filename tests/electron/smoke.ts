@@ -147,6 +147,24 @@ await b.page.waitForFunction(
   { timeout: 15_000 },
 );
 await shot(a.page, '06-chat');
+// Links open in the browser; an invite link becomes a card to join the space.
+await a.page
+  .getByPlaceholder('Message general')
+  .fill(`Docs at crocodilechat.com/docs and bring friends: ${inviteText}`);
+await a.page.keyboard.press('Enter');
+await b.app.evaluate(({ shell }) => {
+  const opened: string[] = [];
+  (globalThis as { opened?: string[] }).opened = opened;
+  shell.openExternal = async (url: string) => void opened.push(url);
+});
+await b.page.getByRole('link', { name: 'crocodilechat.com/docs' }).click();
+await b.page.waitForTimeout(300);
+const bobOpened = await b.app.evaluate(() => (globalThis as { opened?: string[] }).opened);
+if (JSON.stringify(bobOpened) !== JSON.stringify(['https://crocodilechat.com/docs']))
+  throw new Error(`a chat link opened ${JSON.stringify(bobOpened)}`);
+const card = b.page.getByLabel('Invite to The Swamp');
+await card.getByRole('button', { name: 'Open' }).waitFor({ timeout: 10_000 });
+await shot(b.page, '06b-links');
 // Panel shadows stay as faint as designed (12% opaque) whatever the accent.
 const shadow = await a.page.evaluate(() => {
   const probe = document.body.appendChild(document.createElement('div'));

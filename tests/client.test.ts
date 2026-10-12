@@ -865,6 +865,29 @@ describe('calls', () => {
   }, 30_000);
 });
 
+describe('invites in chat', () => {
+  it('previews the space an invite leads to, before and after joining', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Pond');
+    const code = await alice.createInvite(spaceId);
+    expect(await bob.previewInvite(`croc://join/${code}`)).toEqual({
+      code,
+      spaceId,
+      name: 'Pond',
+      joined: false,
+      expired: false,
+    });
+    // Only seen, not joined: the space stays out of Bob's list.
+    expect(bob.state.spaces[spaceId]).toBeUndefined();
+    await bob.joinWithInvite(code);
+    expect((await bob.previewInvite(code))?.joined).toBe(true);
+    expect(await bob.previewInvite('croc://join/zzzzzzzzzz')).toBeNull();
+  });
+});
+
 describe('server list', () => {
   it('lists every public server, with one latency for the connected one', async () => {
     const dir = await new Directory({ host: '127.0.0.1', port: 0, allowPrivateUrls: true }).start();

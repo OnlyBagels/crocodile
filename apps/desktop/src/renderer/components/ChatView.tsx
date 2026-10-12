@@ -15,10 +15,12 @@ import {
 } from 'lucide-react';
 import type { MessageView } from '@crocodile/client-core';
 import { getClient, openModal, ui, useCroc, useUi } from '../croc';
-import { colorFor, dayOf, renderMessage, timeOf } from '../lib/format';
+import { colorFor, dayOf, plain, renderMessage, timeOf } from '../lib/format';
 import { ROUTE_TEXT } from '../lib/network';
 import { Avatar, IconButton, UserName, cx } from './ui';
 import { DmCallStage } from './DmCallStage';
+import { InviteCard } from './InviteCard';
+import { inviteCodes, mentionsIn } from '../lib/markup';
 
 export function ChatView({
   channel,
@@ -194,7 +196,7 @@ export function ChatView({
           <div className="mb-2 flex items-center gap-2 rounded-xl border border-line bg-island-2 px-3 py-2 text-sm text-muted">
             <Reply size={14} />
             Replying to <UserName userId={replyTo.author} className="font-semibold text-text" />
-            <span className="truncate">{replyTo.body}</span>
+            <span className="truncate">{plain(replyTo.body)}</span>
             <button onClick={() => setReplyTo(null)} className="ml-auto hover:text-text">
               <X size={14} />
             </button>
@@ -274,8 +276,10 @@ function Message({
   setEditing,
   channel,
   bubbles,
+  me,
 }: {
   message: MessageView;
+  me?: string;
   first: boolean;
   last: boolean;
   mine: boolean;
@@ -290,6 +294,8 @@ function Message({
   const [draft, setDraft] = useState(m.body);
   const isEditing = editing === m.id;
   const right = bubbles && mine;
+  const invites = useMemo(() => inviteCodes(m.body).slice(0, 3), [m.body]);
+  const mentionsMe = useMemo(() => !!me && mentionsIn(m.body).includes(me), [m.body, me]);
 
   const actions = !isEditing && (
     <div
@@ -344,7 +350,7 @@ function Message({
     </form>
   ) : (
     <div className="whitespace-pre-wrap break-words text-[14.5px] leading-relaxed">
-      {renderMessage(m.body)}
+      {renderMessage(m.body, { me })}
       <span className="ml-2 inline-flex translate-y-0.5 items-center gap-1 align-baseline text-[10.5px] text-faint">
         {m.edited && 'edited · '}
         {timeOf(m.ts)}
@@ -365,6 +371,9 @@ function Message({
             </span>
           ))}
       </span>
+      {invites.map((code) => (
+        <InviteCard key={code} code={code} />
+      ))}
     </div>
   );
 
@@ -374,7 +383,7 @@ function Message({
       style={{ borderColor: colorFor(replied.author) }}
     >
       <UserName userId={replied.author} className="font-semibold" /> ·{' '}
-      <span className="line-clamp-1">{replied.body}</span>
+      <span className="line-clamp-1">{plain(replied.body)}</span>
     </div>
   );
 
@@ -384,6 +393,7 @@ function Message({
         className={cx(
           'group flex gap-3 rounded-xl px-2 hover:bg-hover/50',
           first ? 'mt-3 py-1' : 'py-0.5',
+          mentionsMe && 'bg-accent-soft hover:bg-accent-soft',
         )}
       >
         <div className="w-9 shrink-0">{first && <Avatar userId={m.author} size={36} />}</div>
@@ -421,6 +431,7 @@ function Message({
         className={cx(
           'max-w-[72%] px-3.5 py-2 shadow-sm',
           right ? 'bg-bubble-me' : 'bg-bubble',
+          mentionsMe && 'ring-2 ring-accent',
           right
             ? cx(
                 'rounded-l-2xl',
