@@ -4,15 +4,15 @@ How Crocodile is tested, and how to test it by hand before a release.
 
 ## Layers
 
-| Layer                | What it covers                                                                                                                                    | Where                                              | Runs             |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------- |
-| Static checks        | Types, lint (incl. React hooks rules), formatting                                                                                                 | `pnpm typecheck`, `pnpm lint`, `pnpm format:check` | every PR         |
-| Unit tests           | Crypto (seal, ratchets, prekeys, padding), records, election, TURN, store                                                                         | `packages/*/test`                                  | every PR         |
-| Integration tests    | Real coordinators (single and mesh), clients with a fake relay network: chat, DMs, failover, devices, relay grants, outbox, mailbox, abuse limits | `tests/*.test.ts`                                  | every PR         |
-| Real-browser E2E     | Chromium WebRTC to the werift host relay with encoded-transform E2EE; Chromium through our TURN server                                            | `tests/browser.test.ts`                            | every PR         |
-| Electron E2E (smoke) | The **packaged** app: onboarding, spaces, invites, chat, voice, friends, settings, diagnostics, device linking, no-server start                   | `tests/electron/smoke.ts`                          | every PR (Linux) |
-| Packaging            | Unpacked builds for Windows, macOS, Linux; server bundles and Docker images                                                                       | CI `desktop`, `servers` jobs                       | every PR         |
-| Manual QA            | Real networks, real audio, several machines and OSes                                                                                              | this document                                      | before a release |
+| Layer                | What it covers                                                                                                                                           | Where                                              | Runs             |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------- |
+| Static checks        | Types, lint (incl. React hooks rules), formatting                                                                                                        | `pnpm typecheck`, `pnpm lint`, `pnpm format:check` | every PR         |
+| Unit tests           | Crypto (seal, ratchets, prekeys, padding), records, election, TURN, store                                                                                | `packages/*/test`                                  | every PR         |
+| Integration tests    | Real coordinators (single and mesh), clients with a fake relay network: chat, DMs, failover, devices, relay grants, outbox, mailbox, files, abuse limits | `tests/*.test.ts`                                  | every PR         |
+| Real-browser E2E     | Chromium WebRTC to the werift host relay with encoded-transform E2EE; Chromium through our TURN server                                                   | `tests/browser.test.ts`                            | every PR         |
+| Electron E2E (smoke) | The **packaged** app: onboarding, spaces, invites, chat, files, voice, friends, settings, diagnostics, device linking, no-server start                   | `tests/electron/smoke.ts`                          | every PR (Linux) |
+| Packaging            | Unpacked builds for Windows, macOS, Linux; server bundles and Docker images                                                                              | CI `desktop`, `servers` jobs                       | every PR         |
+| Manual QA            | Real networks, real audio, several machines and OSes                                                                                                     | this document                                      | before a release |
 
 Coverage is reported on every CI run (job summary and `coverage` artifact).
 The thresholds in `vitest.config.ts` are a ratchet: raise them when coverage
@@ -81,6 +81,8 @@ issue.
 | 18  | Light/dark theme, accent, compact messages; window resizing                                                      |     |       |       |
 | 19  | Unsigned-build warnings match docs/DISTRIBUTION.md                                                               |     |       |       |
 | 20  | From the previous release: Update appears, downloads, Restart to update opens the new one                        |     |       |       |
+| 21  | Files between machines on different networks: picture, video, a few-GB file; resume after Wi-Fi off and on       |     |       |       |
+| 22  | File passed on: sender quits after one member downloads; a third member still gets it; Open, Save as, delete     |     |       |       |
 
 Useful network conditions to try: two NATs (home + mobile), a VPN, IPv6-only
 hotspot, a captive/office network that blocks UDP, and packet loss
