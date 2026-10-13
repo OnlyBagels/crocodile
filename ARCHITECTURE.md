@@ -337,6 +337,66 @@ device that was away for weeks can still be opened when it returns. Servers
 operated from the desktop app keep mail only if their operator enables it,
 with small quotas.
 
+## 8a. Files
+
+Files follow the same rule as everything else: their content travels only
+between members, end-to-end encrypted. The difference is size, so the bytes
+don't ride the session's relay channel but a direct connection of their own.
+
+**The message.** Posting a file sends an ordinary chat message (signed by its
+author, encrypted with the text chain, synced to members who were offline)
+carrying a **manifest**: name, size, type, a random 32-byte file key and a
+**root hash**, plus for pictures and videos a tiny thumbnail (a few hundred
+bytes, still images only) and dimensions or duration. Deleting the message
+deletes the file on every member device that has it.
+
+**The content.** The file is split into 1 MiB blocks, each encrypted with
+AES-256-GCM under a key derived from the file key (HKDF, salted with the file
+id), with the block index as nonce and the file id, index and a last-block
+flag as associated data, so blocks can't be swapped, moved or cut off. The
+SHA-256 hashes of the encrypted blocks form a list whose hash is the root in
+the signed manifest. Blocks are stored on disk exactly as they travel,
+encrypted, so files need no separate protection at rest.
+
+**Finding someone who has it.** A device that wants a file asks the session
+(`file_want`, group-encrypted). Members whose devices hold the whole file
+answer with a sealed `file_have`: the author, and anyone who downloaded it
+(Settings → Files lets people stop giving out what they downloaded). Nobody
+answers when nobody who has it is online; the device asks again whenever
+someone joins the session, so the download starts by itself when they do.
+
+**The connection.** The downloader opens a WebRTC data channel to one holder,
+exchanging offer and answer as sealed boxes through the session (signed by
+their senders, which binds the DTLS fingerprints to the two identities, so
+neither the session's host nor a server can splice in). Only STUN servers are
+offered: **files never go through a TURN relay or any server**, and when no
+direct path exists the app says so. The holder serves a file only to members
+of the space or DM it was posted in, through that session, checking again
+before every block (someone removed or blocked mid-transfer gets nothing
+more), and at most four uploads at a time, two to any one member.
+
+**The transfer.** Over the channel the downloader asks for the block hash
+list (checked against the root), then for runs of the blocks it lacks. Each
+block arrives in frames of at most 48 KiB (under werift's 64 KiB data channel
+limit) with a 9-byte header, and is checked against its hash before it is
+stored. Progress is saved as a bitmap, so a dropped connection resumes from
+where it stopped, with the same holder or another. Once every block is in,
+the downloader says so (`done`), which is when the holder counts the file
+as delivered. A holder checks each
+block against the hash list before sending it, and stops giving out a copy
+that no longer matches.
+
+**Auto-download.** Pictures and videos up to 10 MB are fetched without
+asking from friends and in DMs, from anyone, or never (Settings → Files);
+everything else waits for a click. Fetching connects to the holder, who sees
+the downloader's IP address, which is why strangers' media isn't fetched by
+default; and in the default setting the file is fetched only from its author
+or a friend, not from any other member who happens to have it. A click
+fetches from anyone who has it.
+
+Older apps drop file messages (their signature covers a field they don't
+know), so everyone needs an app that knows files to see them.
+
 ## 9. Client structure
 
 `CrocodileClient` (`client-core/src/client.ts`) exposes one observable state
@@ -390,4 +450,8 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 - **Global push-to-talk** needs X11 on Linux (not Wayland) and the
   Accessibility permission on macOS; otherwise it works while the app is
   focused.
+- **Files need a direct path.** Two members who can only reach each other
+  through a server relay can't exchange files; a third member who has the
+  file and can reach both still can. Downloads come from one holder at a
+  time.
 - **Mobile apps** are not built yet.

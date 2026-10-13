@@ -70,6 +70,24 @@ const api = {
       };
     },
   },
+  files: {
+    write: (id: string, index: number, block: Uint8Array) =>
+      ipcRenderer.invoke('files:write', id, index, block) as Promise<void>,
+    read: (id: string, index: number, length: number) =>
+      ipcRenderer.invoke('files:read', id, index, length) as Promise<Uint8Array | null>,
+    delete: (id: string) => ipcRenderer.invoke('files:delete', id) as Promise<void>,
+    usage: () => ipcRenderer.invoke('files:usage') as Promise<number>,
+    /** Asks where to save; null if the user cancelled. Returns a token for chunk/end. */
+    saveBegin: (name: string) =>
+      ipcRenderer.invoke('files:save-begin', name) as Promise<string | null>,
+    /** Writes to a private temporary file, to open with the system's app. */
+    openBegin: (name: string) => ipcRenderer.invoke('files:open-begin', name) as Promise<string>,
+    chunk: (token: string, data: Uint8Array) =>
+      ipcRenderer.invoke('files:chunk', token, data) as Promise<void>,
+    end: (token: string, then: 'open' | 'reveal' | 'none') =>
+      ipcRenderer.invoke('files:end', token, then) as Promise<void>,
+    abort: (token: string) => ipcRenderer.invoke('files:abort', token) as Promise<void>,
+  },
   app: {
     info: () =>
       ipcRenderer.invoke('app:info') as Promise<{

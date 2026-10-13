@@ -19,6 +19,10 @@ the people in the conversation. Servers never see them.
   server, only while a direct connection is impossible.
 - **Messages wait for offline friends.** Your device keeps them until you're
   both online; optionally a server holds them sealed for up to a few days.
+- **Files of any size, straight to your people.** Pictures, videos and other
+  files go directly from one member's device to another's, encrypted, never
+  through a server, and resume if the connection drops. Anyone who has a file
+  can pass it on, so it stays available after the sender goes offline.
 - **Community-run coordination.** Volunteer coordination servers introduce
   peers, elect hosts and replicate _signed_ public metadata among themselves.
   Your app picks the fastest one automatically and keeps a backup.

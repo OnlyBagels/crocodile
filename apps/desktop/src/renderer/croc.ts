@@ -1,3 +1,4 @@
+import { dropObjectUrl } from './lib/files';
 import { useRef, useSyncExternalStore } from 'react';
 import {
   CrocodileClient,
@@ -175,6 +176,16 @@ export async function bootClient(): Promise<CrocodileClient> {
   }
   desktop?.ptt.onState((down) => engine.setPushToTalk(down));
   void syncGlobalPtt();
+  // A file's message was deleted: let go of its decrypted copy too.
+  let files = client.state.files;
+  client.store.subscribe(() => {
+    const s = client.state;
+    if (s.files === files) return;
+    for (const id of Object.keys(files))
+      if (!s.files[id] || (files[id]!.status === 'done' && s.files[id]!.status !== 'done'))
+        dropObjectUrl(id);
+    files = s.files;
+  });
   await client.init();
   return client;
 }

@@ -12,3 +12,5 @@ export * from './client';
 export * from './voice';
 export * from './caps';
 export * from './frame-scopes';
+export * from './files';
+export * from './file-link';

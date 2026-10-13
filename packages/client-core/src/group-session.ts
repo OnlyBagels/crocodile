@@ -128,6 +128,13 @@ export type GroupSessionEvents = {
   typing: { userId: string; ch: string };
   call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end' };
   error: { message: string };
+  /** File transfer messages from a peer allowed in the session (files.ts). */
+  file: {
+    from: string;
+    payload:
+      | Extract<SealedPayload, { type: 'file_have' | 'file_link' }>
+      | Extract<GroupPayload, { type: 'file_want' }>;
+  };
 };
 
 /**
@@ -897,6 +904,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
   }
 
+  /** A sealed payload to one peer connected to the session. */
+  sendSealedTo(to: string, payload: SealedPayload): Promise<boolean> {
+    return this.sendSealed(to, payload);
+  }
+
   private async sendSealed(to: string, payload: SealedPayload): Promise<boolean> {
     const box = await this.ctx.seal(to, utf8.encode(JSON.stringify(payload)));
     if (!box || !this.transport) {
@@ -983,6 +995,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         return;
       case 'mail':
         return;
+      case 'file_have':
+      case 'file_link':
+        if (!(await this.mayHear(from))) return;
+        this.emit('file', { from, payload });
+        return;
     }
   }
 
@@ -1004,6 +1021,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.emit('typing', { userId: fromUser, ch: payload.ch });
     } else if (payload.type === 'call' && this.isDm) {
       this.emit('call', { userId: fromUser, action: payload.action });
+    } else if (payload.type === 'file_want') {
+      this.emit('file', { from, payload });
     }
   }
 

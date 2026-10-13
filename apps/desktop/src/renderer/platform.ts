@@ -2,6 +2,7 @@ import { openDB, type IDBPDatabase } from 'idb';
 import {
   browserCapabilities,
   createNetworkProber,
+  type FileBlockStore,
   type HostRelayAdapter,
   type KeyValueStore,
   type MessageStore,
@@ -258,6 +259,19 @@ function relayAdapter(api: DesktopApi): HostRelayAdapter {
   };
 }
 
+/** Encrypted file blocks, on disk through the main process. */
+function fileStore(api: DesktopApi): FileBlockStore {
+  return {
+    write: (id, index, block) => api.files.write(id, index, block),
+    read: async (id, index, length) => {
+      const b = await api.files.read(id, index, length);
+      return b ? new Uint8Array(b) : null;
+    },
+    delete: (id) => api.files.delete(id),
+    usage: () => api.files.usage(),
+  };
+}
+
 export function createPlatform(opts: {
   version: string;
   cpuCores?: number;
@@ -271,7 +285,7 @@ export function createPlatform(opts: {
     appVersion: opts.version,
     kv,
     messages,
-    ...(desktop ? { relay: relayAdapter(desktop) } : {}),
+    ...(desktop ? { relay: relayAdapter(desktop), files: fileStore(desktop) } : {}),
     rtc: { RTCPeerConnection, getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c) },
     probeNetwork,
     async capabilities() {

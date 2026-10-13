@@ -6,3 +6,4 @@ export * from './rpc';
 export * from './federation';
 export * from './directory';
 export * from './relay';
+export * from './files';

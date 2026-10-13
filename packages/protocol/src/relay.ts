@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { FileId, FileManifest } from './files';
 
 /**
  * Messages on the reliable data channel between a member and the host relay.
@@ -107,6 +108,8 @@ export const ChatMessage = z.object({
   /** Set on edits: id of the message being replaced. */
   edits: z.string().max(40).optional(),
   deleted: z.boolean().optional(),
+  /** A file posted with the message (the body is its caption). */
+  file: FileManifest.optional(),
   sig: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
@@ -137,6 +140,21 @@ export const SealedPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ack'), ids: z.array(z.string().max(40)).max(500) }),
   /** Messages delivered through a server mailbox while the recipient was offline. */
   z.object({ type: z.literal('mail'), messages: z.array(ChatMessage).max(50) }),
+  /** Answer to `file_want`: this device has the whole file and will serve it. */
+  z.object({ type: z.literal('file_have'), file: FileId }),
+  /**
+   * Setting up a direct connection for one file: the downloader's offer and
+   * the holder's answer. The box is signed by its sender, which binds the
+   * connection's DTLS fingerprint to their identity.
+   */
+  z.object({
+    type: z.literal('file_link'),
+    file: FileId,
+    /** Random id of this connection attempt. */
+    link: z.string().regex(/^[A-Za-z0-9_-]{8,32}$/),
+    kind: z.enum(['offer', 'answer', 'reject']),
+    sdp: z.string().max(64_000).optional(),
+  }),
 ]);
 export type SealedPayload = z.infer<typeof SealedPayload>;
 
@@ -146,5 +164,7 @@ export const GroupPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('typing'), ch: z.string().max(200) }),
   /** Direct-call signalling inside a DM session. */
   z.object({ type: z.literal('call'), action: z.enum(['ring', 'accept', 'decline', 'end']) }),
+  /** Looking for a member who has this file (posted in this session). */
+  z.object({ type: z.literal('file_want'), file: FileId }),
 ]);
 export type GroupPayload = z.infer<typeof GroupPayload>;

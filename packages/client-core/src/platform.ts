@@ -32,6 +32,19 @@ export interface MessageStore {
   clear(): Promise<void>;
 }
 
+/**
+ * Encrypted file blocks (files.ts): kept as they travel, so they need no
+ * other protection at rest. Block `index` of a file is `length` bytes.
+ */
+export interface FileBlockStore {
+  write(fileId: string, index: number, block: Uint8Array): Promise<void>;
+  /** Null when the block isn't there. */
+  read(fileId: string, index: number, length: number): Promise<Uint8Array | null>;
+  delete(fileId: string): Promise<void>;
+  /** Bytes of files stored on this device. */
+  usage?(): Promise<number>;
+}
+
 /** A running relay for a session this device hosts. */
 export interface RelayHandle {
   handleSignal(from: string, data: SignalData): void;
@@ -67,6 +80,8 @@ export interface PlatformAdapter {
   appVersion: string;
   kv: KeyValueStore;
   messages: MessageStore;
+  /** Absent means this device can't send or receive files. */
+  files?: FileBlockStore;
   relay?: HostRelayAdapter;
   /** Browser WebRTC; absent means text/voice sessions are unavailable (e.g. unit tests). */
   rtc?: {
@@ -94,6 +109,25 @@ export class MemoryKeyValueStore implements KeyValueStore {
   }
   async delete(key: string) {
     this.map.delete(key);
+  }
+}
+
+export class MemoryFileBlockStore implements FileBlockStore {
+  private blocks = new Map<string, Uint8Array>();
+  async write(fileId: string, index: number, block: Uint8Array) {
+    this.blocks.set(`${fileId}/${index}`, block.slice());
+  }
+  async read(fileId: string, index: number, length: number) {
+    const b = this.blocks.get(`${fileId}/${index}`);
+    return b && b.length === length ? b.slice() : null;
+  }
+  async delete(fileId: string) {
+    for (const k of [...this.blocks.keys()]) if (k.startsWith(`${fileId}/`)) this.blocks.delete(k);
+  }
+  async usage() {
+    let n = 0;
+    for (const b of this.blocks.values()) n += b.length;
+    return n;
   }
 }
 

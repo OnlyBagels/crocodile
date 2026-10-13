@@ -32,7 +32,12 @@ import {
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
+  FILE_AUTO_DOWNLOAD_MAX,
+  FILE_MAX_SIZE,
+  FileManifest,
+  FileThumb,
   LIMITS,
+  fileMediaKind,
   NotePayload,
   fromB64u,
   isSealedFriends,
@@ -89,6 +94,8 @@ import {
   type ConnectAttempt,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
+import { webrtcFileLinks, type FileLinkFactory } from './file-link';
+import { FileTransfers, type FileSource, type FileView } from './files';
 import {
   networkChecklist,
   networkVerdict,
@@ -109,6 +116,8 @@ export interface ClientConfig {
   preferredServers?: string[];
   /** Override the WebRTC transport (tests). */
   transportFactory?: TransportFactory;
+  /** Override direct connections for files (tests). */
+  fileLinks?: FileLinkFactory;
   /** This device's clock (tests). */
   now?: () => number;
   /** How long an unanswered call rings before hanging up (45 s; tests). */
@@ -137,6 +146,14 @@ export interface Settings {
   useMailbox: boolean;
   /** Display name of this device. */
   deviceName?: string;
+  /**
+   * Fetch pictures and videos up to 10 MB by themselves: from friends and in
+   * DMs, from anyone, or never. Fetching connects to whoever has the file,
+   * who then sees this device's IP address.
+   */
+  autoDownload: 'friends' | 'everyone' | 'never';
+  /** Give files this device downloaded to members of the same space or DM who ask. */
+  shareDownloads: boolean;
 }
 
 export const defaultSettings: Settings = {
@@ -146,6 +163,8 @@ export const defaultSettings: Settings = {
   notifications: true,
   allowServerRelay: false,
   useMailbox: false,
+  autoDownload: 'friends',
+  shareDownloads: true,
 };
 
 export interface ProfileView {
@@ -327,6 +346,8 @@ export interface ClientState {
    * it (useRelay). `with` is the person we were trying to reach.
    */
   connectionTrouble: { sessionId: string; with: string | null } | null;
+  /** Files in messages this device knows of: what is here and what is on its way. */
+  files: Record<string, FileView>;
 }
 
 export type ClientEvents = {
@@ -335,6 +356,8 @@ export type ClientEvents = {
   error: { message: string };
   /** A call we are in: went live, someone joined or left it, or it ended. */
   call: { sessionId: string; event: 'live' | 'joined' | 'left' | 'ended' };
+  /** Someone fetched all of a file from this device. `to` is a user id. */
+  fileServed: { fileId: string; to: string };
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
@@ -388,6 +411,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Grows while notes keep failing, so an unreachable person isn't asked about constantly. */
   private friendRetryDelay = FRIEND_NOTE_RETRY_MS;
   private friendSweepTimer?: ReturnType<typeof setInterval>;
+  /** Absent when the platform can't store files or connect directly. */
+  files?: FileTransfers;
 
   constructor(
     readonly platform: PlatformAdapter,
@@ -397,6 +422,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records = new RecordCache(platform.kv);
     this.outbox = new Outbox(platform.kv);
     this.transportFactory = config.transportFactory ?? defaultTransportFactory(platform);
+    const links =
+      config.fileLinks ??
+      (platform.rtc ? webrtcFileLinks(platform.rtc.RTCPeerConnection) : undefined);
+    if (platform.files && links) this.files = this.makeFiles(platform.files, links);
     this.store = new StateStore<ClientState>({
       phase: 'loading',
       link: 'idle',
@@ -429,6 +458,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       accountDeleted: false,
       network: null,
       connectionTrouble: null,
+      files: {},
     });
     this.records.on('changed', (r) => this.onRecordChanged(r));
     this.records.on('wanted', (keys) => this.fetchWanted(keys));
@@ -491,6 +521,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
     await this.loadDevice();
     await this.outbox.load();
+    await this.files?.load();
     this.store.set({ settings, dms, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
@@ -674,6 +705,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.reset();
     this.outbox.dispose();
     await this.platform.messages.clear();
+    if (this.files) {
+      this.files.close();
+      for (const f of this.files.list()) await this.files.forget(f.id);
+    }
     await this.platform.kv.delete('identity-seed');
     await this.platform.kv.delete('records-cache');
     await this.platform.kv.delete('prekeys');
@@ -2025,6 +2060,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }),
     );
     session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
+    session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
+    session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
       const until = Date.now() + 6000;
       this.store.set((s) => ({
@@ -2588,10 +2625,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async sendMessage(
     channel: string,
     body: string,
-    opts: { replyTo?: string; edits?: string; deleted?: boolean } = {},
+    opts: { replyTo?: string; edits?: string; deleted?: boolean; file?: FileManifest } = {},
+    /** Runs once the message exists and before anyone can see it. */
+    created?: (message: ChatMessage, sessionId: string) => Promise<void>,
   ) {
     const text = body.trim();
-    if (!text && !opts.deleted) return;
+    if (!text && !opts.deleted && !opts.file) return;
     if (text.length > LIMITS.messageMaxChars)
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
     const sessionId = this.sessionOfChannel(channel);
@@ -2609,7 +2648,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     );
     const ts = latest + 1 > now && latest + 1 <= now + MAX_AHEAD_MS - 60_000 ? latest + 1 : now;
     const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
+    await created?.(message, sessionId);
     await this.platform.messages.put(message);
+    if (opts.deleted && opts.edits) await this.files?.forgetMessage(opts.edits, this.userId);
     this.outbox.add(message, sessionId);
     const session = this.sessions.get(sessionId);
     const delivered =
@@ -2620,6 +2661,125 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.emit('message', { channel, message, mine: true, update: !!message.edits });
     if (!delivered && sessionId.startsWith('dm:')) void this.pokeDm(sessionId);
     this.scheduleMail();
+  }
+
+  /**
+   * Posts a file: encrypts it into this device's storage, then sends the
+   * message that carries its manifest. Members fetch it from this device (or
+   * anyone who already has it) over a direct connection.
+   */
+  async sendFile(
+    channel: string,
+    source: FileSource,
+    opts: {
+      caption?: string;
+      replyTo?: string;
+      /** Made by the UI for pictures and videos. */
+      preview?: { thumb?: string; w?: number; h?: number; dur?: number };
+      onProgress?: (done: number) => void;
+      /**
+       * False: keep no encrypted copy; the platform's block store makes
+       * blocks from the original. `prepared` runs before the message goes
+       * out, so the store can learn where that is.
+       */
+      store?: boolean;
+      prepared?: (file: FileManifest) => void | Promise<void>;
+    } = {},
+  ) {
+    const files = this.files;
+    if (!files) throw new Error('This device cannot send files');
+    if (!this.sessionOfChannel(channel)) throw new Error('unknown channel');
+    if (source.size > FILE_MAX_SIZE) throw new Error('Files are limited to 1 TB');
+    const caption = opts.caption?.trim() ?? '';
+    if (caption.length > LIMITS.messageMaxChars)
+      throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
+    const { manifest, hashes } = await files.prepare(source, opts.onProgress, opts.store ?? true);
+    try {
+      const p = opts.preview ?? {};
+      const file = FileManifest.parse({
+        ...manifest,
+        name: cleanFileName(manifest.name),
+        type: manifest.type.slice(0, 127),
+        ...(p.thumb && FileThumb.safeParse(p.thumb).success ? { thumb: p.thumb } : {}),
+        ...(p.w && p.h ? { w: Math.round(p.w), h: Math.round(p.h) } : {}),
+        ...(p.dur !== undefined && Number.isFinite(p.dur) ? { dur: p.dur } : {}),
+      });
+      await opts.prepared?.(file);
+      await this.sendMessage(
+        channel,
+        caption,
+        { file, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) },
+        (message, sessionId) => files.posted(sessionId, { ...message, file }, hashes),
+      );
+      return file.id;
+    } catch (err) {
+      // Not posted: the encrypted copy has nothing left to serve.
+      await files.forget(manifest.id);
+      throw err;
+    }
+  }
+
+  /** Start fetching a file in a message. */
+  async downloadFile(fileId: string) {
+    if (!this.files) throw new Error('This device cannot receive files');
+    await this.files.download(fileId);
+  }
+
+  /**
+   * Fetch a file by itself if the auto-download setting allows it. With
+   * "from friends", only from the author or a friend: whoever sends it sees
+   * this device's IP address, and nobody chose to connect to anyone else.
+   */
+  async autoDownloadFile(message: ChatMessage) {
+    if (!this.shouldAutoDownload(message)) return;
+    const author = message.author;
+    const anyone = this.state.settings.autoDownload === 'everyone';
+    await this.files!.download(
+      message.file!.id,
+      anyone
+        ? {}
+        : {
+            from: (peer) => {
+              const user = peerIds.user(peer);
+              return user === author || this.state.friends.friends.includes(user);
+            },
+          },
+    );
+  }
+
+  /** A downloaded (or sent) file's contents, block by block. */
+  async readFile(fileId: string, sink: (plain: Uint8Array) => Promise<void> | void) {
+    if (!this.files) throw new Error('This device cannot read files');
+    await this.files.read(fileId, sink);
+  }
+
+  /** Deletes the copies of files this device downloaded (not the ones it sent). */
+  async clearDownloadedFiles() {
+    if (!this.files) return;
+    for (const f of this.files.list())
+      if (!f.mine) await this.files.forget(f.id, { keepRecord: true });
+  }
+
+  /** Bytes of files on this device. */
+  async fileStorageUsed() {
+    return (await this.platform.files?.usage?.()) ?? 0;
+  }
+
+  /**
+   * Whether a file should be fetched without asking: pictures and videos up
+   * to 10 MB, from the people the auto-download setting allows.
+   */
+  shouldAutoDownload(message: ChatMessage): boolean {
+    const f = message.file;
+    if (!f || !this.files || message.deleted) return false;
+    if (message.author === this.identity?.userId) return false;
+    if (!fileMediaKind(f.type) || f.size > FILE_AUTO_DOWNLOAD_MAX) return false;
+    const view = this.state.files[f.id];
+    if (view && view.status !== 'none') return false;
+    const mode = this.state.settings.autoDownload;
+    if (mode === 'never') return false;
+    if (mode === 'everyone') return true;
+    return message.ch.startsWith('dm:') || this.state.friends.friends.includes(message.author);
   }
 
   editMessage(channel: string, id: string, body: string) {
@@ -2645,6 +2805,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
     const mine = message.author === this.userId;
+    await this.noteFile(sessionId, message, mine);
     // Edits and deletions change what's there; they aren't news.
     const update = !!message.edits;
     if (!mine && !update && this.state.activeChannel !== message.ch) {
@@ -2660,6 +2821,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     });
     this.emit('message', { channel: message.ch, message, mine, update });
     return true;
+  }
+
+  /** Keeps track of files posted in messages, and of their deletion. */
+  private async noteFile(sessionId: string, message: ChatMessage, mine: boolean) {
+    const files = this.files;
+    if (!files) return;
+    if (message.file && !message.edits) {
+      await files.noted(sessionId, { ...message, file: message.file }, mine);
+      // Live messages (not old history) may be fetched right away.
+      const now = this.config.now?.() ?? Date.now();
+      if (now - message.ts < 2 * 60_000) void this.autoDownloadFile(message).catch(() => {});
+    } else if (message.edits && message.deleted) {
+      await files.forgetMessage(message.edits, message.author);
+    }
   }
 
   private addToTimeline(channel: string, message: MessageView) {
@@ -2874,9 +3049,78 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     clearTimeout(this.ringingTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
+    this.files?.close();
     this.link?.stop();
     await this.outbox.flush().catch(() => {});
   }
+
+  private makeFiles(blocks: NonNullable<PlatformAdapter['files']>, links: FileLinkFactory) {
+    return new FileTransfers({
+      kv: this.platform.kv,
+      blocks,
+      links,
+      peer: () => this.peer,
+      iceServers: () => this.stun.map((urls) => ({ urls })),
+      session: (sid) => this.sessions.get(sid),
+      openSession: async (sid) => {
+        const scope = parseSessionId(sid);
+        if (scope?.kind === 'dm') {
+          const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
+          await this.openDm(other);
+          return;
+        }
+        const session = this.ensureSession(sid);
+        if (!session.state) await session.join();
+      },
+      isAllowedPeer: (sid, peer) => this.isAllowedPeer(sid, peer),
+      shareDownloads: () => this.state.settings.shareDownloads,
+      changed: (id, view) =>
+        this.store.set((st) => {
+          if (view) return { files: { ...st.files, [id]: view } };
+          const { [id]: _, ...rest } = st.files;
+          return { files: rest };
+        }),
+      served: (fileId, to) => this.emit('fileServed', { fileId, to: peerIds.user(to) }),
+      log: (m, e) => this.log(m, e),
+    });
+  }
+}
+
+/**
+ * A file name safe to show and to offer when saving: no folders, control
+ * characters or characters Windows refuses, not hidden, not empty.
+ */
+export function cleanFileName(name: string): string {
+  const base = (name.split(/[\\/]/).pop() ?? '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_');
+  // Dots and spaces off both ends, in one pass each (a regex anchored at the
+  // end would retry from every space of a long run).
+  const trimmed = (ch: string) => ch === '.' || /\s/.test(ch);
+  let start = 0;
+  let end = base.length;
+  while (start < end && trimmed(base[start]!)) start++;
+  while (end > start && trimmed(base[end - 1]!)) end--;
+  return fitName(base.slice(start, end)) || 'file';
+}
+
+/** Bytes a file name may take: what most file systems allow. */
+const NAME_MAX_BYTES = 255;
+
+/** A name cut to fit in UTF-8 bytes, whole characters only, keeping a short extension. */
+function fitName(name: string) {
+  const bytes = (s: string) => utf8.encode(s).length;
+  if (name.length <= NAME_MAX_BYTES / 3 || bytes(name) <= NAME_MAX_BYTES) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
+  let room = NAME_MAX_BYTES - bytes(ext);
+  let out = '';
+  for (const ch of name.slice(0, name.length - ext.length)) {
+    room -= bytes(ch);
+    if (room < 0) break;
+    out += ch;
+  }
+  return out + ext;
 }
 
 /** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */
@@ -2929,6 +3173,7 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
           edited: !m.deleted,
           deleted: m.deleted,
         };
+        if (m.deleted) delete updated.file;
         byId.set(original.id, updated);
         out[out.indexOf(original)] = updated;
       }
