@@ -3067,14 +3067,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
  * characters or characters Windows refuses, not hidden, not empty.
  */
 export function cleanFileName(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? '';
-  const clean = base
+  const base = (name.split(/[\\/]/).pop() ?? '')
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_')
-    .replace(/^[.\s]+/, '')
-    .replace(/[.\s]+$/, '')
-    .slice(0, 255);
-  return clean || 'file';
+    .replace(/[\u0000-\u001f\u007f<>:"|?*\u202a-\u202e\u2066-\u2069]/g, '_');
+  // Dots and spaces off both ends, in one pass each (a regex anchored at the
+  // end would retry from every space of a long run).
+  const trimmed = (ch: string) => ch === '.' || /\s/.test(ch);
+  let start = 0;
+  let end = base.length;
+  while (start < end && trimmed(base[start]!)) start++;
+  while (end > start && trimmed(base[end - 1]!)) end--;
+  return base.slice(start, end).slice(0, 255) || 'file';
 }
 
 /** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */

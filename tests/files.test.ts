@@ -404,5 +404,13 @@ describe('file names', () => {
     expect(cleanFileName('evil\u202Egnp.exe')).toBe('evil_gnp.exe');
     expect(cleanFileName('a<b>:c|d?.txt')).toBe('a_b__c_d_.txt');
     expect(cleanFileName('   ')).toBe('file');
+    expect(cleanFileName(' . a b . ')).toBe('a b');
+  });
+
+  it('takes no longer on long runs of spaces than on any other name', () => {
+    const name = `a${' '.repeat(100_000)}b`;
+    const start = performance.now();
+    expect(cleanFileName(name)).toHaveLength(255);
+    expect(performance.now() - start).toBeLessThan(250);
   });
 });

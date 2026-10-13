@@ -88,7 +88,8 @@ function Progress({ view }: { view?: FileView }) {
 
 function iconFor(file: FileManifest) {
   if (/zip|rar|7z|tar|gzip|compressed/.test(file.type)) return FileArchive;
-  if (/^text\/|pdf|document|msword|sheet|presentation/.test(file.type)) return FileText;
+  if (file.type.startsWith('text/') || /pdf|document|msword|sheet|presentation/.test(file.type))
+    return FileText;
   return FileIcon;
 }
 
