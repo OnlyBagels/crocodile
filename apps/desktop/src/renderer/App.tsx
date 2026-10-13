@@ -38,6 +38,7 @@ import {
 import { ConfirmModal, NewDmModal, ProfileModal } from './modals/UserModals';
 import { LinkDeviceModal } from './modals/DeviceModals';
 import { SettingsModal } from './modals/Settings';
+import { CameraModal, ShareScreenModal } from './modals/VideoModals';
 
 export function App() {
   const phase = useCroc((s) => s.phase);
@@ -228,6 +229,10 @@ function Modals() {
       return <ConfirmModal {...modal} />;
     case 'connection':
       return <ConnectionModal sessionId={modal.sessionId} />;
+    case 'camera':
+      return <CameraModal />;
+    case 'share-screen':
+      return <ShareScreenModal />;
   }
 }
 

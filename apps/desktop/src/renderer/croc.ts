@@ -29,6 +29,10 @@ export type ModalState =
   | { kind: 'link-device' }
   /** How a session's connection stands, step by step. */
   | { kind: 'connection'; sessionId: string }
+  /** Turning the camera on: a preview first. */
+  | { kind: 'camera' }
+  /** Picking a screen or window to share. */
+  | { kind: 'share-screen' }
   | {
       kind: 'confirm';
       title: string;
@@ -155,6 +159,12 @@ export async function bootClient(): Promise<CrocodileClient> {
       getUserMedia: (c) => navigator.mediaDevices.getUserMedia(c),
       enumerateDevices: () => navigator.mediaDevices.enumerateDevices(),
       createFrameWorker: () => new FrameWorker(),
+      // The source was picked in our own picker; the main process hands it over.
+      getDisplayMedia: async (request) => {
+        if (desktop && request.sourceId)
+          await desktop.screen.choose(request.sourceId, request.audio);
+        return navigator.mediaDevices.getDisplayMedia({ video: true, audio: request.audio });
+      },
     },
     voiceSettings,
   );

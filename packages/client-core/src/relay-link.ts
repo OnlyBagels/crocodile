@@ -393,39 +393,66 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
   async addMedia(slots: { video: number; audio: number }) {
     if (this.media || this.mediaAnswer || this.closed) return;
     const crypto = this.opts.crypto;
-    const up = (kind: 'audio' | 'video') => this.pc.addTransceiver(kind, { direction: 'sendonly' });
-    const camera = up('video');
-    const screen = up('video');
-    const screenAudio = up('audio');
+    const added: RTCRtpTransceiver[] = [];
+    const add = (kind: 'audio' | 'video', direction: RTCRtpTransceiverDirection) => {
+      const t = this.pc.addTransceiver(kind, { direction });
+      added.push(t);
+      onlyCodec(t, kind === 'video' ? 'video/vp8' : 'audio/opus');
+      return t;
+    };
+    const camera = add('video', 'sendonly');
+    const screen = add('video', 'sendonly');
+    const screenAudio = add('audio', 'sendonly');
     crypto?.protectVideoSender?.(camera.sender);
     crypto?.protectVideoSender?.(screen.sender);
     crypto?.protectSender(screenAudio.sender);
+    for (let i = 0; i < slots.video; i++) {
+      const t = add('video', 'recvonly');
+      crypto?.protectVideoReceiver?.(t.receiver);
+      this.videoSlots.push(t);
+    }
+    for (let i = 0; i < slots.audio; i++) {
+      const t = add('audio', 'recvonly');
+      crypto?.protectReceiver(t.receiver);
+      this.soundSlots.push(t);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const answered = new Promise<string>((res, rej) => {
+      this.mediaAnswer = res;
+      timer = setTimeout(() => rej(new Error('the host did not answer')), 15_000);
+    });
+    // Only awaited once the offer went out; a failure before that mustn't go unhandled.
+    answered.catch(() => {});
+    try {
+      await this.pc.setLocalDescription(await this.pc.createOffer());
+      const msg = JSON.stringify({ t: 'renegotiate', sdp: this.pc.localDescription!.sdp });
+      const limit = this.pc.sctp?.maxMessageSize;
+      if (limit && msg.length > limit)
+        throw new Error(`the video offer is too large to send (${msg.length} bytes)`);
+      if (!this.isOpen) throw new Error('not connected');
+      this.dc.send(msg);
+      const sdp = await answered;
+      if (this.closed) return;
+      await this.pc.setRemoteDescription({ type: 'answer', sdp });
+    } catch (err) {
+      // Back to the voice-only connection we had, still usable.
+      if (!this.closed) {
+        if (this.pc.signalingState === 'have-local-offer')
+          await this.pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+        for (const t of added) t.stop?.();
+      }
+      this.videoSlots = [];
+      this.soundSlots = [];
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      this.mediaAnswer = undefined;
+    }
     this.outgoing = {
       camera: camera.sender,
       screen: screen.sender,
       screenAudio: screenAudio.sender,
     };
-    for (let i = 0; i < slots.video; i++) {
-      const t = this.pc.addTransceiver('video', { direction: 'recvonly' });
-      crypto?.protectVideoReceiver?.(t.receiver);
-      this.videoSlots.push(t);
-    }
-    for (let i = 0; i < slots.audio; i++) {
-      const t = this.pc.addTransceiver('audio', { direction: 'recvonly' });
-      crypto?.protectReceiver(t.receiver);
-      this.soundSlots.push(t);
-    }
-    const answered = new Promise<string>((res, rej) => {
-      this.mediaAnswer = res;
-      setTimeout(() => rej(new Error('the host did not answer')), 15_000);
-    });
-    await this.pc.setLocalDescription(await this.pc.createOffer());
-    if (!this.send({ t: 'renegotiate', sdp: this.pc.localDescription!.sdp }))
-      throw new Error('not connected');
-    const sdp = await answered;
-    this.mediaAnswer = undefined;
-    if (this.closed) return;
-    await this.pc.setRemoteDescription({ type: 'answer', sdp });
     this.media = true;
     this.emit('media', undefined);
   }
@@ -483,5 +510,22 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     }
     this.pc.close();
     this.emit('closed', undefined);
+  }
+}
+
+/**
+ * Offers just the codec the host forwards (VP8, Opus). Besides matching what
+ * it accepts, this keeps the offer small: with every codec a browser knows,
+ * a dozen video m-lines don't fit in one data channel message.
+ */
+function onlyCodec(t: RTCRtpTransceiver, mimeType: string) {
+  const kind = mimeType.split('/')[0]!;
+  const caps = globalThis.RTCRtpReceiver?.getCapabilities?.(kind);
+  const codecs = caps?.codecs.filter((c) => c.mimeType.toLowerCase() === mimeType);
+  if (!codecs?.length || !t.setCodecPreferences) return;
+  try {
+    t.setCodecPreferences(codecs);
+  } catch {
+    // Left to the browser's defaults.
   }
 }

@@ -4,6 +4,7 @@ import { getClient, useCroc } from '../croc';
 import { callPhase, callStatusText, showDmCallStage } from '../lib/call';
 import { Participant } from './CallParticipants';
 import { IconButton, cx } from './ui';
+import { CallVideo, VideoButtons } from './CallVideo';
 
 /**
  * A DM's call, laid out like a voice room: both people on a stage above the
@@ -28,6 +29,7 @@ export function DmCallStage({
   const deafened = useCroc((s) => s.deafened);
   const otherName = useCroc((s) => s.profiles[otherUserId]?.username ?? 'them');
   const otherInCall = !!session?.inCall.includes(otherUserId);
+  const hasVideo = joined && !!session?.video.streams.length;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
     if (!liveSince) return;
@@ -56,28 +58,34 @@ export function DmCallStage({
           {status}
         </span>
       </div>
-      <div className="flex items-start justify-center gap-16 px-6 py-6">
-        <Participant
-          userId={me}
-          session={joined ? session : undefined}
-          size={96}
-          away={joined ? undefined : 'Not in the call'}
-        />
-        <Participant
-          userId={otherUserId}
-          session={otherInCall ? session : undefined}
-          size={96}
-          away={
-            otherInCall
-              ? undefined
-              : ringingOut
-                ? 'Ringing…'
-                : joined
-                  ? 'Not in the call'
-                  : undefined
-          }
-        />
-      </div>
+      {hasVideo ? (
+        <div className="max-h-[55vh] overflow-y-auto">
+          <CallVideo sessionId={sessionId} members={[me, otherUserId]} />
+        </div>
+      ) : (
+        <div className="flex items-start justify-center gap-16 px-6 py-6">
+          <Participant
+            userId={me}
+            session={joined ? session : undefined}
+            size={96}
+            away={joined ? undefined : 'Not in the call'}
+          />
+          <Participant
+            userId={otherUserId}
+            session={otherInCall ? session : undefined}
+            size={96}
+            away={
+              otherInCall
+                ? undefined
+                : ringingOut
+                  ? 'Ringing…'
+                  : joined
+                    ? 'Not in the call'
+                    : undefined
+            }
+          />
+        </div>
+      )}
       <div className="flex justify-center gap-2 pb-5">
         {joined ? (
           <>
@@ -95,6 +103,7 @@ export function DmCallStage({
             >
               {deafened ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
             </IconButton>
+            <VideoButtons sessionId={sessionId} />
             <button
               onClick={() => void client.leaveVoice()}
               className="flex h-9 items-center gap-1.5 rounded-full bg-danger px-4 text-sm font-semibold text-white hover:brightness-110"

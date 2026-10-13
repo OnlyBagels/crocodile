@@ -52,6 +52,7 @@ module.exports = {
     notarize: signed && !!process.env.APPLE_ID,
     extendInfo: {
       NSMicrophoneUsageDescription: 'Crocodile uses your microphone for voice chat.',
+      NSCameraUsageDescription: 'Crocodile uses your camera for video calls.',
     },
   },
   dmg: { title: 'Install Crocodile' },

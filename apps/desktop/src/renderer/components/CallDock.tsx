@@ -13,6 +13,7 @@ import {
 import { parseSessionId } from '@crocodile/protocol';
 import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
 import { Avatar, IconButton, cx } from './ui';
+import { VideoButtons } from './CallVideo';
 import { ROUTE_TEXT } from '../lib/network';
 import { LATENCY_CLASS, callPhase, callStatusText, latencyQuality } from '../lib/call';
 
@@ -142,6 +143,7 @@ export function CallDock() {
           >
             {deafened ? <HeadphoneOff size={18} /> : <Headphones size={18} />}
           </IconButton>
+          <VideoButtons sessionId={voiceSession} />
           <button
             onClick={() => void client.leaveVoice()}
             aria-label="Leave call"

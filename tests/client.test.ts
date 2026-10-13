@@ -665,6 +665,10 @@ describe('calls', () => {
       playSlot: () => {},
       micTrack: () => null,
       frameCrypto: () => undefined,
+      outgoing: () => ({ camera: null, screen: null }),
+      stopCamera: () => {},
+      stopScreen: () => {},
+      on: () => () => {},
     }) as unknown as VoiceEngine;
 
   it('signing out during a call ends it and turns the microphone off', async () => {
