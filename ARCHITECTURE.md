@@ -379,7 +379,9 @@ list (checked against the root), then for runs of the blocks it lacks. Each
 block arrives in frames of at most 48 KiB (under werift's 64 KiB data channel
 limit) with a 9-byte header, and is checked against its hash before it is
 stored. Progress is saved as a bitmap, so a dropped connection resumes from
-where it stopped, with the same holder or another. A holder checks each
+where it stopped, with the same holder or another. Once every block is in,
+the downloader says so (`done`), which is when the holder counts the file
+as delivered. A holder checks each
 block against the hash list before sending it, and stops giving out a copy
 that no longer matches.
 
