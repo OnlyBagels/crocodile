@@ -4,6 +4,10 @@ export const APP_NAME = 'Crocodile';
 
 /** Number of simultaneous speaker slots a host relay forwards to each listener. */
 export const DEFAULT_RELAY_SLOTS = 5;
+/** Video streams (cameras and screens) a host relay can forward to one member at once. */
+export const VIDEO_SLOTS = 9;
+/** Shared screens' sound a host relay can forward to one member at once. */
+export const SCREEN_AUDIO_SLOTS = 2;
 
 export const LIMITS = {
   usernameMax: 32,
