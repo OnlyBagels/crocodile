@@ -371,8 +371,9 @@ their senders, which binds the DTLS fingerprints to the two identities, so
 neither the session's host nor a server can splice in). Only STUN servers are
 offered: **files never go through a TURN relay or any server**, and when no
 direct path exists the app says so. The holder serves a file only to members
-of the space or DM it was posted in, through that session, and at most four
-uploads at a time.
+of the space or DM it was posted in, through that session, checking again
+before every block (someone removed or blocked mid-transfer gets nothing
+more), and at most four uploads at a time, two to any one member.
 
 **The transfer.** Over the channel the downloader asks for the block hash
 list (checked against the root), then for runs of the blocks it lacks. Each
@@ -389,7 +390,9 @@ that no longer matches.
 asking from friends and in DMs, from anyone, or never (Settings → Files);
 everything else waits for a click. Fetching connects to the holder, who sees
 the downloader's IP address, which is why strangers' media isn't fetched by
-default.
+default; and in the default setting the file is fetched only from its author
+or a friend, not from any other member who happens to have it. A click
+fetches from anyone who has it.
 
 Older apps drop file messages (their signature covers a field they don't
 know), so everyone needs an app that knows files to see them.

@@ -2694,32 +2694,57 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (caption.length > LIMITS.messageMaxChars)
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
     const { manifest, hashes } = await files.prepare(source, opts.onProgress, opts.store ?? true);
-    const p = opts.preview ?? {};
-    const file = FileManifest.parse({
-      ...manifest,
-      name: cleanFileName(manifest.name),
-      type: manifest.type.slice(0, 127),
-      ...(p.thumb && FileThumb.safeParse(p.thumb).success ? { thumb: p.thumb } : {}),
-      ...(p.w && p.h ? { w: Math.round(p.w), h: Math.round(p.h) } : {}),
-      ...(p.dur !== undefined && Number.isFinite(p.dur) ? { dur: p.dur } : {}),
-    });
-    await opts.prepared?.(file);
-    await this.sendMessage(
-      channel,
-      caption,
-      { file, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) },
-      (message, sessionId) => files.posted(sessionId, { ...message, file }, hashes),
-    ).catch(async (err) => {
-      await files.forget(file.id);
+    try {
+      const p = opts.preview ?? {};
+      const file = FileManifest.parse({
+        ...manifest,
+        name: cleanFileName(manifest.name),
+        type: manifest.type.slice(0, 127),
+        ...(p.thumb && FileThumb.safeParse(p.thumb).success ? { thumb: p.thumb } : {}),
+        ...(p.w && p.h ? { w: Math.round(p.w), h: Math.round(p.h) } : {}),
+        ...(p.dur !== undefined && Number.isFinite(p.dur) ? { dur: p.dur } : {}),
+      });
+      await opts.prepared?.(file);
+      await this.sendMessage(
+        channel,
+        caption,
+        { file, ...(opts.replyTo ? { replyTo: opts.replyTo } : {}) },
+        (message, sessionId) => files.posted(sessionId, { ...message, file }, hashes),
+      );
+      return file.id;
+    } catch (err) {
+      // Not posted: the encrypted copy has nothing left to serve.
+      await files.forget(manifest.id);
       throw err;
-    });
-    return file.id;
+    }
   }
 
   /** Start fetching a file in a message. */
   async downloadFile(fileId: string) {
     if (!this.files) throw new Error('This device cannot receive files');
     await this.files.download(fileId);
+  }
+
+  /**
+   * Fetch a file by itself if the auto-download setting allows it. With
+   * "from friends", only from the author or a friend: whoever sends it sees
+   * this device's IP address, and nobody chose to connect to anyone else.
+   */
+  async autoDownloadFile(message: ChatMessage) {
+    if (!this.shouldAutoDownload(message)) return;
+    const author = message.author;
+    const anyone = this.state.settings.autoDownload === 'everyone';
+    await this.files!.download(
+      message.file!.id,
+      anyone
+        ? {}
+        : {
+            from: (peer) => {
+              const user = peerIds.user(peer);
+              return user === author || this.state.friends.friends.includes(user);
+            },
+          },
+    );
   }
 
   /** A downloaded (or sent) file's contents, block by block. */
@@ -2806,8 +2831,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       await files.noted(sessionId, { ...message, file: message.file }, mine);
       // Live messages (not old history) may be fetched right away.
       const now = this.config.now?.() ?? Date.now();
-      if (now - message.ts < 2 * 60_000 && this.shouldAutoDownload(message))
-        void files.download(message.file.id).catch(() => {});
+      if (now - message.ts < 2 * 60_000) void this.autoDownloadFile(message).catch(() => {});
     } else if (message.edits && message.deleted) {
       await files.forgetMessage(message.edits, message.author);
     }
@@ -3077,7 +3101,26 @@ export function cleanFileName(name: string): string {
   let end = base.length;
   while (start < end && trimmed(base[start]!)) start++;
   while (end > start && trimmed(base[end - 1]!)) end--;
-  return base.slice(start, end).slice(0, 255) || 'file';
+  return fitName(base.slice(start, end)) || 'file';
+}
+
+/** Bytes a file name may take: what most file systems allow. */
+const NAME_MAX_BYTES = 255;
+
+/** A name cut to fit in UTF-8 bytes, whole characters only, keeping a short extension. */
+function fitName(name: string) {
+  const bytes = (s: string) => utf8.encode(s).length;
+  if (name.length <= NAME_MAX_BYTES / 3 || bytes(name) <= NAME_MAX_BYTES) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 16 ? name.slice(dot) : '';
+  let room = NAME_MAX_BYTES - bytes(ext);
+  let out = '';
+  for (const ch of name.slice(0, name.length - ext.length)) {
+    room -= bytes(ch);
+    if (room < 0) break;
+    out += ch;
+  }
+  return out + ext;
 }
 
 /** The code in an invite link or code as pasted ("croc://join/abc…", "ABC…"). */

@@ -55,8 +55,9 @@ they travel over direct connections between members (STUN only). The member
 a file is fetched from, and the one fetching it, see each other's IP address
 and the transfer's size and timing. Pictures and videos are fetched by
 themselves only from friends and in DMs unless the user widens or turns off
-that setting, so a stranger in a big space can't learn your IP address just
-by posting a picture.
+that setting, and then only from the friend who posted it (or another
+friend), so a stranger in a big space can't learn your IP address by posting
+a picture or by fetching a friend's picture first and offering it.
 
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the

@@ -183,6 +183,20 @@ await b.page.getByRole('button', { name: 'Picture: swamp.png' }).click();
 await b.page.getByRole('dialog', { name: 'swamp.png' }).waitFor();
 await shot(b.page, '06k-picture-zoom');
 await b.page.keyboard.press('Escape');
+// Deleting downloaded files takes the picture out of the chat, ready to
+// download again, not left showing a copy that's gone.
+await b.page.getByLabel('Account').click();
+await b.page.getByText('Settings', { exact: true }).click();
+await b.page.getByRole('button', { name: 'Files', exact: true }).click();
+await b.page.getByRole('button', { name: 'Delete downloaded files' }).click();
+await b.page
+  .getByRole('button', { name: 'Delete downloaded files' })
+  .and(b.page.locator(':disabled'))
+  .waitFor();
+await b.page.getByRole('button', { name: 'Close settings' }).click();
+await b.page.getByRole('button', { name: /^Download: swamp\.png/ }).waitFor({ timeout: 5000 });
+if (await b.page.getByRole('button', { name: 'Picture: swamp.png' }).count())
+  throw new Error('a deleted picture is still shown');
 // Links open in the browser; an invite link becomes a card to join the space.
 await a.page
   .getByPlaceholder('Message general')

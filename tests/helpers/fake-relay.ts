@@ -94,6 +94,32 @@ export class FakeRelayNetwork {
   /** Block bytes the holder had sent when that cut happened. */
   bytesAtCut = 0;
 
+  /** Hold all file link traffic once a holder has sent this many block bytes (once). */
+  pauseFileLinksAfter?: { user: string; bytes: number };
+  /** Deliveries held while paused, in order. */
+  private heldFileTraffic?: (() => void)[];
+
+  get fileLinksPaused() {
+    return !!this.heldFileTraffic;
+  }
+
+  /** @internal Deliver now, or later if file links are paused. */
+  deliverFile(fn: () => void) {
+    if (this.heldFileTraffic) this.heldFileTraffic.push(fn);
+    else setTimeout(fn, 0);
+  }
+
+  /** @internal */
+  pauseFileLinks() {
+    this.heldFileTraffic ??= [];
+  }
+
+  resumeFileLinks() {
+    const held = this.heldFileTraffic ?? [];
+    this.heldFileTraffic = undefined;
+    for (const fn of held) setTimeout(fn, 0);
+  }
+
   /** Cuts every open file link of a user, as a network drop would. */
   cutFileLinksOf(userId: string) {
     for (const l of [...this.fileLinks])
@@ -378,14 +404,19 @@ class FakeFileChannel
         this.net.bytesAtCut = sent;
         setTimeout(() => this.net.cutFileLinksOf(holder), 0);
       }
+      const pause = this.net.pauseFileLinksAfter;
+      if (pause?.user === holder && sent >= pause.bytes) {
+        this.net.pauseFileLinksAfter = undefined;
+        this.net.pauseFileLinks();
+      }
     }
     this.bufferedAmount += size;
     const peer = this.peer;
-    setTimeout(() => {
+    this.net.deliverFile(() => {
       this.bufferedAmount -= size;
       if (this.bufferedAmount === 0) this.emit('drained', undefined);
       if (!this.closed && !peer.closed) peer.emit('message', copy);
-    }, 0);
+    });
     return true;
   }
 

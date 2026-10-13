@@ -4,7 +4,9 @@ import {
   MemoryFileBlockStore,
   MemoryKeyValueStore,
   MemoryMessageStore,
+  FileTransfers,
   cleanFileName,
+  type FileLinkFactory,
   type FileSource,
   type PlatformAdapter,
 } from '@crocodile/client-core';
@@ -102,9 +104,25 @@ async function readAll(c: CrocodileClient, id: string) {
 const fileMessage = (c: CrocodileClient, ch: string) =>
   (c.state.messages[ch] ?? []).find((m) => m.file);
 
-async function dmPair(net: FakeRelayNetwork, coord: Coordinator) {
-  const alice = await signUp(makeClient(net, coord).client, 'alice');
-  const bob = await signUp(makeClient(net, coord).client, 'bob');
+/** A block store that takes its time writing, like a slow disk. */
+class SlowBlocks extends MemoryFileBlockStore {
+  override async write(id: string, index: number, block: Uint8Array) {
+    await new Promise((r) => setTimeout(r, 250));
+    await super.write(id, index, block);
+  }
+}
+
+type Stores = { files?: MemoryFileBlockStore; kv?: MemoryKeyValueStore };
+
+async function dmPair(
+  net: FakeRelayNetwork,
+  coord: Coordinator,
+  stores: { alice?: Stores; bob?: Stores } = {},
+) {
+  const a = makeClient(net, coord, stores.alice);
+  const b = makeClient(net, coord, stores.bob);
+  const alice = await signUp(a.client, 'alice');
+  const bob = await signUp(b.client, 'bob');
   await befriend(alice, bob);
   const dm = await alice.openDm(bob.userId);
   await bob.openDm(alice.userId);
@@ -117,7 +135,7 @@ async function dmPair(net: FakeRelayNetwork, coord: Coordinator) {
     8000,
     'dm connected',
   );
-  return { alice, bob, dm };
+  return { alice, bob, dm, aliceFiles: a.files, bobFiles: b.files };
 }
 
 async function spaceOf(owner: CrocodileClient, others: CrocodileClient[]) {
@@ -145,7 +163,8 @@ describe('files', () => {
   it('sends a file in a DM: the friend fetches it straight from the sender', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
-    const { alice, bob, dm } = await dmPair(net, coord);
+    const bobKv = new MemoryKeyValueStore();
+    const { alice, bob, dm } = await dmPair(net, coord, { bob: { kv: bobKv } });
 
     // Several blocks, the last one short.
     const data = content(2.5 * 1024 * 1024);
@@ -165,6 +184,59 @@ describe('files', () => {
     await waitFor(() => bob.state.files[id]?.status === 'done', 15000, 'downloaded');
     expect(same(await readAll(bob, id), data)).toBe(true);
     expect(net.fileLinkLog).toEqual([[bob.userId, alice.userId]]);
+    // The hash list is kept once, apart from the record saved as blocks come
+    // in (for a huge file it runs to megabytes).
+    const list = await bobKv.get<string>(`file-hashes:${id}`);
+    expect(list).toHaveLength(Math.ceil((3 * 32 * 4) / 3));
+    expect(JSON.stringify(await bobKv.get(`file:${id}`))).not.toContain(list);
+  });
+
+  it('leaves nothing behind when a file cannot be sent', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const { alice, dm, aliceFiles } = await dmPair(net, coord);
+    // The file goes away while it is being encrypted.
+    const vanishing: FileSource = {
+      name: 'gone.bin',
+      size: 3 * 1024 * 1024,
+      type: 'application/octet-stream',
+      read: async (o, l) => {
+        if (o >= 1024 * 1024) throw new Error('the file went away');
+        return new Uint8Array(l);
+      },
+    };
+    await expect(alice.sendFile(dm, vanishing)).rejects.toThrow('the file went away');
+    expect(await aliceFiles.usage()).toBe(0);
+    // Or the step before posting fails.
+    const fails = () => {
+      throw new Error('no room');
+    };
+    await expect(
+      alice.sendFile(dm, source('a.bin', content(2 * 1024 * 1024)), { prepared: fails }),
+    ).rejects.toThrow('no room');
+    expect(await aliceFiles.usage()).toBe(0);
+    expect(alice.state.files).toEqual({});
+  });
+
+  it('deleting the message while it downloads leaves nothing behind', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bobKv = new MemoryKeyValueStore();
+    const bobFiles = new SlowBlocks();
+    const { alice, bob, dm } = await dmPair(net, coord, { bob: { kv: bobKv, files: bobFiles } });
+    const id = await alice.sendFile(dm, source('long.bin', content(4 * 1024 * 1024, 6)));
+    await waitFor(() => bob.state.files[id], 8000, 'known');
+    await bob.downloadFile(id);
+    await waitFor(() => (bob.state.files[id]?.done ?? 0) > 0, 15000, 'first block in');
+
+    await alice.deleteMessage(dm, fileMessage(alice, dm)!.id);
+    await waitFor(() => !bob.state.files[id], 8000, 'bob dropped it');
+    // A block on its way to the disk when the delete came doesn't bring it back.
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(bob.state.files[id]).toBeUndefined();
+    expect(await bobKv.get(`file:${id}`)).toBeUndefined();
+    expect(await bobKv.get(`file-hashes:${id}`)).toBeUndefined();
+    expect(await bobFiles.usage()).toBe(0);
   });
 
   it('tells the sender someone has the file only once they have all of it', async () => {
@@ -307,6 +379,57 @@ describe('files', () => {
     await waitFor(() => carol.state.files[pic2]?.status === 'done', 15000, 'carol auto');
   });
 
+  it('fetches a picture by itself only from its author or a friend', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord).client, 'alice');
+    const bob = await signUp(makeClient(net, coord).client, 'bob');
+    const carol = await signUp(makeClient(net, coord).client, 'carol');
+    await befriend(alice, bob);
+    const { ch } = await spaceOf(alice, [bob, carol]);
+    await carol.updateSettings({ autoDownload: 'everyone' });
+    // No direct path between alice and bob; carol reaches both.
+    net.unreachable.add(alice.userId);
+    net.unreachable.add(bob.userId);
+
+    const pic = await alice.sendFile(ch, source('lake.png', content(60_000, 8), 'image/png'));
+    await waitFor(() => carol.state.files[pic]?.status === 'done', 15000, 'carol has it');
+    // Carol has it too, but bob never chose to connect to her.
+    await waitFor(
+      () => ['no_direct', 'unavailable'].includes(bob.state.files[pic]?.status ?? ''),
+      25000,
+      'bob stopped',
+    );
+    expect(net.fileLinkLog.filter(([to]) => to === bob.userId)).toEqual([]);
+
+    // Asked for, it comes from whoever has it.
+    await bob.downloadFile(pic);
+    await waitFor(() => bob.state.files[pic]?.status === 'done', 15000, 'bob fetched it');
+    expect(net.fileLinkLog.at(-1)).toEqual([bob.userId, carol.userId]);
+  });
+
+  it('stops giving a file to someone removed from the space while they download it', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord).client, 'alice');
+    const bob = await signUp(makeClient(net, coord).client, 'bob');
+    const { spaceId, ch, sid } = await spaceOf(alice, [bob]);
+    const id = await alice.sendFile(ch, source('plans.bin', content(6 * 1024 * 1024, 7)));
+    await waitFor(() => bob.state.files[id], 8000, 'known');
+
+    net.pauseFileLinksAfter = { user: alice.userId, bytes: 1024 * 1024 };
+    await bob.downloadFile(id);
+    await waitFor(() => net.fileLinksPaused, 15000, 'under way');
+    await alice.banMember(spaceId, bob.userId);
+    await waitFor(() => !alice.isAllowedPeer(sid, bob.peer), 5000, 'banned');
+    const sentAtBan = net.fileBytesFrom.get(alice.userId)!;
+    net.resumeFileLinks();
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(bob.state.files[id]?.status).not.toBe('done');
+    // At most the rest of the block that was on its way.
+    expect(net.fileBytesFrom.get(alice.userId)! - sentAtBan).toBeLessThanOrEqual(1024 * 1024);
+  });
+
   it('deleting the message deletes the file and nobody can fetch it any more', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -348,7 +471,8 @@ describe('files', () => {
       20000,
       'gave up',
     );
-    expect(alice.state.files[id]?.status).toBe('none');
+    // Still alice's: fetched back, it is shared as hers.
+    expect(alice.state.files[id]).toMatchObject({ status: 'none', mine: true });
   });
 });
 
@@ -396,6 +520,63 @@ describe('who may fetch', () => {
   });
 });
 
+describe('uploads', () => {
+  it('counts uploads per member, not per device', async () => {
+    const sent: { to: string; kind?: string }[] = [];
+    const session = {
+      connected: true,
+      peers: new Map(),
+      sendGroup: () => true,
+      sendSealedTo: async (to: string, p: { kind?: string }) => {
+        sent.push({ to, kind: p.kind });
+        return true;
+      },
+    };
+    // Links that open and then stay busy.
+    const links: FileLinkFactory = () => ({
+      createOffer: async () => 'offer',
+      acceptOffer: async () => 'answer',
+      acceptAnswer: async () => {},
+      ready: new Promise(() => {}),
+      close() {},
+    });
+    const files = new FileTransfers({
+      kv: new MemoryKeyValueStore(),
+      blocks: new MemoryFileBlockStore(),
+      links,
+      peer: () => 'me.desk',
+      iceServers: () => [],
+      session: () => session as never,
+      openSession: async () => {},
+      isAllowedPeer: () => true,
+      shareDownloads: () => true,
+      changed: () => {},
+      log: () => {},
+    });
+    const { manifest, hashes } = await files.prepare(source('a.bin', content(1000)));
+    const sid = 'space:swamp';
+    await files.posted(sid, { id: 'm1', ch: 'c1', author: 'me', file: manifest }, hashes);
+    const offer = (from: string, link: string) =>
+      files.onMessage(sid, from, {
+        type: 'file_link',
+        file: manifest.id,
+        link,
+        kind: 'offer',
+        sdp: 'sdp',
+      });
+    offer('bob.phone', 'link000001');
+    offer('bob.phone', 'link000002');
+    // Bob's third, from another of his devices, waits; carol's doesn't.
+    offer('bob.laptop', 'link000003');
+    offer('carol.desk', 'link000004');
+    await waitFor(() => sent.length === 4, 2000, 'answers');
+    expect(sent.find((s) => s.to === 'bob.laptop')?.kind).toBe('reject');
+    expect(sent.find((s) => s.to === 'carol.desk')?.kind).toBe('answer');
+    expect(sent.filter((s) => s.to === 'bob.phone' && s.kind === 'answer')).toHaveLength(2);
+    files.close();
+  });
+});
+
 describe('file names', () => {
   it('keeps names harmless to show and save', () => {
     expect(cleanFileName('../../etc/passwd')).toBe('passwd');
@@ -405,6 +586,19 @@ describe('file names', () => {
     expect(cleanFileName('a<b>:c|d?.txt')).toBe('a_b__c_d_.txt');
     expect(cleanFileName('   ')).toBe('file');
     expect(cleanFileName(' . a b . ')).toBe('a b');
+  });
+
+  it('fits names in 255 bytes, whole characters only, keeping the extension', () => {
+    const bytes = (n: string) => new TextEncoder().encode(n).length;
+    for (const name of ['ż'.repeat(300) + '.txt', '😀'.repeat(100) + '.png', 'a'.repeat(400)]) {
+      const fit = cleanFileName(name);
+      expect(bytes(fit)).toBeLessThanOrEqual(255);
+      expect(bytes(fit)).toBeGreaterThan(240);
+      // No half of a surrogate pair left at the cut.
+      expect(new TextDecoder().decode(new TextEncoder().encode(fit))).toBe(fit);
+      expect(fit.slice(-4)).toBe(name.slice(-4));
+    }
+    expect(cleanFileName('ż'.repeat(100) + '.txt')).toBe('ż'.repeat(100) + '.txt');
   });
 
   it('takes no longer on long runs of spaces than on any other name', () => {

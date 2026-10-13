@@ -59,7 +59,7 @@ export function FileAttachment({ message }: { message: MessageView }) {
   const client = getClient();
   // Fetch by itself what the auto-download setting allows, once it's on screen.
   useEffect(() => {
-    if (client.shouldAutoDownload(message)) void client.downloadFile(file.id).catch(() => {});
+    void client.autoDownloadFile(message).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file.id]);
   const kind = fileMediaKind(file.type);
@@ -189,7 +189,12 @@ function MediaTile({
   const [zoom, setZoom] = useState(false);
   const done = view?.status === 'done';
   useEffect(() => {
-    if (!done) return;
+    // Deleted from this device: its decrypted copy is gone too.
+    if (!done) {
+      setUrl(null);
+      setZoom(false);
+      return;
+    }
     let live = true;
     objectUrlOf(file)
       .then((u) => live && setUrl(u))

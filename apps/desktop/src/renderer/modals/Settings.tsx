@@ -836,12 +836,16 @@ function PrivacyTab() {
 
 function FilesTab() {
   const settings = useCroc((s) => s.settings);
-  const files = useCroc((s) => s.files);
+  // Counts, not the files themselves: those change with every block received,
+  // and measuring the storage looks at every file on disk.
+  const stored = useCroc((s) => Object.values(s.files).filter((f) => f.status === 'done').length);
+  const downloaded = useCroc(
+    (s) => Object.values(s.files).filter((f) => !f.mine && f.status === 'done').length,
+  );
   const client = getClient();
   const [used, setUsed] = useState<number | null>(null);
   const refresh = useCallback(() => void client.fileStorageUsed().then(setUsed), [client]);
-  useEffect(refresh, [refresh, files]);
-  const downloaded = Object.values(files).filter((f) => !f.mine && f.status === 'done').length;
+  useEffect(refresh, [refresh, stored]);
   return (
     <>
       <H sub="Files travel straight from one member's device to another's, end-to-end encrypted, and never through a server. Whoever you fetch a file from sees your IP address while they send it.">

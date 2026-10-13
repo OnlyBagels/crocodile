@@ -19,6 +19,7 @@ import {
   fileBlockCount,
   fileBlockPlainSize,
   fromB64u,
+  peerIds,
   toB64u,
   type FileManifest,
   type SealedPayload,
@@ -78,8 +79,11 @@ interface FileRecord {
   /** Blocks on this device: a bitmap, base64url. */
   have: string;
   complete: boolean;
-  /** The block hash list once known (base64url). */
-  hashes?: string;
+  /**
+   * The block hash list is known (stored apart, under `file-hashes:<id>`:
+   * it runs to megabytes for huge files, and the record is saved often).
+   */
+  hashed?: boolean;
   mine?: boolean;
 }
 
@@ -126,8 +130,8 @@ const MAX_UPLOADS = 4;
 const MAX_DOWNLOADS = 3;
 /** How often progress is written to storage while downloading. */
 const SAVE_EVERY_MS = 2000;
-/** Uploads to one member at a time. */
-const MAX_UPLOADS_PER_PEER = 2;
+/** Uploads to one member (all their devices) at a time. */
+const MAX_UPLOADS_PER_USER = 2;
 
 export class FileTransfers {
   private records = new Map<string, FileRecord>();
@@ -138,8 +142,10 @@ export class FileTransfers {
   private waiting = new Map<string, string>();
   /** Peers last seen in each session, to notice who joins. */
   private peersSeen = new Map<string, Set<string>>();
-  /** Open uploads, and who each one is to. */
+  /** Open uploads, and the user each one is to. */
   private uploads = new Map<FileLink, string>();
+  /** Whom a download may fetch from, when not anyone in the session. */
+  private holderFilters = new Map<string, (peer: string) => boolean>();
   private answers = new Map<string, (p: Extract<SealedPayload, { type: 'file_link' }>) => void>();
   private loaded = false;
 
@@ -200,7 +206,11 @@ export class FileTransfers {
         if (store) await this.ctx.blocks.write(id, i, block);
       },
       onProgress,
-    );
+    ).catch(async (err: unknown) => {
+      // Nothing points at the blocks written so far: remove them now.
+      await this.ctx.blocks.delete(id).catch(() => {});
+      throw err;
+    });
     return {
       manifest: {
         id,
@@ -222,6 +232,7 @@ export class FileTransfers {
   ) {
     const n = fileBlockCount(message.file.size);
     const have = new Uint8Array(Math.ceil(n / 8)).fill(0xff);
+    await this.ctx.kv.set(`file-hashes:${message.file.id}`, toB64u(hashes));
     await this.save({
       manifest: message.file,
       sessionId,
@@ -230,7 +241,7 @@ export class FileTransfers {
       author: message.author,
       have: toB64u(have),
       complete: true,
-      hashes: toB64u(hashes),
+      hashed: true,
       mine: true,
     });
   }
@@ -263,24 +274,33 @@ export class FileTransfers {
 
   /** The message was deleted, or the user cleared the file: drop it. */
   async forget(id: string, opts: { keepRecord?: boolean } = {}) {
-    this.active.get(id)?.cancel();
     this.waiting.delete(id);
+    this.holderFilters.delete(id);
+    // Wait for a download in progress to stop: a block or progress it saves
+    // afterwards would bring the file back.
+    const d = this.active.get(id);
+    if (d) {
+      d.cancel();
+      await d.finished;
+    }
     const r = this.records.get(id);
     await this.ctx.blocks.delete(id);
     if (!r) return;
     if (opts.keepRecord) {
       const n = fileBlockCount(r.manifest.size);
+      // Whose it is stays: a sender fetching back a damaged copy of their
+      // own file still shares it as theirs.
       await this.save({
         ...r,
         have: toB64u(new Uint8Array(Math.ceil(n / 8))),
         complete: false,
-        mine: false,
       });
       return;
     }
     this.records.delete(id);
     this.views.delete(id);
     await this.ctx.kv.delete(`file:${id}`);
+    await this.ctx.kv.delete(`file-hashes:${id}`);
     await this.ctx.kv.set('files-index', [...this.records.keys()]);
     this.ctx.changed(id, null);
   }
@@ -310,11 +330,21 @@ export class FileTransfers {
   // Downloading
   // -------------------------------------------------------------------------
 
-  /** Fetch a file. Resolves once started; follow progress through views. */
-  async download(id: string) {
+  /**
+   * Fetch a file. Resolves once started; follow progress through views.
+   * `from` limits whom it is fetched from (each of them learns this
+   * device's IP address); without it, anyone in the session who has it.
+   */
+  async download(id: string, opts: { from?: (peer: string) => boolean } = {}) {
+    if (!this.records.has(id)) throw new Error('Unknown file');
+    if (opts.from) this.holderFilters.set(id, opts.from);
+    else this.holderFilters.delete(id);
+    this.start(id);
+  }
+
+  private start(id: string) {
     const r = this.records.get(id);
-    if (!r) throw new Error('Unknown file');
-    if (r.complete || this.active.has(id)) return;
+    if (!r || r.complete || this.active.has(id)) return;
     if (this.active.size >= MAX_DOWNLOADS) {
       this.waiting.set(id, r.sessionId);
       this.setView(id, { status: 'searching' });
@@ -323,17 +353,25 @@ export class FileTransfers {
     const d = new Download(this, r);
     this.active.set(id, d);
     this.waiting.delete(id);
-    void d.run().finally(() => {
-      if (this.active.get(id) === d) this.active.delete(id);
-      this.startQueued();
-    });
+    d.finished = d
+      .run()
+      .catch((err: unknown) => this.ctx.log('file download ended', { file: id, err: String(err) }))
+      .finally(() => {
+        if (this.active.get(id) === d) this.active.delete(id);
+        this.startQueued();
+      });
+  }
+
+  /** @internal Whether a download may fetch from this holder. */
+  mayFetchFrom(id: string, peer: string) {
+    return this.holderFilters.get(id)?.(peer) ?? true;
   }
 
   private startQueued() {
     for (const [id] of this.waiting) {
       if (this.active.size >= MAX_DOWNLOADS) return;
       const v = this.views.get(id);
-      if (v?.status === 'searching') void this.download(id);
+      if (v?.status === 'searching') this.start(id);
     }
   }
 
@@ -360,10 +398,9 @@ export class FileTransfers {
         if (!r || r.sessionId !== sessionId || r.complete) return;
         const d = this.active.get(payload.file);
         if (d) d.holderFound(from);
-        else if (this.waiting.has(payload.file)) {
-          void this.download(payload.file).then(() =>
-            this.active.get(payload.file)?.holderFound(from),
-          );
+        else if (this.waiting.has(payload.file) && this.mayFetchFrom(payload.file, from)) {
+          this.start(payload.file);
+          this.active.get(payload.file)?.holderFound(from);
         }
         return;
       }
@@ -383,7 +420,7 @@ export class FileTransfers {
     return (
       !!r &&
       r.complete &&
-      !!r.hashes &&
+      !!r.hashed &&
       r.sessionId === sessionId &&
       (r.mine || this.ctx.shareDownloads()) &&
       this.ctx.isAllowedPeer(sessionId, from)
@@ -421,7 +458,8 @@ export class FileTransfers {
       !offer.sdp ||
       !this.mayServe(sessionId, from, offer.file) ||
       this.uploads.size >= MAX_UPLOADS ||
-      [...this.uploads.values()].filter((p) => p === from).length >= MAX_UPLOADS_PER_PEER
+      [...this.uploads.values()].filter((u) => u === peerIds.user(from)).length >=
+        MAX_UPLOADS_PER_USER
     ) {
       await reject();
       return;
@@ -431,7 +469,7 @@ export class FileTransfers {
       remote: from,
       iceServers: this.ctx.iceServers(),
     });
-    this.uploads.set(link, from);
+    this.uploads.set(link, peerIds.user(from));
     try {
       const sdp = await link.acceptOffer(offer.sdp);
       await session.sendSealedTo(from, {
@@ -454,9 +492,16 @@ export class FileTransfers {
   private async serve(r: FileRecord, channel: FileLinkChannel, to: string) {
     const reader = new FrameReader(channel);
     const { size, id } = r.manifest;
-    const hashes = fromB64u(r.hashes!);
     const n = fileBlockCount(size);
+    const notAvailable = () =>
+      channel.send(JSON.stringify({ t: 'error', reason: 'not available' } satisfies FileLinkReply));
     try {
+      const list = await this.ctx.kv.get<string>(`file-hashes:${id}`);
+      if (!list) {
+        notAvailable();
+        return;
+      }
+      const hashes = fromB64u(list);
       for (;;) {
         const msg = await reader.next(IDLE_MS * 2);
         if (typeof msg !== 'string') return;
@@ -465,6 +510,12 @@ export class FileTransfers {
         const req = parsed.data;
         if (req.t === 'done') {
           this.ctx.served?.(id, to);
+          return;
+        }
+        // Still theirs to have: they may have been removed or blocked,
+        // or the file deleted, since the link opened.
+        if (!this.mayServe(r.sessionId, to, id)) {
+          notAvailable();
           return;
         }
         if (req.t === 'hashes') {
@@ -476,12 +527,14 @@ export class FileTransfers {
           return;
         }
         for (let i = req.from; i <= req.to; i++) {
+          if (!this.mayServe(r.sessionId, to, id)) {
+            notAvailable();
+            return;
+          }
           const block = await this.ctx.blocks.read(id, i, fileBlockCipherSize(size, i));
           // Never send what doesn't match what the author signed.
           if (!block || !bytesEqual(await sha256Async(block), blockHashAt(hashes, i))) {
-            channel.send(
-              JSON.stringify({ t: 'error', reason: 'not available' } satisfies FileLinkReply),
-            );
+            notAvailable();
             await this.forget(id, { keepRecord: true });
             return;
           }
@@ -577,11 +630,15 @@ export class FileTransfers {
 
 /** One file being fetched. */
 class Download {
+  /** Settles once run() has stopped and saved what it had. */
+  finished: Promise<void> = Promise.resolve();
   private holders: string[] = [];
   /** Tries per holder that got nothing; one that keeps delivering is tried again. */
   private misses = new Map<string, number>();
   private wake?: () => void;
   private cancelled = false;
+  private stop!: () => void;
+  private readonly stopped = new Promise<null>((res) => (this.stop = () => res(null)));
   private link?: FileLink;
   private noDirect = 0;
 
@@ -592,12 +649,14 @@ class Download {
 
   holderFound(peer: string) {
     if ((this.misses.get(peer) ?? 0) >= 2 || this.holders.includes(peer)) return;
+    if (!this.files.mayFetchFrom(this.r.manifest.id, peer)) return;
     this.holders.push(peer);
     this.wake?.();
   }
 
   cancel() {
     this.cancelled = true;
+    this.stop();
     this.link?.close();
     this.wake?.();
   }
@@ -680,8 +739,8 @@ class Download {
         }))
       )
         return 'error';
-      const answer = await answered;
-      if (answer.kind !== 'answer' || !answer.sdp) return 'error';
+      const answer = await Promise.race([answered, this.stopped]);
+      if (answer?.kind !== 'answer' || !answer.sdp) return 'error';
       await link.acceptAnswer(answer.sdp);
       let channel: FileLinkChannel;
       try {
@@ -712,13 +771,15 @@ class Download {
       await this.files.save(this.r);
     };
     try {
-      let hashes = this.r.hashes ? fromB64u(this.r.hashes) : null;
+      const kept = this.r.hashed ? await this.ctx.kv.get<string>(`file-hashes:${m.id}`) : undefined;
+      let hashes = kept ? fromB64u(kept) : null;
       if (!hashes) {
         channel.send(JSON.stringify({ t: 'hashes' } satisfies FileLinkRequest));
         const list = await readFramed(reader, FILE_FRAME.hashes, 0, n * 32);
         if (!list || !(await checkHashList(list, m.size, m.root))) return 'error';
         hashes = list;
-        this.r = { ...this.r, hashes: toB64u(list) };
+        await this.ctx.kv.set(`file-hashes:${m.id}`, toB64u(list));
+        this.r = { ...this.r, hashed: true };
         await this.files.save(this.r);
       }
       const missing: number[] = [];
