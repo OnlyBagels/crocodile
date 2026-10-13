@@ -28,6 +28,7 @@ const session = (over: Partial<SessionView>): SessionView => ({
   networks: [],
   inCall: ['a'],
   latency: {},
+  video: { blocked: null, ready: false, streams: [] },
   ...over,
 });
 

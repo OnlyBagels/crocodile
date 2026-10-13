@@ -17,9 +17,20 @@ import { pad, unpad } from './padding';
  *
  * Voice frame layout (SFrame-like trailer, authenticated as AAD):
  *   ciphertext ‖ GCM tag(16) ‖ kid u32 ‖ gen u16 ‖ counter u32 ‖ 0xC8
+ *
+ * Video frames use their own key from the same chain (another HKDF label)
+ * and may leave the first bytes of the frame in the clear, for the codec's
+ * payload header the receiving app needs before it can decrypt:
+ *   clear ‖ ciphertext ‖ GCM tag(16) ‖ kid u32 ‖ gen u16 ‖ counter u32 ‖
+ *   clear length u8 ‖ 0xC9
+ * The clear bytes and the trailer are authenticated.
  */
 export const FRAME_MAGIC = 0xc8;
 export const FRAME_TRAILER_BYTES = 11;
+export const VIDEO_FRAME_MAGIC = 0xc9;
+export const VIDEO_FRAME_TRAILER_BYTES = 12;
+/** Most bytes a video frame may leave in the clear. */
+export const VIDEO_MAX_CLEAR = 64;
 export const AUDIO_EPOCH_MS = 30_000;
 const TAG_BYTES = 16;
 const MAX_TEXT_SKIP = 2000;
@@ -72,7 +83,7 @@ interface MessageKey {
   salt: Uint8Array;
 }
 
-function messageKey(chain: ChainState, kid: number, label: 'text' | 'audio'): MessageKey {
+function messageKey(chain: ChainState, kid: number, label: 'text' | 'audio' | 'video'): MessageKey {
   const okm = hkdfSha256(chain.key, kidBytes(kid), `croc/v2/${label}-message`, 44);
   return { key: okm.slice(0, 32), salt: okm.slice(32, 44) };
 }
@@ -222,14 +233,17 @@ export class AudioSender {
   }
 }
 
+/** The sender key id of an encrypted audio or video frame. */
 export function peekFrameKid(data: Uint8Array): number | null {
-  if (data.length < FRAME_TRAILER_BYTES + TAG_BYTES || data[data.length - 1] !== FRAME_MAGIC)
-    return null;
-  return new DataView(
-    data.buffer,
-    data.byteOffset + data.length - FRAME_TRAILER_BYTES,
-    4,
-  ).getUint32(0);
+  const magic = data[data.length - 1];
+  const trailer =
+    magic === FRAME_MAGIC
+      ? FRAME_TRAILER_BYTES
+      : magic === VIDEO_FRAME_MAGIC
+        ? VIDEO_FRAME_TRAILER_BYTES
+        : 0;
+  if (!trailer || data.length < trailer + TAG_BYTES) return null;
+  return new DataView(data.buffer, data.byteOffset + data.length - trailer, 4).getUint32(0);
 }
 
 export class AudioReceiver {
@@ -284,5 +298,129 @@ export class AudioReceiver {
       this.keys.set(target, mk);
     }
     return plain;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Video frames
+// ---------------------------------------------------------------------------
+
+/**
+ * Encrypts outgoing video frames (camera and screen) under the audio chain's
+ * video message key. As with AudioSender, one sender per chain state: every
+ * stream of a device shares it, so the counter never repeats.
+ */
+export class VideoSender {
+  private mk: MessageKey;
+  private counter = randomCounter();
+  constructor(
+    readonly kid: number,
+    private chain: ChainState,
+  ) {
+    this.mk = messageKey(chain, kid, 'video');
+  }
+
+  get gen() {
+    return this.chain.gen;
+  }
+
+  update(chain: ChainState) {
+    if (chain.gen <= this.chain.gen) return;
+    this.chain = chain;
+    this.mk = messageKey(chain, this.kid, 'video');
+    this.counter = randomCounter();
+  }
+
+  /** `clear`: how many leading bytes stay readable (the codec's payload header). */
+  encrypt(frame: Uint8Array, clear = 0): Uint8Array {
+    const n = Math.max(0, Math.min(clear, VIDEO_MAX_CLEAR, frame.length));
+    const trailer = new Uint8Array(VIDEO_FRAME_TRAILER_BYTES);
+    const tv = new DataView(trailer.buffer);
+    const counter = this.counter++ >>> 0;
+    tv.setUint32(0, this.kid);
+    tv.setUint16(4, this.chain.gen & 0xffff);
+    tv.setUint32(6, counter);
+    trailer[10] = n;
+    trailer[11] = VIDEO_FRAME_MAGIC;
+    const head = frame.subarray(0, n);
+    const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
+    aad.set(head, 0);
+    aad.set(trailer, n);
+    const ct = aesGcmEncrypt(
+      this.mk.key,
+      frameNonce(this.mk.salt, counter),
+      frame.subarray(n),
+      aad,
+    );
+    const out = new Uint8Array(n + ct.length + VIDEO_FRAME_TRAILER_BYTES);
+    out.set(head, 0);
+    out.set(ct, n);
+    out.set(trailer, n + ct.length);
+    return out;
+  }
+}
+
+export class VideoReceiver {
+  private keys = new Map<number, MessageKey>();
+  constructor(
+    readonly kid: number,
+    private chain: ChainState,
+  ) {
+    this.keys.set(chain.gen, messageKey(chain, kid, 'video'));
+  }
+
+  get gen() {
+    return this.chain.gen;
+  }
+
+  decrypt(data: Uint8Array): Uint8Array | null {
+    if (
+      data.length < VIDEO_FRAME_TRAILER_BYTES + TAG_BYTES ||
+      data[data.length - 1] !== VIDEO_FRAME_MAGIC
+    )
+      return null;
+    const trailer = data.subarray(data.length - VIDEO_FRAME_TRAILER_BYTES);
+    const tv = new DataView(trailer.buffer, trailer.byteOffset, VIDEO_FRAME_TRAILER_BYTES);
+    if (tv.getUint32(0) !== this.kid) return null;
+    const gen16 = tv.getUint16(4);
+    const counter = tv.getUint32(6);
+    const n = trailer[10]!;
+    if (n > VIDEO_MAX_CLEAR || n + TAG_BYTES + VIDEO_FRAME_TRAILER_BYTES > data.length) return null;
+    const current16 = this.chain.gen & 0xffff;
+    const ahead = (gen16 - current16) & 0xffff;
+    let target: number;
+    if (ahead <= MAX_AUDIO_SKIP) target = this.chain.gen + ahead;
+    else if (((current16 - gen16) & 0xffff) <= 1)
+      target = this.chain.gen - ((current16 - gen16) & 0xffff);
+    else return null;
+    let mk = this.keys.get(target);
+    let chain = this.chain;
+    if (!mk && target > chain.gen) {
+      while (chain.gen < target) chain = ratchet(chain);
+      mk = messageKey(chain, this.kid, 'video');
+    }
+    if (!mk) return null;
+    const head = data.subarray(0, n);
+    const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
+    aad.set(head, 0);
+    aad.set(trailer, n);
+    const body = aesGcmDecrypt(
+      mk.key,
+      frameNonce(mk.salt, counter),
+      data.subarray(n, data.length - VIDEO_FRAME_TRAILER_BYTES),
+      aad,
+    );
+    if (!body) return null;
+    if (target > this.chain.gen) {
+      const prev = this.keys.get(this.chain.gen);
+      this.keys.clear();
+      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
+      this.chain = chain;
+      this.keys.set(target, mk);
+    }
+    const out = new Uint8Array(n + body.length);
+    out.set(head, 0);
+    out.set(body, n);
+    return out;
   }
 }

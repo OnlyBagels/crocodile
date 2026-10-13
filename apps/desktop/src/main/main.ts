@@ -31,6 +31,7 @@ import type {
   RelayProcessOut,
   UpdateStatus,
 } from './ipc-types';
+import { setupScreenShare } from './screen-share';
 
 const isDev = !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
@@ -382,18 +383,21 @@ app.whenReady().then(() => {
   }
   handleDeepLink(process.argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
 
+  // Microphone and camera ('media'); screens go through the picker (screen-share.ts).
+  const allowed = [
+    'media',
+    'display-capture',
+    'notifications',
+    'clipboard-sanitized-write',
+    'speaker-selection',
+  ];
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(
-      ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
-        permission,
-      ),
-    );
+    callback(allowed.includes(permission));
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) =>
-    ['media', 'notifications', 'clipboard-sanitized-write', 'speaker-selection'].includes(
-      permission,
-    ),
+    allowed.includes(permission),
   );
+  setupScreenShare();
 
   createWindow();
   createTray();

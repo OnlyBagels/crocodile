@@ -80,3 +80,22 @@ export type UpdateStatus =
   /** 'open': the installer opens (and the app quits) instead of a restart. */
   | { state: 'ready'; version: string; after: 'restart' | 'open' }
   | { state: 'error'; message: string; version?: string };
+
+/** A screen or window that can be shared. */
+export interface ScreenSource {
+  id: string;
+  name: string;
+  kind: 'screen' | 'window';
+  /** Small picture of it, as a data URL. */
+  thumbnail: string | null;
+  /** A window's app icon, as a data URL. */
+  icon: string | null;
+}
+
+export interface ScreenSources {
+  sources: ScreenSource[];
+  /** The computer's sound can be shared too (Windows). */
+  canShareSound: boolean;
+  /** Whether the system lets the app record the screen (macOS asks in System Settings). */
+  access: 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown';
+}

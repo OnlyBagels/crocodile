@@ -13,6 +13,16 @@ export const RELAY_CHANNEL_ID = 0;
 const userId = z.string().regex(/^[a-z2-7]{8,64}$/);
 const peerId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}$/);
 
+/** What a member can show: their camera, or a screen (with its sound, maybe). */
+export type MediaKind = 'camera' | 'screen';
+/** A member's camera or screen: `<peer id>:camera` or `<peer id>:screen`. */
+export const StreamId = z.string().regex(/^[a-z2-7]{8,64}\.[a-z2-7]{8,32}:(camera|screen)$/);
+export const streamIds = {
+  make: (peer: string, kind: MediaKind) => `${peer}:${kind}`,
+  peer: (stream: string) => stream.slice(0, stream.lastIndexOf(':')),
+  kind: (stream: string) => stream.slice(stream.lastIndexOf(':') + 1) as MediaKind,
+};
+
 export const ClientToRelay = z.discriminatedUnion('t', [
   z.object({ t: z.literal('bcast'), d: z.unknown() }),
   z.object({ t: z.literal('direct'), to: peerId, d: z.unknown() }),
@@ -28,7 +38,19 @@ export const ClientToRelay = z.discriminatedUnion('t', [
     deafened: z.boolean(),
     voice: z.boolean().optional(),
     rtt: z.number().int().min(0).max(60_000).optional(),
+    /** Showing a camera. */
+    camera: z.boolean().optional(),
+    /** Sharing a screen, and whether its sound comes with it. */
+    screen: z.object({ audio: z.boolean() }).optional(),
   }),
+  /**
+   * Adding video to the connection: a new offer for the same connection,
+   * sent once the host said it can carry video (`hello.media`). It travels
+   * on the encrypted channel, so it needs no signature of its own.
+   */
+  z.object({ t: z.literal('renegotiate'), sdp: z.string().max(100_000) }),
+  /** The cameras and screens this member wants, most wanted first. */
+  z.object({ t: z.literal('watch'), streams: z.array(StreamId).max(32) }),
 ]);
 export type ClientToRelay = z.infer<typeof ClientToRelay>;
 
@@ -41,10 +63,28 @@ export interface PeerState {
   voice?: boolean;
   /** This member's last measured round trip to the host, in ms. */
   rtt?: number;
+  camera?: boolean;
+  screen?: { audio: boolean };
 }
 
 export type RelayToClient =
-  | { t: 'hello'; you: string; host: string; peers: PeerState[]; slots: number }
+  | {
+      t: 'hello';
+      you: string;
+      host: string;
+      peers: PeerState[];
+      slots: number;
+      /** The host can carry video: slots for cameras and screens, and for screens' sound. */
+      media?: { video: number; audio: number };
+    }
+  /** The host's answer to `renegotiate`. */
+  | { t: 'answer'; sdp: string }
+  /**
+   * Which stream each of this member's video slots and screen-sound slots
+   * carries now, and the streams it asked for that the host can't send at
+   * the moment (its connection, or this member's, is full).
+   */
+  | { t: 'media'; video: (string | null)[]; audio: (string | null)[]; paused: string[] }
   | { t: 'peer_join'; peer: PeerState }
   | { t: 'peer_leave'; peer: string }
   | { t: 'peer_state'; peer: PeerState }

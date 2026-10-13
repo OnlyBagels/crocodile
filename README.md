@@ -2,15 +2,21 @@
 
 # Crocodile
 
-**Peer-to-peer, end-to-end encrypted voice and text chat.** Hang out like on
-Discord or TeamSpeak (spaces, text channels, voice rooms, friends, DMs,
-calls) with the privacy of Signal: your voice and messages go only between
-the people in the conversation. Servers never see them.
+**Peer-to-peer, end-to-end encrypted voice, video and text chat.** Hang out
+like on Discord or TeamSpeak (spaces, text channels, voice rooms, friends,
+DMs, calls, screen sharing) with the privacy of Signal: your voice, video and
+messages go only between the people in the conversation. Servers never see
+them.
 
 - **Always E2E, always P2P.** Voice frames and messages are encrypted on your
   device with ratcheting keys and post-quantum (ML-KEM) key exchange. For
   groups, the member with the best connection hosts a tiny relay that
   forwards ciphertext it cannot read, and a runner-up stands by to take over.
+- **Video calls and screen sharing.** Turn your camera on in a call or a
+  voice room, or share a screen or a window, sharp for text and slides or
+  smooth for motion. People see cameras right away and choose which screens
+  to watch, full screen or in a pop-out window. Encrypted end to end like
+  voice.
 - **No passwords, no accounts to lose.** Your account is a key pair; you get a
   recovery key once. Pick a name and you're in. Add your other computers by
   typing a short code.

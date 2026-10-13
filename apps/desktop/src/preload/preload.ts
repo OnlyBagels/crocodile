@@ -4,11 +4,19 @@ import type {
   CoordinatorStatus,
   RelayProcessIn,
   RelayProcessOut,
+  ScreenSources,
   UpdateStatus,
 } from '../main/ipc-types';
 
 /** The only bridge between the sandboxed UI and the rest of the app. */
 const api = {
+  screen: {
+    /** Screens and windows to pick from. */
+    sources: () => ipcRenderer.invoke('screen:sources') as Promise<ScreenSources>,
+    /** The one to share at the next getDisplayMedia call. */
+    choose: (id: string, audio: boolean) =>
+      ipcRenderer.invoke('screen:choose', id, audio) as Promise<void>,
+  },
   secure: {
     get: (key: string) => ipcRenderer.invoke('secure:get', key) as Promise<string | undefined>,
     set: (key: string, value: string) =>

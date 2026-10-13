@@ -64,6 +64,15 @@ size and timing of their encrypted frames, plus who is speaking (from the
 RFC 6464 audio-level header). It holds the same keys as every other member
 (it is one), but its relay component only forwards ciphertext.
 
+**Video** (cameras and screens) takes the same path as voice, end-to-end
+encrypted between members, and never goes through a server, not even the
+opt-in relay: calls that need it are voice only. For video the host peer
+also sees who has a camera on or shares a screen, which streams each member
+watches, frame sizes and timing (video has no constant bitrate, so these
+reveal roughly how much moves), and the first bytes of each VP8 frame, left
+readable so it can find key frames: the frame type and, on key frames, the
+picture size.
+
 ## Adversaries
 
 | Adversary                          | Can                                                                                    | Cannot                                                                                                                                                                       |
@@ -93,6 +102,9 @@ RFC 6464 audio-level header). It holds the same keys as every other member
   replaced every 30 minutes and on leave.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
+- Video: per-frame AES-GCM with keys from the audio chain under a separate
+  label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
+  and is authenticated with the trailer.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
 - Files: a random key per file; 1 MiB blocks encrypted with AES-256-GCM
   (index as nonce; file id, index and a last-block flag as associated data);
@@ -119,7 +131,8 @@ RFC 6464 audio-level header). It holds the same keys as every other member
   but rekeying cost grows with group size.
 - Safety-number verification is manual.
 - The host peer and relay operators see traffic metadata (sizes, timing,
-  speaking activity).
+  speaking activity); for video the host also sees frame sizes, key frames and
+  picture sizes.
 - The command line tool keeps the account's keys in a file only its user can
   read (mode 600), not in an OS keychain; anyone with that user's access, or
   root, can use the account. Remove the device in the app if a machine is

@@ -274,6 +274,56 @@ Offers and answers are signed with identity keys over (session, epoch, both
 ids, SDP including the DTLS fingerprint), so a coordination server cannot
 splice itself into the WebRTC transport.
 
+## 6a. Video: cameras and screens
+
+Video uses the same relay and the same connection as voice. A host that
+carries video says so in its `hello` (`media: {video: 9, audio: 2}`); the
+member then adds the m-lines for it and renegotiates over the relay's data
+channel (`renegotiate` → `answer`), which is already DTLS-authenticated, so
+no signalling server is involved. Hosts from before video never get an offer
+they can't answer: members connect voice-only first, as before. Added m-lines:
+
+- 2 upstream video (camera, screen) and 1 upstream audio (the screen's sound),
+- 9 downstream **video slots** and 2 downstream **screen-sound slots**.
+
+The offer names only VP8 and Opus, the codecs the relay forwards; that also
+keeps it small enough for one data channel message.
+
+**Who gets what.** A member's `state` says whether their camera is on and
+whether they share a screen (with or without sound). Each member sends the
+relay the streams it wants (`watch`): every camera in the call, and the
+screens it chose to watch. Nobody gets a screen they didn't ask for. The
+relay assigns streams to the member's video slots, waits for each new
+stream's next key frame (asking its sender with a PLI), and rewrites
+sequence numbers, timestamps and VP8 picture ids so a slot stays one
+continuous stream when its source changes. A watched screen brings its sound
+along in a screen-sound slot. It tells each member what is where (`media`),
+and which asked-for streams it held back (`paused`).
+
+**Sharing the host's upload.** Everyone's asks are taken in turn (everyone's
+first choice before anyone's second), keeping streams already flowing first,
+within the host's limit and each viewer's own. Limits follow the loss that
+viewers report in RTCP: when most of them lose packets the host's upload is
+full and its limit drops below what was flowing; when one does, only that
+viewer's limit drops. Limits rise again slowly once things stay clean. Until
+a stream is measured the relay assumes 900 kbps for a camera and 1.5 Mbps for
+a screen.
+
+**Capture.** Cameras send 1280×720 at 30 fps (1 Mbps cap). Screens come in
+two qualities the sharer picks: text and slides (up to 1920×1080, about
+5 fps, detail kept when bandwidth is short, 1.5 Mbps) and motion (1280×720,
+30 fps, frame rate kept, 2.5 Mbps). The desktop app shows its own picker of
+screens and windows and answers Chromium's `getDisplayMedia` with exactly the
+chosen one; system sound comes along only on Windows, the one platform where
+Electron can capture it.
+
+**Not over server relays.** A member whose connection goes through the
+opt-in server relay (TURN) gets voice only: video would multiply what
+volunteers carry. Video starts only once the connection is known to go
+directly to the host, and the call keeps checking, so video stops if ICE
+moves to the server relay later. The app says so instead of showing the
+camera button as broken.
+
 ## 7. End-to-end encryption
 
 Goal: the strongest protection that costs no noticeable CPU, latency or user
@@ -301,6 +351,13 @@ effort. Everything below is automatic.
   as AAD. Frames that cannot be encrypted are dropped, never sent in the
   clear. Opus runs at a **constant bitrate** so packet sizes do not reveal
   what is said.
+- **Video.** Camera and screen frames are encrypted the same way, with keys
+  from the audio chain under their own label, so a video frame can never be
+  taken for a voice frame or the other way round. The first bytes of each
+  VP8 frame (10 for key frames, 3 otherwise: frame type, and on key frames
+  the picture size) stay readable, authenticated as AAD, so the relay can
+  find key frames:
+  `header ‖ ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ headerLen ‖ 0xC9`.
 - **Text.** Messages are signed by their author (so history can be re-shared
   verifiably), padded (Padmé) to hide their exact length and encrypted with
   the text chain.
@@ -462,6 +519,10 @@ See [docs/ROADMAP.md](docs/ROADMAP.md). The main ones:
 - **Global push-to-talk** needs X11 on Linux (not Wayland) and the
   Accessibility permission on macOS; otherwise it works while the app is
   focused.
+- **Video needs a direct path** to the host: calls through a server relay
+  are voice only. One host carries everyone's video, so a large call with
+  many cameras is limited by that host's upload; streams it can't carry are
+  paused, and resume when there's room. Screens share sound on Windows only.
 - **Files need a direct path.** Two members who can only reach each other
   through a server relay can't exchange files; a third member who has the
   file and can reach both still can. Downloads come from one holder at a

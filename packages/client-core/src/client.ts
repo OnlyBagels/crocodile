@@ -45,6 +45,7 @@ import {
   peerIds,
   recordKey,
   sessionIds,
+  streamIds,
   toB64u,
   type Channel,
   type ChannelKind,
@@ -64,6 +65,7 @@ import {
   type OperatorInfo,
   type ServerInfo,
   type SessionState,
+  type MediaKind,
   type PresenceEntry,
   type SignedRecord,
   type SpaceBody,
@@ -92,6 +94,7 @@ import {
   type RelayStatus,
   type TransportFactory,
   type ConnectAttempt,
+  type VideoBlock,
 } from './group-session';
 import type { PlatformAdapter } from './platform';
 import { webrtcFileLinks, type FileLinkFactory } from './file-link';
@@ -107,7 +110,7 @@ import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
 import { StateStore } from './store';
-import type { VoiceEngine } from './voice';
+import type { OutgoingVideo, ScreenQuality, ScreenRequest, VoiceEngine } from './voice';
 
 export interface ClientConfig {
   /** Directory services used to discover coordination servers. */
@@ -229,6 +232,32 @@ export interface SessionView {
   inCall: string[];
   /** Each call member's round trip to the host, in ms, as they last measured it. */
   latency: Record<string, number>;
+  /** Cameras and shared screens in the call. */
+  video: {
+    /** Why video can't be used in this call right now, if it can't. */
+    blocked: VideoBlock | null;
+    /** Video is on our connection: we can show and watch. */
+    ready: boolean;
+    streams: VideoStreamView[];
+  };
+}
+
+/** A camera or shared screen in a call. */
+export interface VideoStreamView {
+  /** Stream id (`<peer>:camera` or `<peer>:screen`). */
+  id: string;
+  userId: string;
+  kind: MediaKind;
+  /** A screen shared with its sound. */
+  audio: boolean;
+  /** Ours: shown from the local preview. */
+  mine: boolean;
+  /**
+   * What we get of it: `live` (it plays), `loading` (asked for, its first
+   * picture is on its way), `paused` (the host's connection or ours is full),
+   * `off` (a screen we haven't chosen to watch).
+   */
+  state: 'live' | 'loading' | 'paused' | 'off';
 }
 
 /** A space an invite leads to, as shown before joining. */
@@ -328,6 +357,10 @@ export interface ClientState {
   callLiveSince: number | null;
   muted: boolean;
   deafened: boolean;
+  /** Our camera is on (in the call we are in). */
+  camera: boolean;
+  /** We share a screen, and how. */
+  screenShare: { quality: ScreenQuality; audio: boolean } | null;
   settings: Settings;
   /** Toasts: problems, and `info` notices such as a call ending. */
   errors: { id: number; message: string; kind?: 'info' }[];
@@ -398,7 +431,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private transportFactory?: TransportFactory;
   private stun: string[] = [];
   private errorId = 0;
-  voiceEngine?: VoiceEngine;
+  private engine?: VoiceEngine;
+  private offVideo?: () => void;
+  /** Voice and video on this device (set by the app; absent where there is none). */
+  get voiceEngine(): VoiceEngine | undefined {
+    return this.engine;
+  }
+  set voiceEngine(engine: VoiceEngine | undefined) {
+    this.offVideo?.();
+    this.engine = engine;
+    this.offVideo = engine?.on('video', (out) => this.onOutgoingVideo(out));
+  }
   /** Our relationships, decrypted (see friend-list.ts). */
   private friendList: FriendList = new Map();
   /** The list as our stored record has it, encoded; anything else still needs saving. */
@@ -449,6 +492,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       callLiveSince: null,
       muted: false,
       deafened: false,
+      camera: false,
+      screenShare: null,
       settings: defaultSettings,
       errors: [],
       devices: [],
@@ -2049,10 +2094,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       },
       this.transportFactory,
       withVoice
-        ? { micTrack: () => withVoice.micTrack(), frameCrypto: (k) => withVoice.frameCrypto(k) }
+        ? {
+            micTrack: () => withVoice.micTrack(),
+            frameCrypto: (k) => withVoice.frameCrypto(k),
+            // Only the call we are in shows our camera or screen.
+            outgoing: () =>
+              this.state.voiceSession === sessionId
+                ? withVoice.outgoing()
+                : { camera: null, screen: null },
+          }
         : undefined,
     );
     session.on('update', () => this.publishSession(session!));
+    session.on('screenAudio', ({ slot, track }) =>
+      this.voiceEngine?.playSlot(sessionId, `screen${slot}`, track, () => {
+        const stream = session!.screenAudioSlots[slot];
+        return stream ? peerIds.user(streamIds.peer(stream)) : null;
+      }),
+    );
     session.on('track', (ev) =>
       this.voiceEngine?.playSlot(sessionId, ev.slot, ev.track, () => {
         const peer = session!.slots[ev.slot];
@@ -2129,10 +2188,121 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           .map((p) => [peerIds.user(p.id), p.rtt!] as const),
         ...(session.isVoice && session.rttMs !== null ? [[me, session.rttMs] as const] : []),
       ]),
+      video: this.videoView(session),
     };
     this.store.set((s) => ({ sessions: { ...s.sessions, [session.sessionId]: view } }));
     this.noteTrouble(view);
     if (this.state.voiceSession === session.sessionId) this.followCall(view, session.welcomed);
+  }
+
+  private videoView(session: GroupSession): SessionView['video'] {
+    const streams: VideoStreamView[] = [];
+    const inThisCall = this.state.voiceSession === session.sessionId;
+    const out = inThisCall ? this.voiceEngine?.outgoing() : undefined;
+    const blocked = session.videoBlocked;
+    if (out && session.videoUsable) {
+      if (out.camera)
+        streams.push({
+          id: streamIds.make(this.peer, 'camera'),
+          userId: this.userId,
+          kind: 'camera',
+          audio: false,
+          mine: true,
+          state: 'live',
+        });
+      if (out.screen)
+        streams.push({
+          id: streamIds.make(this.peer, 'screen'),
+          userId: this.userId,
+          kind: 'screen',
+          audio: !!out.screen.audio,
+          mine: true,
+          state: 'live',
+        });
+    }
+    for (const p of session.peers.values()) {
+      if (p.id === this.peer) continue;
+      for (const kind of ['screen', 'camera'] as const) {
+        if (kind === 'camera' ? !p.camera : !p.screen) continue;
+        const id = streamIds.make(p.id, kind);
+        const watched = kind === 'camera' || session.watchedScreens.includes(id);
+        const slot = session.videoSlots.indexOf(id);
+        streams.push({
+          id,
+          userId: peerIds.user(p.id),
+          kind,
+          audio: kind === 'screen' && !!p.screen?.audio,
+          mine: false,
+          state: !watched
+            ? 'off'
+            : session.pausedStreams.includes(id)
+              ? 'paused'
+              : slot >= 0 && session.videoStream(id) && session.videoShowingNow(id)
+                ? 'live'
+                : 'loading',
+        });
+      }
+    }
+    return {
+      blocked: inThisCall ? blocked : null,
+      ready: session.mediaReady && session.route !== null,
+      streams,
+    };
+  }
+
+  // ===========================================================================
+  // Camera and screen
+  // ===========================================================================
+
+  private onOutgoingVideo(out: OutgoingVideo) {
+    this.store.set({
+      camera: !!out.camera,
+      screenShare: out.screen ? { quality: out.screen.quality, audio: !!out.screen.audio } : null,
+    });
+    const id = this.state.voiceSession;
+    const session = id ? this.sessions.get(id) : undefined;
+    if (session) {
+      session.refreshVideo();
+      this.publishSession(session);
+    }
+  }
+
+  /** Show our camera in the call we are in, or stop. */
+  async setCamera(on: boolean, deviceId?: string) {
+    const engine = this.voiceEngine;
+    if (!on) return engine?.stopCamera();
+    if (!engine) throw new Error('Video is not available on this device');
+    if (!this.state.voiceSession) throw new Error('Join a call to show your camera');
+    await engine.startCamera(deviceId);
+  }
+
+  /** Share a screen or window in the call we are in. */
+  async shareScreen(request: ScreenRequest) {
+    const engine = this.voiceEngine;
+    if (!engine?.canShareScreen) throw new Error('This device cannot share its screen');
+    if (!this.state.voiceSession) throw new Error('Join a call to share your screen');
+    await engine.startScreen(request);
+  }
+
+  stopScreenShare() {
+    this.voiceEngine?.stopScreen();
+  }
+
+  /** What we show, for our own preview. */
+  localVideo(kind: MediaKind): MediaStream | null {
+    const out = this.voiceEngine?.outgoing();
+    const track = kind === 'camera' ? out?.camera : out?.screen?.video;
+    return track && typeof MediaStream !== 'undefined' ? new MediaStream([track]) : null;
+  }
+
+  /** Start or stop watching someone's shared screen. */
+  watchScreen(sessionId: string, stream: string, on: boolean) {
+    this.sessions.get(sessionId)?.watchScreen(stream, on);
+  }
+
+  /** The picture of someone's camera or screen in a call, while we get it. */
+  videoStream(sessionId: string, stream: string): MediaStream | null {
+    return this.sessions.get(sessionId)?.videoStream(stream) ?? null;
   }
 
   /** Who was in the call we are in, at the last update (users, us excluded). */
@@ -2990,6 +3160,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.callAnswered = null;
     this.store.set({ voiceSession: null, callLiveSince: null });
     const session = this.sessions.get(sessionId);
+    // Camera and screen belong to the call.
+    this.voiceEngine?.stopCamera();
+    this.voiceEngine?.stopScreen();
     this.voiceEngine?.stopSession(sessionId);
     if (sessionId.startsWith('dm:')) {
       // Keep the DM open for text. The call's session goes first, so its

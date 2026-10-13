@@ -13,6 +13,9 @@ import {
   PREKEY_LIFETIME_MS,
   SecureChannel,
   TextReceiver,
+  VIDEO_MAX_CLEAR,
+  VideoReceiver,
+  VideoSender,
   acceptChannel,
   answerChannel,
   createChannelKeys,
@@ -467,6 +470,50 @@ describe('ratcheting sender keys', () => {
     expect(rx.decrypt(new AudioSender(sk.kid, sk.audio).encrypt(new Uint8Array(40)))).toEqual(
       new Uint8Array(40),
     );
+  });
+
+  it('video: the codec header stays readable, everything is authenticated', () => {
+    const sk = createSenderKey();
+    const sender = new VideoSender(sk.kid, sk.audio);
+    const rx = new VideoReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = Uint8Array.from({ length: 3000 }, (_, i) => (i * 7) & 0xff);
+    const key = sender.encrypt(frame, 10);
+    expect(peekFrameKid(key)).toBe(sk.kid);
+    // The first 10 bytes (a VP8 key frame's header) are as they were; the rest isn't.
+    expect(key.subarray(0, 10)).toEqual(frame.subarray(0, 10));
+    expect(key.subarray(10, 40)).not.toEqual(frame.subarray(10, 40));
+    expect(rx.decrypt(key)).toEqual(frame);
+    const delta = sender.encrypt(frame, 3);
+    expect(rx.decrypt(delta)).toEqual(frame);
+    // A changed clear byte, body byte or clear length is refused.
+    for (const at of [0, 20, key.length - 2]) {
+      const bad = key.slice();
+      bad[at] = bad[at]! ^ 1;
+      expect(rx.decrypt(bad)).toBeNull();
+    }
+    // Never more in the clear than allowed, however much is asked for.
+    const capped = sender.encrypt(frame, 5000);
+    expect(capped[capped.length - 2]).toBe(VIDEO_MAX_CLEAR);
+    expect(rx.decrypt(capped)).toEqual(frame);
+    // Across generations, like audio.
+    sender.update(ratchet(sk.audio));
+    expect(rx.decrypt(sender.encrypt(frame, 3))).toEqual(frame);
+  });
+
+  it("video and audio frames can't stand in for each other", () => {
+    const sk = createSenderKey();
+    const frame = new Uint8Array(200).fill(9);
+    const audio = new AudioSender(sk.kid, sk.audio).encrypt(frame);
+    const video = new VideoSender(sk.kid, sk.audio).encrypt(frame, 0);
+    const chain = () => importChain(exportChains(sk).audio);
+    expect(new VideoReceiver(sk.kid, chain()).decrypt(audio)).toBeNull();
+    expect(new AudioReceiver(sk.kid, chain()).decrypt(video)).toBeNull();
+    // Same layout but the audio magic byte: still another key, so refused.
+    const relabelled = video.slice(0, video.length - 2);
+    const asAudio = new Uint8Array(relabelled.length + 1);
+    asAudio.set(relabelled);
+    asAudio[asAudio.length - 1] = 0xc8;
+    expect(new AudioReceiver(sk.kid, chain()).decrypt(asAudio)).toBeNull();
   });
 });
 

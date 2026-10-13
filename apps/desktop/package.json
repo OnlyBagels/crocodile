@@ -3,7 +3,7 @@
   "productName": "Crocodile",
   "version": "0.1.0",
   "private": true,
-  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice and text chat",
+  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice, video and text chat",
   "author": {
     "name": "Crocodile contributors",
     "email": "contact@crocodilechat.com"

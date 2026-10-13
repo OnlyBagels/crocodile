@@ -12,6 +12,9 @@ export interface FrameCryptoHooks {
   protectSender(sender: RTCRtpSender): void;
   /** Install decryption on a slot receiver. */
   protectReceiver(receiver: RTCRtpReceiver): void;
+  /** The same for video (camera and screen, and video slots). */
+  protectVideoSender?(sender: RTCRtpSender): void;
+  protectVideoReceiver?(receiver: RTCRtpReceiver): void;
   /** Extra RTCPeerConnection config needed by the hooks (legacy insertable streams). */
   rtcConfig?: Record<string, unknown>;
 }
@@ -61,11 +64,23 @@ export type FailStage =
   /** Stopped by the session itself: another host or epoch, or leaving. */
   | 'superseded';
 
+/** What a member sends besides its voice. */
+export type OutgoingMedia = 'camera' | 'screen' | 'screenAudio';
+
+/** Most a camera or screen may send, by kind and screen quality (bits/s). */
+export const VIDEO_BITRATE = { camera: 1_000_000, text: 1_500_000, motion: 2_500_000 } as const;
+
 export type RelayLinkEvents = {
   open: void;
   message: RelayToClient;
   /** A slot's remote audio track is available. */
   track: { slot: number; track: MediaStreamTrack; receiver: RTCRtpReceiver };
+  /** A video slot's track (a camera or screen the host sends us). */
+  video: { slot: number; track: MediaStreamTrack };
+  /** A screen-sound slot's track. */
+  screenAudio: { slot: number; track: MediaStreamTrack };
+  /** Video is on the connection (the host answered our renegotiation). */
+  media: void;
   /** The connection got one step further. */
   progress: { step: ConnectStep };
   failed: { reason: string; stage?: FailStage };
@@ -194,6 +209,12 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
   readonly pc: RTCPeerConnection;
   private dc: RTCDataChannel;
   private micSender?: RTCRtpSender;
+  private outgoing: Partial<Record<OutgoingMedia, RTCRtpSender>> = {};
+  private videoSlots: RTCRtpTransceiver[] = [];
+  private soundSlots: RTCRtpTransceiver[] = [];
+  private mediaAnswer?: (sdp: string) => void;
+  /** Video was added and answered. */
+  media = false;
   private remoteSet = false;
   private early: RTCIceCandidateInit[] = [];
   private closed = false;
@@ -220,11 +241,14 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     };
     this.dc.onclose = () => this.fail('control channel closed');
     this.dc.onmessage = (ev) => {
+      let msg: RelayToClient;
       try {
-        this.emit('message', JSON.parse(String(ev.data)) as RelayToClient);
+        msg = JSON.parse(String(ev.data)) as RelayToClient;
       } catch {
-        /* ignore malformed */
+        return;
       }
+      if (msg.t === 'answer') this.mediaAnswer?.(msg.sdp);
+      else this.emit('message', msg);
     };
     this.pc.onicecandidate = (ev) => {
       if (!ev.candidate || !ev.candidate.candidate) return;
@@ -262,10 +286,14 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
       }
     };
     this.pc.ontrack = (ev) => {
+      const video = this.videoSlots.indexOf(ev.transceiver);
+      if (video >= 0) return this.emit('video', { slot: video, track: ev.track });
+      const sound = this.soundSlots.indexOf(ev.transceiver);
+      if (sound >= 0) return this.emit('screenAudio', { slot: sound, track: ev.track });
       const transceivers = this.pc.getTransceivers();
       const index = transceivers.indexOf(ev.transceiver);
       // Transceiver 0 is our microphone; slots follow.
-      if (index >= 1)
+      if (index >= 1 && index <= this.opts.slots)
         this.emit('track', { slot: index - 1, track: ev.track, receiver: ev.receiver });
     };
   }
@@ -274,6 +302,15 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
   async route(): Promise<ConnectionRoute | null> {
     if (this.closed) return null;
     return routeFromStats(await this.pc.getStats());
+  }
+
+  /** Frames decoded so far on a video slot. */
+  async videoFrames(slot: number): Promise<number | null> {
+    const t = this.videoSlots[slot];
+    if (!t || this.closed) return null;
+    for (const s of (await t.receiver.getStats()).values())
+      if (s.type === 'inbound-rtp') return (s as { framesDecoded?: number }).framesDecoded ?? 0;
+    return 0;
   }
 
   /** Live numbers about the connection (debug panel). */
@@ -357,6 +394,100 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     await this.micSender?.replaceTrack(track);
   }
 
+  /**
+   * Adds video to the connection once the host said it carries it: our
+   * camera, screen and screen's sound going up, `video` and `audio` slots
+   * coming down. The new offer goes over the encrypted channel.
+   */
+  async addMedia(slots: { video: number; audio: number }) {
+    if (this.media || this.mediaAnswer || this.closed) return;
+    const crypto = this.opts.crypto;
+    const added: RTCRtpTransceiver[] = [];
+    const add = (kind: 'audio' | 'video', direction: RTCRtpTransceiverDirection) => {
+      const t = this.pc.addTransceiver(kind, { direction });
+      added.push(t);
+      onlyCodec(t, kind === 'video' ? 'video/vp8' : 'audio/opus');
+      return t;
+    };
+    const camera = add('video', 'sendonly');
+    const screen = add('video', 'sendonly');
+    const screenAudio = add('audio', 'sendonly');
+    crypto?.protectVideoSender?.(camera.sender);
+    crypto?.protectVideoSender?.(screen.sender);
+    crypto?.protectSender(screenAudio.sender);
+    for (let i = 0; i < slots.video; i++) {
+      const t = add('video', 'recvonly');
+      crypto?.protectVideoReceiver?.(t.receiver);
+      this.videoSlots.push(t);
+    }
+    for (let i = 0; i < slots.audio; i++) {
+      const t = add('audio', 'recvonly');
+      crypto?.protectReceiver(t.receiver);
+      this.soundSlots.push(t);
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const answered = new Promise<string>((res, rej) => {
+      this.mediaAnswer = res;
+      timer = setTimeout(() => rej(new Error('the host did not answer')), 15_000);
+    });
+    // Only awaited once the offer went out; a failure before that mustn't go unhandled.
+    answered.catch(() => {});
+    try {
+      await this.pc.setLocalDescription(await this.pc.createOffer());
+      const msg = JSON.stringify({ t: 'renegotiate', sdp: this.pc.localDescription!.sdp });
+      const limit = this.pc.sctp?.maxMessageSize;
+      if (limit && msg.length > limit)
+        throw new Error(`the video offer is too large to send (${msg.length} bytes)`);
+      if (!this.isOpen) throw new Error('not connected');
+      this.dc.send(msg);
+      const sdp = await answered;
+      if (this.closed) return;
+      await this.pc.setRemoteDescription({ type: 'answer', sdp });
+    } catch (err) {
+      // Back to the voice-only connection we had, still usable.
+      if (!this.closed) {
+        if (this.pc.signalingState === 'have-local-offer')
+          await this.pc.setLocalDescription({ type: 'rollback' }).catch(() => {});
+        for (const t of added) t.stop?.();
+      }
+      this.videoSlots = [];
+      this.soundSlots = [];
+      throw err;
+    } finally {
+      clearTimeout(timer);
+      this.mediaAnswer = undefined;
+    }
+    this.outgoing = {
+      camera: camera.sender,
+      screen: screen.sender,
+      screenAudio: screenAudio.sender,
+    };
+    this.media = true;
+    this.emit('media', undefined);
+  }
+
+  /**
+   * What we send besides our voice; null stops it. `bitrate` caps a camera
+   * or screen; `hint` says what to keep when the link is short: detail for
+   * text, frame rate for motion.
+   */
+  async setOutgoing(
+    kind: OutgoingMedia,
+    track: MediaStreamTrack | null,
+    opts: { bitrate?: number; hint?: 'text' | 'motion' } = {},
+  ) {
+    const sender = this.outgoing[kind];
+    if (!sender) return;
+    await sender.replaceTrack(track);
+    if (!track || kind === 'screenAudio') return;
+    const params = sender.getParameters();
+    if (!params.encodings?.length) params.encodings = [{}];
+    params.encodings[0]!.maxBitrate = opts.bitrate ?? VIDEO_BITRATE.camera;
+    (params as RTCRtpSendParameters & { degradationPreference?: string }).degradationPreference =
+      opts.hint === 'text' ? 'maintain-resolution' : 'maintain-framerate';
+    await sender.setParameters(params).catch(() => {});
+  }
+
   private fail(reason: string, stage?: FailStage) {
     if (this.closed) return;
     this.closed = true;
@@ -388,5 +519,22 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     }
     this.pc.close();
     this.emit('closed', undefined);
+  }
+}
+
+/**
+ * Offers just the codec the host forwards (VP8, Opus). Besides matching what
+ * it accepts, this keeps the offer small: with every codec a browser knows,
+ * a dozen video m-lines don't fit in one data channel message.
+ */
+function onlyCodec(t: RTCRtpTransceiver, mimeType: string) {
+  const kind = mimeType.split('/')[0]!;
+  const caps = globalThis.RTCRtpReceiver?.getCapabilities?.(kind);
+  const codecs = caps?.codecs.filter((c) => c.mimeType.toLowerCase() === mimeType);
+  if (!codecs?.length || !t.setCodecPreferences) return;
+  try {
+    t.setCodecPreferences(codecs);
+  } catch {
+    // Left to the browser's defaults.
   }
 }

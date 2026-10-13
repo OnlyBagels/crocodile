@@ -64,7 +64,7 @@ const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other
 import { isOperatorContact } from '@crocodile/protocol';
 import type { NetworkCheckItem } from '@crocodile/client-core';
 import { desktop } from '../platform';
-import { Avatar, Button, Input, Label, Toggle, cx } from '../components/ui';
+import { Avatar, Button, Input, Label, Select, Toggle, cx } from '../components/ui';
 import { Logo } from '../components/Logo';
 import { DebugTab } from './ConnectionModals';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
@@ -189,26 +189,6 @@ function Row({
       </div>
       <div className="shrink-0">{children}</div>
     </div>
-  );
-}
-
-function Select({
-  value,
-  onChange,
-  children,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  children: ReactNode;
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-11 w-full rounded-xl border border-line bg-field px-3 text-sm text-text outline-none focus:border-accent"
-    >
-      {children}
-    </select>
   );
 }
 

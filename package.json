@@ -1,7 +1,7 @@
 {
   "name": "crocodile",
   "private": true,
-  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice and text communicator",
+  "description": "Crocodile: peer-to-peer, end-to-end encrypted voice, video and text communicator",
   "license": "AGPL-3.0-only",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

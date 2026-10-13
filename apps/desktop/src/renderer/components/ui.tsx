@@ -231,6 +231,8 @@ export function IconButton({
   onClick,
   className,
   size = 36,
+  disabled,
+  title,
 }: {
   label: string;
   children: ReactNode;
@@ -239,15 +241,19 @@ export function IconButton({
   onClick?: () => void;
   className?: string;
   size?: number;
+  disabled?: boolean;
+  /** Tooltip, if not the label (why it is disabled, say). */
+  title?: string;
 }) {
   return (
     <button
-      title={label}
+      title={title ?? label}
       aria-label={label}
       onClick={onClick}
+      disabled={disabled}
       style={{ width: size, height: size }}
       className={cx(
-        'flex shrink-0 items-center justify-center rounded-full transition',
+        'flex shrink-0 items-center justify-center rounded-full transition disabled:cursor-not-allowed disabled:opacity-40',
         danger
           ? 'bg-danger/15 text-danger hover:bg-danger/25'
           : active
@@ -356,22 +362,25 @@ export function Toggle({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      disabled={disabled}
       onClick={(e) => {
         e.preventDefault();
         onChange(!checked);
       }}
       className={cx(
-        'relative h-6 w-11 shrink-0 rounded-full transition-colors',
+        'relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40',
         checked ? 'bg-accent' : 'bg-active',
       )}
     >
@@ -382,5 +391,28 @@ export function Toggle({
         )}
       />
     </button>
+  );
+}
+
+export function Select({
+  value,
+  onChange,
+  children,
+  label,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  children: ReactNode;
+  label?: string;
+}) {
+  return (
+    <select
+      value={value}
+      aria-label={label}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-11 w-full rounded-xl border border-line bg-field px-3 text-sm text-text outline-none focus:border-accent"
+    >
+      {children}
+    </select>
   );
 }

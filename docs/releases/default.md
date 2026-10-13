@@ -1,5 +1,5 @@
-A beta release of Crocodile: peer-to-peer, end-to-end encrypted voice and
-text chat. It works, but expect rough edges, and note that it hasn't had an
+A beta release of Crocodile: peer-to-peer, end-to-end encrypted voice, video
+and text chat. It works, but expect rough edges, and note that it hasn't had an
 independent security audit yet.
 
 ## Download

@@ -284,6 +284,19 @@ await inCall(b.page);
 await a.page.waitForTimeout(2000);
 await shot(a.page, '07-voice');
 await shot(b.page, '08-voice-bob');
+// A camera in a voice room: the room becomes tiles.
+await b.page.getByRole('button', { name: 'Turn camera on' }).first().click();
+await b.page.getByRole('dialog').getByRole('button', { name: 'Turn camera on' }).click();
+await a.page
+  .getByRole('group', { name: /camera$/ })
+  .getByLabel(/^Camera: /)
+  .waitFor({ timeout: 20_000 });
+await a.page.waitForTimeout(1500);
+await shot(a.page, '08b-voice-camera');
+await b.page.getByRole('button', { name: 'Turn camera off' }).first().click();
+await a.page
+  .getByRole('group', { name: /camera$/ })
+  .waitFor({ state: 'detached', timeout: 10_000 });
 
 // People.
 await b.page.getByRole('button', { name: 'Home' }).click();
@@ -337,6 +350,47 @@ const stage = b.page.getByRole('region', { name: 'Call' });
 await stage.getByRole('button', { name: 'Hang up' }).waitFor({ timeout: 10_000 });
 await b.page.waitForTimeout(3500);
 await shot(b.page, '10c-dm-call');
+// Video: a camera shows after a preview, to the other side as a tile.
+await a.page.getByRole('button', { name: 'Turn camera on' }).first().click();
+const cameraModal = a.page.getByRole('dialog');
+await cameraModal.getByLabel('Camera preview').waitFor();
+await a.page.waitForTimeout(800);
+await shot(a.page, '10d-camera-preview');
+await cameraModal.getByRole('button', { name: 'Turn camera on' }).click();
+await a.page.getByRole('group', { name: 'Your camera' }).waitFor({ timeout: 15_000 });
+const aliceCamera = b.page.getByRole('group', { name: /camera$/ });
+await aliceCamera.getByLabel(/^Camera: /).waitFor({ timeout: 20_000 });
+const playing = (page: Page, label: RegExp) =>
+  page.waitForFunction(
+    (src) =>
+      [...document.querySelectorAll('video')].some(
+        (v) => new RegExp(src).test(v.getAttribute('aria-label') ?? '') && v.videoWidth > 0,
+      ),
+    label.source,
+    { timeout: 20_000 },
+  );
+await playing(b.page, /^Camera: /);
+await shot(b.page, '10e-camera-bob');
+// A screen share is offered; only who clicks Watch gets it.
+await b.page.getByRole('button', { name: 'Share your screen' }).first().click();
+const shareModal = b.page.getByRole('dialog');
+await shareModal.getByRole('region', { name: 'Screens' }).waitFor({ timeout: 15_000 });
+await shot(b.page, '10f-share-picker');
+await shareModal.getByText('Motion', { exact: true }).click();
+await shareModal.getByRole('button', { name: 'Share', exact: true }).click();
+await b.page.getByRole('group', { name: 'Your screen' }).waitFor({ timeout: 15_000 });
+const watch = a.page.getByRole('button', { name: /^Watch .*'s screen$/ });
+await watch.waitFor({ timeout: 15_000 });
+await shot(a.page, '10g-screen-offer');
+await watch.click();
+await playing(a.page, /^Screen: /);
+await shot(a.page, '10h-watching');
+await a.page.getByRole('button', { name: 'Stop watching' }).click();
+await watch.waitFor({ timeout: 10_000 });
+await b.page.getByRole('button', { name: 'Stop sharing your screen' }).first().click();
+await watch.waitFor({ state: 'detached', timeout: 10_000 });
+await a.page.getByRole('button', { name: 'Turn camera off' }).first().click();
+await aliceCamera.waitFor({ state: 'detached', timeout: 10_000 });
 // Hanging up ends the call for the other side too, instead of leaving it "on".
 await a.page.getByRole('button', { name: 'Leave call' }).click();
 await b.page.getByText('Call ended').waitFor({ timeout: 10_000 });

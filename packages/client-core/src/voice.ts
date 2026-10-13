@@ -28,11 +28,34 @@ export const defaultVoiceSettings: VoiceSettings = {
   userVolumes: {},
 };
 
+/** How a shared screen should look: sharp text and slides, or smooth motion. */
+export type ScreenQuality = 'text' | 'motion';
+
+export interface ScreenRequest {
+  /** The screen or window to share, from the platform's picker. */
+  sourceId?: string;
+  quality: ScreenQuality;
+  /** Share the computer's sound too (where the system allows it). */
+  audio: boolean;
+}
+
 export interface VoicePlatform {
   getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStream>;
   enumerateDevices?(): Promise<MediaDeviceInfo[]>;
   /** Creates the frame encryption worker (see frame-worker.ts). */
   createFrameWorker(): Worker;
+  /** Captures a screen or window (absent: this device can't share its screen). */
+  getDisplayMedia?(request: ScreenRequest): Promise<MediaStream>;
+}
+
+/** What this device shows in its call besides its voice. */
+export interface OutgoingVideo {
+  camera: MediaStreamTrack | null;
+  screen: {
+    video: MediaStreamTrack;
+    audio: MediaStreamTrack | null;
+    quality: ScreenQuality;
+  } | null;
 }
 
 export type VoiceEvents = {
@@ -40,18 +63,30 @@ export type VoiceEvents = {
   error: { message: string };
   /** The microphone track changed (device switch); sessions must swap it in. */
   track: MediaStreamTrack | null;
+  /** The camera or the shared screen started or stopped. */
+  video: OutgoingVideo;
 };
+
+/** What a camera captures. */
+export const CAMERA_CONSTRAINTS = { width: 1280, height: 720, frameRate: 30 } as const;
+/** What a shared screen captures, by quality. */
+export const SCREEN_CONSTRAINTS = {
+  text: { width: 1920, height: 1080, frameRate: 5 },
+  motion: { width: 1280, height: 720, frameRate: 30 },
+} as const;
 
 type WorkerMessage =
   | { type: 'keys'; scope: string; keys: FrameKeys }
   | {
       type: 'stream';
       scope: string;
-      role: 'encrypt' | 'decrypt';
+      role: FrameRole;
       readable: ReadableStream;
       writable: WritableStream;
     }
   | { type: 'drop'; scope: string };
+
+type FrameRole = 'encrypt' | 'decrypt' | 'encrypt-video' | 'decrypt-video';
 
 declare const RTCRtpScriptTransform:
   | {
@@ -83,6 +118,8 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     string,
     { el: HTMLAudioElement; owner: () => string | null; timer: ReturnType<typeof setInterval> }
   >();
+  private camera: MediaStreamTrack | null = null;
+  private screen: OutgoingVideo['screen'] = null;
 
   constructor(
     private readonly platform: VoicePlatform,
@@ -240,12 +277,116 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     }
   }
 
-  async devices(): Promise<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }> {
+  async devices(): Promise<{
+    inputs: MediaDeviceInfo[];
+    outputs: MediaDeviceInfo[];
+    cameras: MediaDeviceInfo[];
+  }> {
     const all = (await this.platform.enumerateDevices?.()) ?? [];
     return {
       inputs: all.filter((d) => d.kind === 'audioinput'),
       outputs: all.filter((d) => d.kind === 'audiooutput'),
+      cameras: all.filter((d) => d.kind === 'videoinput'),
     };
+  }
+
+  // -------------------------------------------------------------------------
+  // Camera and screen
+  // -------------------------------------------------------------------------
+
+  get canShareScreen() {
+    return !!this.platform.getDisplayMedia;
+  }
+
+  outgoing(): OutgoingVideo {
+    return { camera: this.camera, screen: this.screen };
+  }
+
+  private emitVideo() {
+    this.emit('video', this.outgoing());
+  }
+
+  async startCamera(deviceId?: string) {
+    if (!VoiceEngine.supportsE2EE())
+      throw new Error('This device cannot encrypt video end-to-end, so video is disabled.');
+    let stream: MediaStream;
+    try {
+      stream = await this.platform.getUserMedia({
+        audio: false,
+        video: {
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+          width: { ideal: CAMERA_CONSTRAINTS.width },
+          height: { ideal: CAMERA_CONSTRAINTS.height },
+          frameRate: { ideal: CAMERA_CONSTRAINTS.frameRate },
+        },
+      });
+    } catch (err) {
+      const name = (err as { name?: string }).name;
+      throw new Error(
+        name === 'NotAllowedError'
+          ? 'Camera access was denied. Allow it in your system settings to show your video.'
+          : name === 'NotFoundError'
+            ? 'No camera found.'
+            : name === 'NotReadableError'
+              ? 'The camera is in use by another app.'
+              : `Could not open the camera: ${(err as Error).message}`,
+      );
+    }
+    this.camera?.stop();
+    const track = stream.getVideoTracks()[0] ?? null;
+    if (track) {
+      track.contentHint = 'motion';
+      track.addEventListener('ended', () => {
+        if (this.camera === track) this.stopCamera();
+      });
+    }
+    this.camera = track;
+    this.emitVideo();
+  }
+
+  stopCamera() {
+    if (!this.camera) return;
+    this.camera.stop();
+    this.camera = null;
+    this.emitVideo();
+  }
+
+  async startScreen(request: ScreenRequest) {
+    if (!this.platform.getDisplayMedia) throw new Error('This device cannot share its screen.');
+    if (!VoiceEngine.supportsE2EE())
+      throw new Error('This device cannot encrypt video end-to-end, so video is disabled.');
+    const stream = await this.platform.getDisplayMedia(request);
+    const video = stream.getVideoTracks()[0];
+    if (!video) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw new Error('Nothing to share was chosen.');
+    }
+    const c = SCREEN_CONSTRAINTS[request.quality];
+    video.contentHint = request.quality === 'text' ? 'text' : 'motion';
+    await video
+      .applyConstraints({
+        width: { max: c.width },
+        height: { max: c.height },
+        frameRate: { max: c.frameRate },
+      })
+      .catch(() => {});
+    const audio = request.audio ? (stream.getAudioTracks()[0] ?? null) : null;
+    for (const t of stream.getAudioTracks()) if (t !== audio) t.stop();
+    this.stopScreen(false);
+    this.screen = { video, audio, quality: request.quality };
+    // Stopped from the system's own controls ("Stop sharing").
+    video.addEventListener('ended', () => {
+      if (this.screen?.video === video) this.stopScreen();
+    });
+    this.emitVideo();
+  }
+
+  stopScreen(emit = true) {
+    if (!this.screen) return;
+    this.screen.video.stop();
+    this.screen.audio?.stop();
+    this.screen = null;
+    if (emit) this.emitVideo();
   }
 
   frameCrypto(keyring: GroupKeyring): FrameCryptoHooks {
@@ -265,7 +406,7 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
       post({ type: 'drop', scope });
     });
     const useScript = typeof RTCRtpScriptTransform !== 'undefined';
-    const install = (target: RTCRtpSender | RTCRtpReceiver, role: 'encrypt' | 'decrypt') => {
+    const install = (target: RTCRtpSender | RTCRtpReceiver, role: FrameRole) => {
       if (useScript) {
         (target as unknown as { transform: unknown }).transform = new RTCRtpScriptTransform!(
           worker,
@@ -287,10 +428,18 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
       rtcConfig: useScript ? undefined : { encodedInsertableStreams: true },
       protectSender: (sender) => install(sender, 'encrypt'),
       protectReceiver: (receiver) => install(receiver, 'decrypt'),
+      protectVideoSender: (sender) => install(sender, 'encrypt-video'),
+      protectVideoReceiver: (receiver) => install(receiver, 'decrypt-video'),
     };
   }
 
-  playSlot(sessionId: string, slot: number, track: MediaStreamTrack, owner: () => string | null) {
+  /** Plays a speaker slot (a number) or a shared screen's sound (`screen<n>`). */
+  playSlot(
+    sessionId: string,
+    slot: number | string,
+    track: MediaStreamTrack,
+    owner: () => string | null,
+  ) {
     if (typeof Audio === 'undefined') return;
     const key = `${sessionId}:${slot}`;
     let player = this.players.get(key);
@@ -335,6 +484,8 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
   }
 
   stop() {
+    this.stopCamera();
+    this.stopScreen();
     clearInterval(this.meterTimer);
     void this.ctx?.close().catch(() => {});
     this.ctx = undefined;

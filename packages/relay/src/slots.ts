@@ -90,4 +90,9 @@ export class StreamRewriter {
     }
     return { seq: outSeq, ts: outTs, marker };
   }
+
+  /** The slot stopped carrying anything; whatever comes next starts afresh. */
+  reset() {
+    this.source = null;
+  }
 }

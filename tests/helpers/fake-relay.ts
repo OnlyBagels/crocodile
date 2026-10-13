@@ -1,4 +1,12 @@
-import type { ClientToRelay, PeerState, RelayToClient, SignalData } from '@crocodile/protocol';
+import {
+  SCREEN_AUDIO_SLOTS,
+  VIDEO_SLOTS,
+  streamIds,
+  type ClientToRelay,
+  type PeerState,
+  type RelayToClient,
+  type SignalData,
+} from '@crocodile/protocol';
 import {
   Emitter,
   type FileLink,
@@ -48,8 +56,23 @@ export class FakeRelayNetwork {
         `${opts.sessionId}|${opts.epoch}|${opts.host}`,
         opts.self,
         opts.iceServers.some((s) => [s.urls].flat().some((u) => u.startsWith('turn:'))),
+        opts.slots,
       );
   }
+
+  /** Hosts (users) whose app is too old to carry video. */
+  readonly noVideoHosts = new Set<string>();
+  /** Most streams a host sends one member; the rest are paused. */
+  videoRoom = VIDEO_SLOTS;
+  /** What each device sends now: `<peer>:camera|screen|screenAudio` → track (or null). */
+  readonly outgoing = new Map<string, unknown>();
+  /** How a device's connection travels, if not what its network allows (null: not known yet). */
+  readonly routes = new Map<string, 'lan' | 'relay' | null>();
+  /**
+   * Frames decoded on each of a device's video slots, if held still; by
+   * default every look finds new ones, as with video flowing.
+   */
+  readonly framesDecoded = new Map<string, number>();
 
   /** Users whose network allows no direct connections (only a TURN relay gets through). */
   readonly blocked = new Set<string>();
@@ -164,7 +187,10 @@ export class FakeRelayNetwork {
 }
 
 class FakeRelay {
-  peers = new Map<string, { t: FakeTransport; state: PeerState }>();
+  peers = new Map<
+    string,
+    { t: FakeTransport; state: PeerState; media?: boolean; watching?: string[]; sent?: string }
+  >();
   constructor(
     readonly host: string,
     private readonly members: () => string[],
@@ -175,12 +201,14 @@ class FakeRelay {
     if (!this.members().includes(t.userId)) return false;
     const others = [...this.peers.values()];
     this.peers.set(t.userId, { t, state: { id: t.userId, muted: false, deafened: false } });
+    const video = t.slots > 0 && !this.net.noVideoHosts.has(this.host.split('.')[0]!);
     t.deliver({
       t: 'hello',
       you: t.userId,
       host: this.host,
       peers: others.map((o) => o.state),
-      slots: 0,
+      slots: t.slots,
+      ...(video ? { media: { video: VIDEO_SLOTS, audio: SCREEN_AUDIO_SLOTS } } : {}),
     });
     for (const o of others) o.t.deliver({ t: 'peer_join', peer: this.peers.get(t.userId)!.state });
     return true;
@@ -191,6 +219,40 @@ class FakeRelay {
     if (this.peers.get(userId)?.t !== t) return;
     this.peers.delete(userId);
     for (const o of this.peers.values()) o.t.deliver({ t: 'peer_leave', peer: userId });
+    this.assign();
+  }
+
+  /** Video added to a member's connection. */
+  mediaOn(t: FakeTransport) {
+    const me = this.peers.get(t.userId);
+    if (me?.t === t) me.media = true;
+  }
+
+  /** Like the real relay: each member gets the live streams it asked for, up to its room. */
+  private assign() {
+    const live = (s: string) => {
+      const p = this.peers.get(streamIds.peer(s));
+      return !!p?.media && (streamIds.kind(s) === 'camera' ? !!p.state.camera : !!p.state.screen);
+    };
+    for (const [id, p] of this.peers) {
+      if (!p.media) continue;
+      const asks = (p.watching ?? []).filter((s) => live(s) && streamIds.peer(s) !== id);
+      const video = asks.slice(0, this.net.videoRoom);
+      const audio = video.filter(
+        (s) =>
+          streamIds.kind(s) === 'screen' && this.peers.get(streamIds.peer(s))?.state.screen?.audio,
+      );
+      const msg: RelayToClient = {
+        t: 'media',
+        video: [...video, ...new Array(VIDEO_SLOTS - video.length).fill(null)],
+        audio: [...audio, ...new Array(SCREEN_AUDIO_SLOTS).fill(null)].slice(0, SCREEN_AUDIO_SLOTS),
+        paused: asks.slice(this.net.videoRoom),
+      };
+      const key = JSON.stringify(msg);
+      if (key === p.sent) continue;
+      p.sent = key;
+      p.t.deliver(msg);
+    }
   }
 
   route(sender: FakeTransport, msg: ClientToRelay) {
@@ -200,9 +262,18 @@ class FakeRelay {
     const me = this.peers.get(from);
     if (me?.t !== sender) return;
     if (msg.t === 'state') {
-      const { t: _, ...state } = msg;
-      me.state = { id: from, ...state };
+      const { t: _, camera, screen, ...state } = msg;
+      me.state = {
+        id: from,
+        ...state,
+        ...(camera && me.media ? { camera } : {}),
+        ...(screen && me.media ? { screen } : {}),
+      };
       for (const o of this.peers.values()) o.t.deliver({ t: 'peer_state', peer: me.state });
+      this.assign();
+    } else if (msg.t === 'watch') {
+      me.watching = msg.streams;
+      this.assign();
     } else if (msg.t === 'ping') {
       this.peers.get(from)?.t.deliver({ t: 'pong', ts: msg.ts });
     } else if (msg.t === 'bcast') {
@@ -236,13 +307,37 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     private readonly key: string,
     readonly userId: string,
     private readonly viaTurn = false,
+    readonly slots = 0,
   ) {
     super();
+  }
+
+  async addMedia() {
+    if (!this.isOpen) throw new Error('not connected');
+    this.relay!.mediaOn(this);
+    setTimeout(() => {
+      if (this.closed) return;
+      this.emit('media', undefined);
+      // Like WebRTC: a track per video slot, kept whatever it carries.
+      for (let slot = 0; slot < VIDEO_SLOTS; slot++)
+        this.emit('video', { slot, track: { kind: 'video', id: `slot${slot}` } as never });
+    }, 2);
+  }
+
+  private frames = 0;
+  async videoFrames() {
+    if (!this.isOpen) return null;
+    return this.net.framesDecoded.get(this.userId) ?? ++this.frames;
+  }
+
+  async setOutgoing(kind: string, track: unknown) {
+    this.net.outgoing.set(`${this.userId}:${kind}`, track);
   }
 
   /** Like ICE: a direct path when one exists, even with the server relay on offer. */
   async route() {
     if (!this.isOpen) return null;
+    if (this.net.routes.has(this.userId)) return this.net.routes.get(this.userId)!;
     const direct = !this.net.blocksDirect(this.userId, this.relay!.host);
     return direct ? ('lan' as const) : ('relay' as const);
   }
