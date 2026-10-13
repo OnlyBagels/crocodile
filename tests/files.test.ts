@@ -84,6 +84,9 @@ function source(name: string, data: Uint8Array, type = 'application/octet-stream
   };
 }
 
+/** Whether two byte arrays are equal (toEqual is very slow on megabytes). */
+const same = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
+
 async function readAll(c: CrocodileClient, id: string) {
   const parts: Uint8Array[] = [];
   await c.readFile(id, (p) => void parts.push(p));
@@ -160,7 +163,7 @@ describe('files', () => {
 
     await bob.downloadFile(id);
     await waitFor(() => bob.state.files[id]?.status === 'done', 15000, 'downloaded');
-    expect(await readAll(bob, id)).toEqual(data);
+    expect(same(await readAll(bob, id), data)).toBe(true);
     expect(net.fileLinkLog).toEqual([[bob.userId, alice.userId]]);
   });
 
@@ -173,7 +176,7 @@ describe('files', () => {
       await waitFor(() => bob.state.files[id], 8000, 'known');
       await bob.downloadFile(id);
       await waitFor(() => bob.state.files[id]?.status === 'done', 10000, 'downloaded');
-      expect(await readAll(bob, id)).toEqual(data);
+      expect(same(await readAll(bob, id), data)).toBe(true);
     }
   });
 
@@ -195,7 +198,7 @@ describe('files', () => {
     await waitFor(() => carol.state.files[id], 8000, 'carol knows');
     await carol.downloadFile(id);
     await waitFor(() => carol.state.files[id]?.status === 'done', 20000, 'carol has it');
-    expect(await readAll(carol, id)).toEqual(data);
+    expect(same(await readAll(carol, id), data)).toBe(true);
     expect(net.fileLinkLog.at(-1)).toEqual([carol.userId, bob.userId]);
   });
 
@@ -213,7 +216,7 @@ describe('files', () => {
     // Asking again picks up where it stopped.
     await bob.downloadFile(id);
     await waitFor(() => bob.state.files[id]?.status === 'done', 20000, 'finished');
-    expect(await readAll(bob, id)).toEqual(data);
+    expect(same(await readAll(bob, id), data)).toBe(true);
     // Each block crossed once, give or take the ones in flight at the cut.
     expect(net.fileBytesFrom.get(alice.userId)!).toBeLessThan(data.length + 2.5 * 1024 * 1024);
     expect(net.fileLinkLog.length).toBe(2);
@@ -255,7 +258,7 @@ describe('files', () => {
     const again = makeClient(net, coord, { kv, files: store }).client;
     await again.init();
     await waitFor(() => bob.state.files[id]?.status === 'done', 25000, 'fetched');
-    expect(await readAll(bob, id)).toEqual(data);
+    expect(same(await readAll(bob, id), data)).toBe(true);
   });
 
   it('fetches pictures from friends by itself, not from strangers unless allowed', async () => {
