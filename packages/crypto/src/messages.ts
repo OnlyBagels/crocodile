@@ -1,10 +1,23 @@
-import { SIG_DOMAIN, peerIds, type ChatMessage, type SignalData } from '@crocodile/protocol';
+import {
+  SIG_DOMAIN,
+  peerIds,
+  type ChatMessage,
+  type FileManifest,
+  type SignalData,
+} from '@crocodile/protocol';
 import { verifyPayload } from './primitives';
 import { keyMatchesUserId, sign, timeId, type Identity } from './identity';
 
 export function createChatMessage(
   identity: Identity,
-  fields: { ch: string; body: string; replyTo?: string; edits?: string; deleted?: boolean },
+  fields: {
+    ch: string;
+    body: string;
+    replyTo?: string;
+    edits?: string;
+    deleted?: boolean;
+    file?: FileManifest;
+  },
   now = Date.now(),
 ): ChatMessage {
   const unsigned = {
@@ -17,6 +30,7 @@ export function createChatMessage(
     ...(fields.replyTo ? { replyTo: fields.replyTo } : {}),
     ...(fields.edits ? { edits: fields.edits } : {}),
     ...(fields.deleted ? { deleted: true } : {}),
+    ...(fields.file ? { file: fields.file } : {}),
   };
   return { ...unsigned, sig: sign(identity, SIG_DOMAIN.message, unsigned) };
 }

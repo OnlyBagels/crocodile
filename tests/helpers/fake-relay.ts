@@ -1,6 +1,9 @@
 import type { ClientToRelay, PeerState, RelayToClient, SignalData } from '@crocodile/protocol';
 import {
   Emitter,
+  type FileLink,
+  type FileLinkChannel,
+  type FileLinkFactory,
   type HostRelayAdapter,
   type RelayHandle,
   type RelayLinkEvents,
@@ -55,6 +58,42 @@ export class FakeRelayNetwork {
    * can't reach them, so nobody else can connect to a relay they host.
    */
   readonly unreachable = new Set<string>();
+
+  /**
+   * Direct connections for files, which only ever get STUN: they work unless
+   * one side's network blocks direct connections or both sides are behind
+   * symmetric NATs.
+   */
+  fileLinkFactory(): FileLinkFactory {
+    return (opts) => {
+      if (opts.iceServers.some((s) => [s.urls].flat().some((u) => !u.startsWith('stun'))))
+        throw new Error('file links must not be offered a relay');
+      return new FakeFileLink(this, opts.self, opts.remote);
+    };
+  }
+
+  /** Offers waiting for an answer, by token. */
+  readonly pendingFileLinks = new Map<string, FakeFileLink>();
+  /** Open file links. */
+  readonly fileLinks = new Set<FakeFileLink>();
+  /** Every file link that opened: [downloader user, holder user]. */
+  readonly fileLinkLog: [string, string][] = [];
+  /** Bytes of file blocks carried, by holder user. */
+  readonly fileBytesFrom = new Map<string, number>();
+
+  directPossible(a: string, b: string) {
+    const user = (p: string) => p.split('.')[0]!;
+    const ua = user(a);
+    const ub = user(b);
+    if (this.blocked.has(ua) || this.blocked.has(ub)) return false;
+    return !(this.unreachable.has(ua) && this.unreachable.has(ub));
+  }
+
+  /** Cuts every open file link of a user, as a network drop would. */
+  cutFileLinksOf(userId: string) {
+    for (const l of [...this.fileLinks])
+      if (l.self.startsWith(`${userId}.`) || l.remote.startsWith(`${userId}.`)) l.close();
+  }
 
   /** Whether `member` can't reach `host`'s relay directly. */
   blocksDirect(member: string, host: string) {
@@ -227,5 +266,121 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
     this.closed = true;
     this.relay?.detach(this);
     this.emit('closed', undefined);
+  }
+}
+
+let fileLinkSeq = 0;
+
+class FakeFileLink implements FileLink {
+  readonly ready: Promise<FileLinkChannel>;
+  private resolve!: (c: FileLinkChannel) => void;
+  private reject!: (e: Error) => void;
+  channel?: FakeFileChannel;
+  private closed = false;
+
+  constructor(
+    private readonly net: FakeRelayNetwork,
+    readonly self: string,
+    readonly remote: string,
+  ) {
+    this.ready = new Promise((res, rej) => {
+      this.resolve = res;
+      this.reject = rej;
+    });
+    this.ready.catch(() => {});
+  }
+
+  async createOffer() {
+    const token = `offer-${++fileLinkSeq}`;
+    this.net.pendingFileLinks.set(token, this);
+    return token;
+  }
+
+  async acceptOffer(sdp: string) {
+    const offerer = this.net.pendingFileLinks.get(sdp);
+    if (!offerer) throw new Error('unknown offer');
+    this.net.pendingFileLinks.delete(sdp);
+    setTimeout(() => {
+      if (this.closed || offerer.closed) return;
+      if (!this.net.directPossible(this.self, offerer.self)) {
+        setTimeout(() => {
+          offerer.fail('no direct path');
+          this.fail('no direct path');
+        }, 30);
+        return;
+      }
+      const a = new FakeFileChannel(this.net, offerer.self, this.self);
+      const b = new FakeFileChannel(this.net, this.self, offerer.self);
+      a.peer = b;
+      b.peer = a;
+      offerer.channel = a;
+      this.channel = b;
+      this.net.fileLinks.add(offerer);
+      this.net.fileLinks.add(this);
+      this.net.fileLinkLog.push([offerer.self.split('.')[0]!, this.self.split('.')[0]!]);
+      offerer.resolve(a);
+      this.resolve(b);
+    }, 20);
+    return `answer-${sdp}`;
+  }
+
+  async acceptAnswer(_sdp: string) {}
+
+  private fail(reason: string) {
+    this.reject(new Error(reason));
+    this.close();
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.net.fileLinks.delete(this);
+    this.reject(new Error('closed'));
+    this.channel?.close();
+  }
+}
+
+class FakeFileChannel
+  extends Emitter<{ message: string | Uint8Array; close: void; drained: void }>
+  implements FileLinkChannel
+{
+  peer?: FakeFileChannel;
+  bufferedAmount = 0;
+  private closed = false;
+
+  constructor(
+    private readonly net: FakeRelayNetwork,
+    readonly self: string,
+    readonly remote: string,
+  ) {
+    super();
+  }
+
+  send(data: string | Uint8Array) {
+    if (this.closed || !this.peer) return false;
+    const size = typeof data === 'string' ? data.length : data.length;
+    // Like werift's data channel.
+    if (size > MAX_MESSAGE_SIZE)
+      throw new Error(`max-message-size exceeded: ${size} > ${MAX_MESSAGE_SIZE}`);
+    const copy = typeof data === 'string' ? data : data.slice();
+    if (typeof copy !== 'string' && copy[0] === 2) {
+      const holder = this.self.split('.')[0]!;
+      this.net.fileBytesFrom.set(holder, (this.net.fileBytesFrom.get(holder) ?? 0) + size - 9);
+    }
+    this.bufferedAmount += size;
+    const peer = this.peer;
+    setTimeout(() => {
+      this.bufferedAmount -= size;
+      if (this.bufferedAmount === 0) this.emit('drained', undefined);
+      if (!this.closed && !peer.closed) peer.emit('message', copy);
+    }, 0);
+    return true;
+  }
+
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.emit('close', undefined);
+    this.peer?.close();
   }
 }

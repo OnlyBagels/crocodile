@@ -8,3 +8,4 @@ export * from './senderkey';
 export * from './channel';
 export * from './messages';
 export * from './directory';
+export * from './files';
