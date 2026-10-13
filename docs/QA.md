@@ -83,6 +83,10 @@ issue.
 | 20  | From the previous release: Update appears, downloads, Restart to update opens the new one                        |     |       |       |
 | 21  | Files between machines on different networks: picture, video, a few-GB file; resume after Wi-Fi off and on       |     |       |       |
 | 22  | File passed on: sender quits after one member downloads; a third member still gets it; Open, Save as, delete     |     |       |       |
+| 23  | Video in a DM call and a 3+ person room: camera preview, on and off; each sees the others' cameras               |     |       |       |
+| 24  | Screen share in both qualities: others see Watch; sharp text or smooth motion; full screen, pop-out              |     |       |       |
+| 25  | Screen sound (Windows): a video's sound reaches watchers only, with no echo of the call                          |     |       |       |
+| 26  | Video with a member on the server relay: the app says video is off for them; voice keeps working                 |     |       |       |
 
 Useful network conditions to try: two NATs (home + mobile), a VPN, IPv6-only
 hotspot, a captive/office network that blocks UDP, and packet loss

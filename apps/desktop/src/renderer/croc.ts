@@ -163,7 +163,19 @@ export async function bootClient(): Promise<CrocodileClient> {
       getDisplayMedia: async (request) => {
         if (desktop && request.sourceId)
           await desktop.screen.choose(request.sourceId, request.audio);
-        return navigator.mediaDevices.getDisplayMedia({ video: true, audio: request.audio });
+        return navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          // The computer's sound, without the call's own (which would echo
+          // back to the people in it), and unprocessed: music, not a voice.
+          audio: request.audio
+            ? ({
+                restrictOwnAudio: true,
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              } as MediaTrackConstraints)
+            : false,
+        });
       },
     },
     voiceSettings,

@@ -73,7 +73,7 @@ module.exports = {
   linux: {
     syncDesktopName: true,
     category: 'Network;Chat;InstantMessaging',
-    synopsis: 'Peer-to-peer, end-to-end encrypted voice and text chat',
+    synopsis: 'Peer-to-peer, end-to-end encrypted voice, video and text chat',
     target: [
       { target: 'AppImage', arch: ['x64', 'arm64'] },
       { target: 'deb', arch: ['x64', 'arm64'] },
