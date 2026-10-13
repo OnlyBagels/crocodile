@@ -11,7 +11,7 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
-import { sessionIds } from '@crocodile/protocol';
+import { fileBlockCipherSize, sessionIds } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -436,8 +436,11 @@ describe('files', () => {
     net.resumeFileLinks();
     await new Promise((r) => setTimeout(r, 1500));
     expect(bob.state.files[id]?.status).not.toBe('done');
-    // At most the rest of the block that was on its way.
-    expect(net.fileBytesFrom.get(alice.userId)! - sentAtBan).toBeLessThanOrEqual(1024 * 1024);
+    // At most the rest of the block that was on its way: one encrypted block
+    // (1 MiB and its tag), when it had passed the check just before the ban.
+    expect(net.fileBytesFrom.get(alice.userId)! - sentAtBan).toBeLessThanOrEqual(
+      fileBlockCipherSize(6 * 1024 * 1024, 1),
+    );
   });
 
   it('has written everything once it has shut down, a download in progress included', async () => {
