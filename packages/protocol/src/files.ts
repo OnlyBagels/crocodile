@@ -93,6 +93,8 @@ export const FileLinkRequest = z.discriminatedUnion('t', [
     from: z.number().int().min(0),
     to: z.number().int().min(0),
   }),
+  /** The downloader has every block, checked and stored. */
+  z.object({ t: z.literal('done') }),
 ]);
 export type FileLinkRequest = z.infer<typeof FileLinkRequest>;
 

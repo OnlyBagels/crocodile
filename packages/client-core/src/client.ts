@@ -356,6 +356,8 @@ export type ClientEvents = {
   error: { message: string };
   /** A call we are in: went live, someone joined or left it, or it ended. */
   call: { sessionId: string; event: 'live' | 'joined' | 'left' | 'ended' };
+  /** Someone fetched all of a file from this device. `to` is a user id. */
+  fileServed: { fileId: string; to: string };
 };
 
 const APP_VERSION_FALLBACK = '0.1.0';
@@ -2675,6 +2677,13 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       /** Made by the UI for pictures and videos. */
       preview?: { thumb?: string; w?: number; h?: number; dur?: number };
       onProgress?: (done: number) => void;
+      /**
+       * False: keep no encrypted copy; the platform's block store makes
+       * blocks from the original. `prepared` runs before the message goes
+       * out, so the store can learn where that is.
+       */
+      store?: boolean;
+      prepared?: (file: FileManifest) => void | Promise<void>;
     } = {},
   ) {
     const files = this.files;
@@ -2684,7 +2693,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const caption = opts.caption?.trim() ?? '';
     if (caption.length > LIMITS.messageMaxChars)
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);
-    const { manifest, hashes } = await files.prepare(source, opts.onProgress);
+    const { manifest, hashes } = await files.prepare(source, opts.onProgress, opts.store ?? true);
     const p = opts.preview ?? {};
     const file = FileManifest.parse({
       ...manifest,
@@ -2694,6 +2703,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...(p.w && p.h ? { w: Math.round(p.w), h: Math.round(p.h) } : {}),
       ...(p.dur !== undefined && Number.isFinite(p.dur) ? { dur: p.dur } : {}),
     });
+    await opts.prepared?.(file);
     await this.sendMessage(
       channel,
       caption,
@@ -3046,6 +3056,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           const { [id]: _, ...rest } = st.files;
           return { files: rest };
         }),
+      served: (fileId, to) => this.emit('fileServed', { fileId, to: peerIds.user(to) }),
       log: (m, e) => this.log(m, e),
     });
   }

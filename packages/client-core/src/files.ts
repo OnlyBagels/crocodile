@@ -97,6 +97,8 @@ export interface FilesContext {
   /** Serve files this device downloaded, not only its own. */
   shareDownloads(): boolean;
   changed(fileId: string, view: FileView | null): void;
+  /** Someone fetched the whole file from this device. */
+  served?(fileId: string, to: string): void;
   log(msg: string, extra?: Record<string, unknown>): void;
 }
 
@@ -184,12 +186,19 @@ export class FileTransfers {
   async prepare(
     source: FileSource,
     onProgress?: (done: number) => void,
+    /**
+     * False: don't keep an encrypted copy; the block store makes blocks from
+     * the original when asked (a command line tool sending a big file).
+     */
+    store = true,
   ): Promise<{ manifest: FileManifest; hashes: Uint8Array }> {
     const id = newFileId();
     const key = newFileKey();
     const { hashes, root } = await encryptFile(
       { id, key, size: source.size, read: (o, l) => source.read(o, l) },
-      (i, block) => this.ctx.blocks.write(id, i, block),
+      async (i, block) => {
+        if (store) await this.ctx.blocks.write(id, i, block);
+      },
       onProgress,
     );
     return {
@@ -433,7 +442,7 @@ export class FileTransfers {
         sdp,
       });
       const channel = await link.ready;
-      await this.serve(this.records.get(offer.file)!, channel);
+      await this.serve(this.records.get(offer.file)!, channel, from);
     } catch (err) {
       this.ctx.log('file upload ended', { file: offer.file, to: from, err: String(err) });
     } finally {
@@ -442,7 +451,7 @@ export class FileTransfers {
     }
   }
 
-  private async serve(r: FileRecord, channel: FileLinkChannel) {
+  private async serve(r: FileRecord, channel: FileLinkChannel, to: string) {
     const reader = new FrameReader(channel);
     const { size, id } = r.manifest;
     const hashes = fromB64u(r.hashes!);
@@ -454,6 +463,10 @@ export class FileTransfers {
         const parsed = FileLinkRequest.safeParse(safeJson(msg));
         if (!parsed.success) return;
         const req = parsed.data;
+        if (req.t === 'done') {
+          this.ctx.served?.(id, to);
+          return;
+        }
         if (req.t === 'hashes') {
           await sendFramed(channel, FILE_FRAME.hashes, 0, hashes);
           continue;
@@ -734,6 +747,12 @@ class Download {
       this.r = { ...this.r, have: toB64u(have), complete: true };
       await this.files.save(this.r);
       this.files.setView(m.id, { status: 'done', done: m.size });
+      // Let the holder know (a sender that stays only until then can go),
+      // and give the message time to leave before the link closes.
+      channel.send(JSON.stringify({ t: 'done' } satisfies FileLinkRequest));
+      for (let t = 0; t < 20 && channel.bufferedAmount > 0; t++)
+        await new Promise((r) => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 100));
       return 'done';
     } finally {
       reader.stop();

@@ -167,6 +167,22 @@ describe('files', () => {
     expect(net.fileLinkLog).toEqual([[bob.userId, alice.userId]]);
   });
 
+  it('tells the sender someone has the file only once they have all of it', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const { alice, bob, dm } = await dmPair(net, coord);
+    const id = await alice.sendFile(dm, source('big.bin', content(3 * 1024 * 1024, 2)));
+    const seen: { to: string; bobStatus?: string }[] = [];
+    alice.on('fileServed', (e) => {
+      if (e.fileId === id) seen.push({ to: e.to, bobStatus: bob.state.files[id]?.status });
+    });
+    await waitFor(() => bob.state.files[id], 8000, 'known');
+    await bob.downloadFile(id);
+    await waitFor(() => seen.length > 0, 15000, 'served');
+    // Not when the last block left alice, but once bob had checked and kept it.
+    expect(seen).toEqual([{ to: bob.userId, bobStatus: 'done' }]);
+  });
+
   it('carries an empty file and a one-byte file', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
