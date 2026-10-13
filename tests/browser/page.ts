@@ -6,6 +6,7 @@
  */
 import {
   CrocodileClient,
+  MemoryFileBlockStore,
   MemoryKeyValueStore,
   MemoryMessageStore,
   VoiceEngine,
@@ -109,6 +110,7 @@ window.startClient = async ({ server, name, canHost, nat }) => {
       appVersion: 'browser-test',
       kv: new MemoryKeyValueStore(),
       messages: new MemoryMessageStore(),
+      files: new MemoryFileBlockStore(),
       ...(canHost ? { relay } : {}),
       rtc: {
         RTCPeerConnection: TrackedPC,

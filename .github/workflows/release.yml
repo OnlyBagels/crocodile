@@ -118,6 +118,87 @@ jobs:
           node scripts/build.mjs
           npx electron-builder --config electron-builder.config.cjs --publish always
 
+  # The command line tool as a standalone program per system and processor
+  # (no Node.js needed), attached to the release for scripts/install.sh --cli.
+  cli:
+    name: Command line tool (${{ matrix.os }})
+    needs: prepare
+    permissions:
+      contents: write # upload the programs to the release
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build and upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          export CROC_CLI_VERSION="${TAG#*v}"
+          node apps/cli/scripts/build.mjs
+          node apps/cli/scripts/sea.mjs
+          cd apps/cli/dist
+          exe=$(ls crocodile-cli-*)
+          "./$exe" --version
+          base="${exe%.exe}"
+          if [[ "$exe" == *.exe ]]; then
+            7z a "$base.zip" "$exe" > /dev/null
+            asset="$base.zip"
+          else
+            tar -czf "$base.tar.gz" "$exe"
+            asset="$base.tar.gz"
+          fi
+          gh release upload "$TAG" "$asset" --clobber
+
+  # npm install -g crocodile-cli. Needs an npm access token in the NPM_TOKEN
+  # secret; without one this step is skipped.
+  npm:
+    name: npm package
+    needs: prepare
+    permissions:
+      contents: read
+      id-token: write # npm provenance: the package says which build made it
+    if: needs.prepare.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+      - name: Publish
+        working-directory: apps/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::notice::No NPM_TOKEN secret, so the npm package was not published."
+            exit 0
+          fi
+          version="${TAG#*v}"
+          npm version --no-git-tag-version --allow-same-version "$version"
+          CROC_CLI_VERSION="$version" node scripts/build.mjs
+          cp ../../LICENSE ../../NOTICE .
+          pnpm publish --access public --no-git-checks --provenance
+
   # Make a draft (tag-push) release public once every platform is in; keep
   # whatever title, notes and pre-release choice a UI-published release has.
   publish:

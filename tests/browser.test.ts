@@ -5,6 +5,12 @@ import type { Coordinator } from '@crocodile/coordinator';
 import { attachRelayBridge, launchBrowser, relayFrames, serveHarness } from './browser/harness';
 import { existsSync } from 'node:fs';
 import { startCoordinator, waitFor } from './helpers';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { CrocodileClient } from '@crocodile/client-core';
+import { createCliPlatform } from '../apps/cli/src/platform';
 
 const chromiumPath = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
 const haveChromium = existsSync(chromiumPath);
@@ -174,6 +180,75 @@ async function waitForAudio(page: Page) {
 }
 
 describe.skipIf(!haveChromium)('network check in Chromium', () => {
+  it('files cross between Chromium and the command line tool (werift), both ways', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'croc-cli-browser-'));
+    const ref: { c?: CrocodileClient } = {};
+    const { platform, kv } = createCliPlatform({
+      dir: home,
+      version: 'test',
+      stun: () => ref.c?.stunUrls ?? [],
+    });
+    const cli = new CrocodileClient(platform, { directories: [], preferredServers: [coord.url] });
+    ref.c = cli;
+    try {
+      await cli.init();
+      await cli.createAccount('terminal');
+      const { page, userId: browserUser } = await openClient('Dana', true);
+      await waitFor(() => cli.state.link === 'connected', 10_000, 'cli connected');
+
+      // Command line → browser.
+      const data = randomBytes(1_500_000);
+      const sha = createHash('sha256').update(data).digest('hex');
+      const dm = await cli.openDm(browserUser);
+      const id = await cli.sendFile(dm, {
+        name: 'from-terminal.bin',
+        size: data.length,
+        type: 'application/octet-stream',
+        read: async (o, l) => new Uint8Array(data.subarray(o, o + l)),
+      });
+      await until(page, `!!window.croc.state.files[${JSON.stringify(id)}]`, 20_000);
+      await page.evaluate((fid) => window.croc.downloadFile(fid), id);
+      await until(
+        page,
+        `window.croc.state.files[${JSON.stringify(id)}]?.status === 'done'`,
+        30_000,
+      );
+      const got = await page.evaluate(async (fid) => {
+        const parts: Uint8Array[] = [];
+        await window.croc.readFile(fid, (p) => void parts.push(p));
+        const all = new Uint8Array(await new Blob(parts as BlobPart[]).arrayBuffer());
+        const h = new Uint8Array(await crypto.subtle.digest('SHA-256', all));
+        return Array.from(h, (b) => b.toString(16).padStart(2, '0')).join('');
+      }, id);
+      expect(got).toBe(sha);
+
+      // Browser → command line.
+      const back = await page.evaluate(async (cliUser) => {
+        const bytes = new Uint8Array(800_000).map((_, i) => (i * 13) & 0xff);
+        const ch = await window.croc.openDm(cliUser);
+        return window.croc.sendFile(ch, {
+          name: 'from-browser.bin',
+          size: bytes.length,
+          type: 'application/octet-stream',
+          read: async (o, l) => bytes.slice(o, o + l),
+        });
+      }, cli.userId);
+      await waitFor(() => cli.state.files[back], 20_000, 'cli knows');
+      await cli.downloadFile(back);
+      await waitFor(() => cli.state.files[back]?.status === 'done', 30_000, 'cli has it');
+      const parts: Uint8Array[] = [];
+      await cli.readFile(back, (p) => void parts.push(p));
+      const all = Buffer.concat(parts);
+      expect(all.length).toBe(800_000);
+      expect(all.every((b, i) => b === ((i * 13) & 0xff))).toBe(true);
+    } finally {
+      // As the command closes: write the pending state before it goes.
+      await cli.shutdown();
+      kv.flush();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 120_000);
+
   it("finds nothing wrong with a machine that talks to the server's STUN ports directly", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();

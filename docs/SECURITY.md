@@ -120,6 +120,10 @@ RFC 6464 audio-level header). It holds the same keys as every other member
 - Safety-number verification is manual.
 - The host peer and relay operators see traffic metadata (sizes, timing,
   speaking activity).
+- The command line tool keeps the account's keys in a file only its user can
+  read (mode 600), not in an OS keychain; anyone with that user's access, or
+  root, can use the account. Remove the device in the app if a machine is
+  lost.
 - Files are checked for integrity, not for safety: the app never opens one by
   itself, and warns before opening programs and scripts, but a file a member
   sends can still be harmful.

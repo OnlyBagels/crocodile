@@ -37,6 +37,7 @@ hosts a group. This document explains how the pieces fit and why.
 | `packages/relay`       | The **host relay**: a small SFU the elected host peer runs inside its app (werift).                                                                                                                                            |
 | `packages/client-core` | The platform-neutral client: server selection, sessions, E2E layer, chat, history sync, voice engine.                                                                                                                          |
 | `apps/desktop`         | Electron app (Windows, macOS, Linux) with the React UI.                                                                                                                                                                        |
+| `apps/cli`             | `crocodile`, the command line tool: the same client in Node.js (werift) for sending and receiving files.                                                                                                                       |
 
 ## 2. Design principles → mechanisms
 
@@ -396,6 +397,14 @@ fetches from anyone who has it.
 
 Older apps drop file messages (their signature covers a field they don't
 know), so everyone needs an app that knows files to see them.
+
+**The command line tool** (`apps/cli`, `crocodile send` / `crocodile get`) is
+the same client in Node.js: WebRTC from werift, host relays in its own
+process, keys in a file only the user can read. It sends a file without
+copying it: blocks are encrypted again from the original when someone asks,
+and checked against the hash list before they leave, so a file changed since
+sending is no longer served. It waits for the receiver's `done` before
+exiting.
 
 ## 9. Client structure
 
