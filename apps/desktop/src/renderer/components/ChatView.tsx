@@ -28,12 +28,12 @@ import { InviteCard } from './InviteCard';
 import { encodeMentions, inviteCodes, mentionsIn, typedTrigger } from '../lib/markup';
 import { EMOJI_GROUPS, replaceShortcodes, searchEmoji } from '../lib/emoji';
 import { FileAttachment } from './FileAttachment';
-import { exportFile, formatBytes, previewOf, sourceOf } from '../lib/files';
+import { exportFile, formatBytes, nameOf, previewOf, sourceOf } from '../lib/files';
 
 /** What a message says, in one line: its text, or the file it carries. */
 function summaryOf(m: MessageView) {
   const text = plain(m.body);
-  return text || (m.file ? `📎 ${m.file.name}` : '');
+  return text || (m.file ? `📎 ${nameOf(m.file)}` : '');
 }
 
 export function ChatView({

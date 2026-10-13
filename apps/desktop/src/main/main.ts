@@ -222,7 +222,7 @@ ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 
         cancelId: 0,
         message: `Open ${safeName(path)}?`,
         detail:
-          'This kind of file can run programs on your computer. Only open it if you trust ' +
+          'This kind of file can run code on your computer. Only open it if you trust ' +
           'the person who sent it and expected it.',
       };
       const res = win

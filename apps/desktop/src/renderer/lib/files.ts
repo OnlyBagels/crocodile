@@ -1,7 +1,13 @@
-import type { FileSource } from '@crocodile/client-core';
+import { cleanFileName, type FileSource } from '@crocodile/client-core';
 import { FileThumb, fileMediaKind, type FileManifest } from '@crocodile/protocol';
 import { getClient } from '../croc';
 import { desktop } from '../platform';
+
+/**
+ * A file's name as shown and saved. The sender's app cleans it, but a
+ * modified app might not: no folders, control or direction characters.
+ */
+export const nameOf = (file: FileManifest) => cleanFileName(file.name);
 
 /** Pictures and videos up to this size are shown in the chat itself. */
 export const INLINE_MAX = 300 * 1024 * 1024;
@@ -139,7 +145,8 @@ export function dropObjectUrl(id: string) {
 export async function exportFile(file: FileManifest, how: 'save' | 'open') {
   const api = desktop?.files;
   if (!api) throw new Error('Saving files needs the desktop app');
-  const token = how === 'save' ? await api.saveBegin(file.name) : await api.openBegin(file.name);
+  const name = nameOf(file);
+  const token = how === 'save' ? await api.saveBegin(name) : await api.openBegin(name);
   if (!token) return;
   try {
     await getClient().readFile(file.id, (p) => api.chunk(token, p));

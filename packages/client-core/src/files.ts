@@ -123,7 +123,9 @@ const HIGH_WATER = 1024 * 1024;
 const MAX_UPLOADS = 4;
 const MAX_DOWNLOADS = 3;
 /** How often progress is written to storage while downloading. */
-const SAVE_EVERY_BLOCKS = 16;
+const SAVE_EVERY_MS = 2000;
+/** Uploads to one member at a time. */
+const MAX_UPLOADS_PER_PEER = 2;
 
 export class FileTransfers {
   private records = new Map<string, FileRecord>();
@@ -134,7 +136,8 @@ export class FileTransfers {
   private waiting = new Map<string, string>();
   /** Peers last seen in each session, to notice who joins. */
   private peersSeen = new Map<string, Set<string>>();
-  private uploads = new Set<FileLink>();
+  /** Open uploads, and who each one is to. */
+  private uploads = new Map<FileLink, string>();
   private answers = new Map<string, (p: Extract<SealedPayload, { type: 'file_link' }>) => void>();
   private loaded = false;
 
@@ -408,7 +411,8 @@ export class FileTransfers {
     if (
       !offer.sdp ||
       !this.mayServe(sessionId, from, offer.file) ||
-      this.uploads.size >= MAX_UPLOADS
+      this.uploads.size >= MAX_UPLOADS ||
+      [...this.uploads.values()].filter((p) => p === from).length >= MAX_UPLOADS_PER_PEER
     ) {
       await reject();
       return;
@@ -418,7 +422,7 @@ export class FileTransfers {
       remote: from,
       iceServers: this.ctx.iceServers(),
     });
-    this.uploads.add(link);
+    this.uploads.set(link, from);
     try {
       const sdp = await link.acceptOffer(offer.sdp);
       await session.sendSealedTo(from, {
@@ -554,7 +558,7 @@ export class FileTransfers {
 
   close() {
     for (const d of this.active.values()) d.cancel();
-    for (const l of this.uploads) l.close();
+    for (const l of this.uploads.keys()) l.close();
   }
 }
 
@@ -684,6 +688,16 @@ class Download {
     const reader = new FrameReader(channel);
     const m = this.r.manifest;
     const n = fileBlockCount(m.size);
+    // Progress lives here while blocks arrive and is saved now and then:
+    // re-encoding it for every block would cost too much on huge files.
+    const have = fromB64u(this.r.have);
+    let done = haveBytes(this.r);
+    let savedAt = Date.now();
+    const save = async () => {
+      savedAt = Date.now();
+      this.r = { ...this.r, have: toB64u(have) };
+      await this.files.save(this.r);
+    };
     try {
       let hashes = this.r.hashes ? fromB64u(this.r.hashes) : null;
       if (!hashes) {
@@ -694,10 +708,8 @@ class Download {
         this.r = { ...this.r, hashes: toB64u(list) };
         await this.files.save(this.r);
       }
-      const have = fromB64u(this.r.have);
       const missing: number[] = [];
       for (let i = 0; i < n; i++) if (!bit(have, i)) missing.push(i);
-      let sinceSave = 0;
       for (const [from, to] of ranges(missing, BLOCKS_PER_REQUEST)) {
         channel.send(JSON.stringify({ t: 'get', from, to } satisfies FileLinkRequest));
         for (let i = from; i <= to; i++) {
@@ -714,21 +726,18 @@ class Download {
           }
           await this.ctx.blocks.write(m.id, i, block);
           setBit(have, i);
-          this.r = { ...this.r, have: toB64u(have) };
-          this.files.setView(m.id, { done: haveBytes(this.r) });
-          if (++sinceSave >= SAVE_EVERY_BLOCKS) {
-            sinceSave = 0;
-            await this.files.save(this.r);
-          }
+          done += fileBlockPlainSize(m.size, i);
+          this.files.setView(m.id, { done });
+          if (Date.now() - savedAt > SAVE_EVERY_MS) await save();
         }
       }
-      this.r = { ...this.r, complete: true };
+      this.r = { ...this.r, have: toB64u(have), complete: true };
       await this.files.save(this.r);
       this.files.setView(m.id, { status: 'done', done: m.size });
       return 'done';
     } finally {
       reader.stop();
-      if (!this.r.complete) await this.files.save(this.r);
+      if (!this.r.complete) await save();
     }
   }
 }

@@ -15,7 +15,14 @@ import {
 import type { FileView, MessageView } from '@crocodile/client-core';
 import { fileMediaKind, type FileManifest } from '@crocodile/protocol';
 import { getClient, useCroc } from '../croc';
-import { INLINE_MAX, exportFile, formatBytes, formatDuration, objectUrlOf } from '../lib/files';
+import {
+  INLINE_MAX,
+  exportFile,
+  formatBytes,
+  formatDuration,
+  nameOf,
+  objectUrlOf,
+} from '../lib/files';
 import { cx } from './ui';
 
 /** What a file's state means for the person looking at it. */
@@ -92,7 +99,7 @@ function FileCard({ file, view }: { file: FileManifest; view?: FileView }) {
   return (
     <div
       role="group"
-      aria-label={`File: ${file.name}`}
+      aria-label={`File: ${nameOf(file)}`}
       className="mt-1 flex w-[360px] max-w-full flex-col gap-2 rounded-2xl border border-line bg-island-2 p-3"
     >
       <div className="flex items-center gap-3">
@@ -100,8 +107,8 @@ function FileCard({ file, view }: { file: FileManifest; view?: FileView }) {
           <Icon size={20} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[14px] font-semibold" title={file.name}>
-            {file.name}
+          <div className="truncate text-[14px] font-semibold" title={nameOf(file)}>
+            {nameOf(file)}
           </div>
           <div className="text-xs text-muted">{formatBytes(file.size)}</div>
         </div>
@@ -192,13 +199,13 @@ function MediaTile({
   }, [done, file]);
   const status = fileStatusText(view);
   const box = boxOf(file);
-  const label = kind === 'image' ? `Picture: ${file.name}` : `Video: ${file.name}`;
+  const label = kind === 'image' ? `Picture: ${nameOf(file)}` : `Video: ${nameOf(file)}`;
 
   return (
     <div
       className="mt-1"
       role="group"
-      aria-label={`${kind === 'image' ? 'Picture' : 'Video'} file: ${file.name}`}
+      aria-label={`${kind === 'image' ? 'Picture' : 'Video'} file: ${nameOf(file)}`}
     >
       <div
         className="relative overflow-hidden rounded-2xl border border-line bg-raised"
@@ -206,7 +213,7 @@ function MediaTile({
       >
         {url && kind === 'image' ? (
           <button className="block h-full w-full" onClick={() => setZoom(true)} aria-label={label}>
-            <img src={url} alt={file.name} className="h-full w-full object-cover" />
+            <img src={url} alt={nameOf(file)} className="h-full w-full object-cover" />
           </button>
         ) : url && kind === 'video' ? (
           <video
@@ -239,7 +246,7 @@ function MediaTile({
               ) : (
                 <button
                   onClick={() => download(file.id)}
-                  aria-label={`${view?.status === 'none' || !view ? 'Download' : 'Try again'}: ${file.name}`}
+                  aria-label={`${view?.status === 'none' || !view ? 'Download' : 'Try again'}: ${nameOf(file)}`}
                   className="flex items-center gap-2 rounded-full bg-black/55 px-4 py-2 text-sm font-semibold backdrop-blur hover:bg-black/70"
                 >
                   {kind === 'video' ? <Play size={16} /> : <Download size={16} />}
@@ -293,7 +300,7 @@ function Lightbox({
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={file.name}
+      aria-label={nameOf(file)}
       className="fixed inset-0 z-[60] flex flex-col bg-black/85 backdrop-blur-sm"
       onMouseDown={onClose}
     >
@@ -301,7 +308,7 @@ function Lightbox({
         className="flex items-center gap-3 p-4 text-white"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <span className="truncate font-semibold">{file.name}</span>
+        <span className="truncate font-semibold">{nameOf(file)}</span>
         <span className="text-sm text-white/60">{formatBytes(file.size)}</span>
         <button
           className="ml-auto rounded-full px-3 py-1.5 text-sm hover:bg-white/10"
@@ -316,7 +323,7 @@ function Lightbox({
       <div className="flex min-h-0 flex-1 items-center justify-center p-6">
         <img
           src={url}
-          alt={file.name}
+          alt={nameOf(file)}
           className={cx('max-h-full max-w-full rounded-lg object-contain shadow-2xl')}
           onMouseDown={(e) => e.stopPropagation()}
         />

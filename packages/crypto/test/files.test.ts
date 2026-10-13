@@ -130,6 +130,11 @@ describe('file manifests', () => {
     ])
       expect(FileManifest.safeParse({ ...base, thumb }).success).toBe(false);
   });
+  it('refuses sizes nobody sends, which would only make receivers allocate memory', () => {
+    expect(FileManifest.safeParse({ ...base, size: 2 ** 40 }).success).toBe(true);
+    expect(FileManifest.safeParse({ ...base, size: 2 ** 40 + 1 }).success).toBe(false);
+    expect(FileManifest.safeParse({ ...base, size: Number.MAX_SAFE_INTEGER }).success).toBe(false);
+  });
   it('wants keys and hashes of the right length', () => {
     expect(FileManifest.safeParse({ ...base, key: toB64u(new Uint8Array(16)) }).success).toBe(
       false,

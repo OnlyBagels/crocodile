@@ -19,6 +19,8 @@ export const FILE_TAG_SIZE = 16;
 export const FILE_FRAME_SIZE = 48 * 1024;
 /** Media up to this size is fetched by itself, under the auto-download setting. */
 export const FILE_AUTO_DOWNLOAD_MAX = 10 * 1024 * 1024;
+/** Largest file size a manifest may state (1 TiB, a million blocks). */
+export const FILE_MAX_SIZE = 2 ** 40;
 /** Data channel label for file links. */
 export const FILE_CHANNEL_LABEL = 'croc-file';
 
@@ -40,7 +42,8 @@ export const FileManifest = z.object({
   id: FileId,
   /** Shown to people and offered when saving; never used as a path as is. */
   name: z.string().min(1).max(255),
-  size: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  /** Up to 1 TiB: a size beyond what anyone sends would only waste memory. */
+  size: z.number().int().min(0).max(FILE_MAX_SIZE),
   /** MIME type as the sender's system reported it; only a hint. */
   type: z.string().max(127),
   /** Key the blocks are encrypted with (32 bytes). */

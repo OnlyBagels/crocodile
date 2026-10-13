@@ -89,6 +89,11 @@ export class FakeRelayNetwork {
     return !(this.unreachable.has(ua) && this.unreachable.has(ub));
   }
 
+  /** Cut a holder's file links once this many block bytes have left it (once). */
+  cutFileLinksAfter?: { user: string; bytes: number };
+  /** Block bytes the holder had sent when that cut happened. */
+  bytesAtCut = 0;
+
   /** Cuts every open file link of a user, as a network drop would. */
   cutFileLinksOf(userId: string) {
     for (const l of [...this.fileLinks])
@@ -365,7 +370,14 @@ class FakeFileChannel
     const copy = typeof data === 'string' ? data : data.slice();
     if (typeof copy !== 'string' && copy[0] === 2) {
       const holder = this.self.split('.')[0]!;
-      this.net.fileBytesFrom.set(holder, (this.net.fileBytesFrom.get(holder) ?? 0) + size - 9);
+      const sent = (this.net.fileBytesFrom.get(holder) ?? 0) + size - 9;
+      this.net.fileBytesFrom.set(holder, sent);
+      const cut = this.net.cutFileLinksAfter;
+      if (cut?.user === holder && sent >= cut.bytes) {
+        this.net.cutFileLinksAfter = undefined;
+        this.net.bytesAtCut = sent;
+        setTimeout(() => this.net.cutFileLinksOf(holder), 0);
+      }
     }
     this.bufferedAmount += size;
     const peer = this.peer;

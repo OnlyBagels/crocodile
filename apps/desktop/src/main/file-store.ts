@@ -138,11 +138,11 @@ export class FileExports {
   }
 }
 
-/** Kinds of files that run code when opened: the app asks before opening them. */
+/** Kinds of files that can run code when opened (web pages included): the app asks first. */
 export const RISKY_EXTENSIONS = new Set(
   (
     'exe com scr bat cmd msi msix msp ps1 psm1 vbs vbe js jse wsf wsh hta cpl lnk url reg ' +
     'jar app pkg dmg command sh bash zsh run bin appimage deb rpm py pl rb php scpt ' +
-    'docm xlsm pptm iso img'
+    'docm xlsm pptm iso img html htm xhtml svg'
   ).split(' '),
 );

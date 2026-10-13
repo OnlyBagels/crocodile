@@ -33,6 +33,7 @@ import {
 import {
   DELETED_PROFILE_NAME,
   FILE_AUTO_DOWNLOAD_MAX,
+  FILE_MAX_SIZE,
   FileManifest,
   FileThumb,
   LIMITS,
@@ -2679,6 +2680,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const files = this.files;
     if (!files) throw new Error('This device cannot send files');
     if (!this.sessionOfChannel(channel)) throw new Error('unknown channel');
+    if (source.size > FILE_MAX_SIZE) throw new Error('Files are limited to 1 TB');
     const caption = opts.caption?.trim() ?? '';
     if (caption.length > LIMITS.messageMaxChars)
       throw new Error(`Messages are limited to ${LIMITS.messageMaxChars} characters`);

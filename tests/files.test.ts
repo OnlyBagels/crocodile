@@ -209,16 +209,15 @@ describe('files', () => {
     const data = content(6 * 1024 * 1024, 5);
     const id = await alice.sendFile(dm, source('video.bin', data));
     await waitFor(() => bob.state.files[id], 8000, 'known');
+    // The connection drops once about a third has crossed.
+    net.cutFileLinksAfter = { user: alice.userId, bytes: 3 * 1024 * 1024 };
     await bob.downloadFile(id);
-    await waitFor(() => (bob.state.files[id]?.done ?? 0) >= 2 * 1024 * 1024, 15000, 'partway');
-    net.cutFileLinksOf(alice.userId);
-    await waitFor(() => bob.state.files[id]?.status !== 'downloading', 5000, 'dropped');
-    // Asking again picks up where it stopped.
-    await bob.downloadFile(id);
+    await waitFor(() => net.fileLinkLog.length === 2, 20000, 'reconnected');
     await waitFor(() => bob.state.files[id]?.status === 'done', 20000, 'finished');
     expect(same(await readAll(bob, id), data)).toBe(true);
-    // Each block crossed once, give or take the ones in flight at the cut.
-    expect(net.fileBytesFrom.get(alice.userId)!).toBeLessThan(data.length + 2.5 * 1024 * 1024);
+    // The second connection carried what was missing, not the whole file again.
+    const afterCut = net.fileBytesFrom.get(alice.userId)! - net.bytesAtCut;
+    expect(afterCut).toBeLessThan(data.length - 0.5 * 1024 * 1024);
     expect(net.fileLinkLog.length).toBe(2);
   });
 
