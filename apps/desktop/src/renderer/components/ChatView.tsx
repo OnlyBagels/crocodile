@@ -4,7 +4,9 @@ import {
   Clock,
   Copy,
   MailCheck,
+  FolderDown,
   MessageSquareText,
+  Paperclip,
   Pencil,
   Phone,
   Reply,
@@ -25,6 +27,14 @@ import { DmCallStage } from './DmCallStage';
 import { InviteCard } from './InviteCard';
 import { encodeMentions, inviteCodes, mentionsIn, typedTrigger } from '../lib/markup';
 import { EMOJI_GROUPS, replaceShortcodes, searchEmoji } from '../lib/emoji';
+import { FileAttachment } from './FileAttachment';
+import { exportFile, formatBytes, previewOf, sourceOf } from '../lib/files';
+
+/** What a message says, in one line: its text, or the file it carries. */
+function summaryOf(m: MessageView) {
+  const text = plain(m.body);
+  return text || (m.file ? `📎 ${m.file.name}` : '');
+}
 
 export function ChatView({
   channel,
@@ -49,6 +59,12 @@ export function ChatView({
   const me = useCroc((s) => s.me?.userId);
   const [replyTo, setReplyTo] = useState<MessageView | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<File[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const [preparing, setPreparing] = useState<{ name: string; done: number; size: number } | null>(
+    null,
+  );
+  const canSendFiles = !!getClient().files;
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
   const client = getClient();
@@ -75,7 +91,14 @@ export function ChatView({
     stick.current = true;
     setReplyTo(null);
     setEditing(null);
+    setAttachments([]);
   }, [channel]);
+
+  const attach = (files: FileList | File[]) => {
+    if (!canSendFiles) return;
+    const list = [...files];
+    if (list.length) setAttachments((a) => [...a, ...list].slice(0, 10));
+  };
 
   const typers = Object.entries(typing ?? {})
     .filter(([u, until]) => u !== me && until > Date.now())
@@ -92,7 +115,29 @@ export function ChatView({
           : null;
 
   return (
-    <section className="island flex min-w-0 flex-1 flex-col overflow-hidden">
+    <section
+      className="island relative flex min-w-0 flex-1 flex-col overflow-hidden"
+      onDragOver={(e) => {
+        if (!canSendFiles || !e.dataTransfer.types.includes('Files')) return;
+        e.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(e) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setDragging(false);
+      }}
+      onDrop={(e) => {
+        if (!canSendFiles) return;
+        e.preventDefault();
+        setDragging(false);
+        attach(e.dataTransfer.files);
+      }}
+    >
+      {dragging && (
+        <div className="pointer-events-none absolute inset-3 z-30 flex items-center justify-center rounded-3xl border-2 border-dashed border-accent bg-accent-soft/80 text-lg font-bold text-accent backdrop-blur-sm">
+          Drop files to send them to {title}
+        </div>
+      )}
       <header className="flex h-16 shrink-0 items-center gap-3 border-b border-line px-5">
         {kind === 'dm' && otherUserId ? (
           <button onClick={() => openModal({ kind: 'profile', userId: otherUserId })}>
@@ -215,20 +260,51 @@ export function ChatView({
           <div className="mb-2 flex items-center gap-2 rounded-xl border border-line bg-island-2 px-3 py-2 text-sm text-muted">
             <Reply size={14} />
             Replying to <UserName userId={replyTo.author} className="font-semibold text-text" />
-            <span className="truncate">{plain(replyTo.body)}</span>
+            <span className="truncate">{summaryOf(replyTo)}</span>
             <button onClick={() => setReplyTo(null)} className="ml-auto hover:text-text">
               <X size={14} />
             </button>
+          </div>
+        )}
+        {preparing && (
+          <div className="mb-2 flex items-center gap-3 rounded-xl border border-line bg-island-2 px-3 py-2 text-sm">
+            <Paperclip size={14} className="text-muted" />
+            <span className="truncate">Encrypting {preparing.name}…</span>
+            <span className="ml-auto shrink-0 text-xs text-muted">
+              {preparing.size ? Math.round((preparing.done / preparing.size) * 100) : 100}%
+            </span>
           </div>
         )}
         <Composer
           channel={channel}
           people={people}
           placeholder={kind === 'dm' ? `Message ${title}` : `Message ${title}`}
+          attachments={attachments}
+          onAttach={canSendFiles ? attach : undefined}
+          onRemoveAttachment={(i) => setAttachments((a) => a.filter((_, j) => j !== i))}
           onSend={async (text) => {
-            await client.sendMessage(channel, text, replyTo ? { replyTo: replyTo.id } : {});
+            const files = attachments;
+            const reply = replyTo?.id;
+            setAttachments([]);
             setReplyTo(null);
             stick.current = true;
+            if (files.length === 0) {
+              await client.sendMessage(channel, text, reply ? { replyTo: reply } : {});
+              return;
+            }
+            for (const [i, f] of files.entries()) {
+              setPreparing({ name: f.name, done: 0, size: f.size });
+              try {
+                await client.sendFile(channel, sourceOf(f), {
+                  ...(i === 0 && text ? { caption: text } : {}),
+                  ...(i === 0 && reply ? { replyTo: reply } : {}),
+                  preview: await previewOf(f),
+                  onProgress: (done) => setPreparing({ name: f.name, done, size: f.size }),
+                });
+              } finally {
+                setPreparing(null);
+              }
+            }
           }}
         />
       </div>
@@ -329,11 +405,25 @@ function Message({
       return;
     menu.open(e, [
       { label: 'Reply', icon: <Reply size={15} />, onSelect: () => onReply(m) },
-      {
-        label: 'Copy text',
-        icon: <Copy size={15} />,
-        onSelect: () => void copyText(plain(m.body)),
-      },
+      ...(m.body
+        ? [
+            {
+              label: 'Copy text',
+              icon: <Copy size={15} />,
+              onSelect: () => void copyText(plain(m.body)),
+            },
+          ]
+        : []),
+      ...(m.file && client.state.files[m.file.id]?.status === 'done'
+        ? [
+            {
+              label: 'Save file as…',
+              icon: <FolderDown size={15} />,
+              onSelect: () =>
+                void exportFile(m.file!, 'save').catch((e: Error) => client.reportError(e.message)),
+            },
+          ]
+        : []),
       ...(mine
         ? [
             { label: 'Edit', icon: <Pencil size={15} />, onSelect: startEdit },
@@ -400,6 +490,7 @@ function Message({
     </form>
   ) : (
     <div className="whitespace-pre-wrap break-words text-[14.5px] leading-relaxed">
+      {m.file && <FileAttachment message={m} />}
       {renderMessage(m.body, { me })}
       <span className="ml-2 inline-flex translate-y-0.5 items-center gap-1 align-baseline text-[10.5px] text-faint">
         {m.edited && 'edited · '}
@@ -433,7 +524,7 @@ function Message({
       style={{ borderColor: colorFor(replied.author) }}
     >
       <UserName userId={replied.author} className="font-semibold" /> ·{' '}
-      <span className="line-clamp-1">{plain(replied.body)}</span>
+      <span className="line-clamp-1">{summaryOf(replied)}</span>
     </div>
   );
 
@@ -531,12 +622,20 @@ function Composer({
   placeholder,
   onSend,
   people,
+  attachments,
+  onAttach,
+  onRemoveAttachment,
 }: {
   channel: string;
   placeholder: string;
   onSend: (text: string) => Promise<void>;
   people: Person[];
+  attachments: File[];
+  /** Absent when this device can't send files. */
+  onAttach?: (files: FileList | File[]) => void;
+  onRemoveAttachment: (index: number) => void;
 }) {
+  const filePicker = useRef<HTMLInputElement>(null);
   const [text, setText] = useState('');
   const [cursor, setCursor] = useState(0);
   const [pick, setPick] = useState(0);
@@ -593,7 +692,7 @@ function Composer({
     setPick(0);
   };
   const send = () => {
-    if (!text.trim()) return;
+    if (!text.trim() && attachments.length === 0) return;
     const picked = encodeMentions(replaceShortcodes(text), chosen.current);
     const value = encodeMentions(picked, people);
     chosen.current = [];
@@ -650,7 +749,58 @@ function Composer({
           }}
         />
       )}
-      <div className="flex items-end gap-2 rounded-3xl border border-line bg-field py-1.5 pl-5 pr-1.5 transition focus-within:border-accent focus-within:ring-4 focus-within:ring-accent-soft">
+      {attachments.length > 0 && (
+        <ul aria-label="Files to send" className="mb-2 flex flex-wrap gap-2">
+          {attachments.map((f, i) => (
+            <li
+              key={`${f.name}-${i}`}
+              className="flex max-w-[260px] items-center gap-2 rounded-xl border border-line bg-island-2 py-1.5 pl-3 pr-1.5 text-sm"
+            >
+              <Paperclip size={14} className="shrink-0 text-muted" />
+              <span className="truncate font-medium" title={f.name}>
+                {f.name}
+              </span>
+              <span className="shrink-0 text-xs text-muted">{formatBytes(f.size)}</span>
+              <button
+                aria-label={`Remove ${f.name}`}
+                onClick={() => onRemoveAttachment(i)}
+                className="rounded-full p-1 text-muted hover:bg-hover hover:text-text"
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div
+        className={cx(
+          'flex items-end gap-2 rounded-3xl border border-line bg-field py-1.5 pr-1.5 transition focus-within:border-accent focus-within:ring-4 focus-within:ring-accent-soft',
+          onAttach ? 'pl-1.5' : 'pl-5',
+        )}
+      >
+        {onAttach && (
+          <>
+            <input
+              ref={filePicker}
+              type="file"
+              multiple
+              hidden
+              aria-label="Choose files to send"
+              onChange={(e) => {
+                if (e.target.files) onAttach(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              onClick={() => filePicker.current?.click()}
+              aria-label="Attach files"
+              title="Attach files"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted transition hover:bg-hover hover:text-text"
+            >
+              <Paperclip size={18} />
+            </button>
+          </>
+        )}
         <textarea
           ref={ref}
           rows={1}
@@ -667,6 +817,12 @@ function Composer({
             }
           }}
           onSelect={(e) => track(e.currentTarget)}
+          onPaste={(e) => {
+            if (onAttach && e.clipboardData.files.length > 0) {
+              e.preventDefault();
+              onAttach(e.clipboardData.files);
+            }
+          }}
           onKeyDown={(e) => {
             if (suggestions.length > 0) {
               if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
@@ -706,7 +862,7 @@ function Composer({
         </button>
         <button
           onClick={send}
-          disabled={!text.trim()}
+          disabled={!text.trim() && attachments.length === 0}
           aria-label="Send"
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent text-on-accent transition hover:brightness-110 disabled:bg-raised disabled:text-faint"
         >

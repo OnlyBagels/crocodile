@@ -10,6 +10,7 @@ import {
   Coffee,
   Copy,
   Eye,
+  Files,
   Globe,
   Heart,
   HelpCircle,
@@ -53,6 +54,7 @@ import {
 } from '../croc';
 import { copyText, imageToDataUrl, keyLabel, openLink, stampOf } from '../lib/format';
 import { NETWORK_TEXT } from '../lib/network';
+import { formatBytes } from '../lib/files';
 
 const SOURCE_URL = 'https://github.com/pwalda/crocodile';
 const WEBSITE_URL = 'https://crocodilechat.com';
@@ -74,6 +76,7 @@ const TABS = [
   { id: 'voice', label: 'Voice', icon: Mic },
   { id: 'appearance', label: 'Appearance', icon: Palette },
   { id: 'privacy', label: 'Privacy & alerts', icon: Shield },
+  { id: 'files', label: 'Files', icon: Files },
   { id: 'connection', label: 'Network', icon: Wifi },
   { id: 'host', label: 'Host a server', icon: Server },
   { id: 'about', label: 'About', icon: Info },
@@ -133,6 +136,7 @@ export function SettingsModal({ tab: initial }: { tab?: string }) {
             {tab === 'voice' && <VoiceTab />}
             {tab === 'appearance' && <AppearanceTab />}
             {tab === 'privacy' && <PrivacyTab />}
+            {tab === 'files' && <FilesTab />}
             {tab === 'connection' && <ConnectionTab />}
             {tab === 'host' && <HostTab />}
             {tab === 'about' && <AboutTab />}
@@ -826,6 +830,66 @@ function PrivacyTab() {
           </div>
         ))}
       </Card>
+    </>
+  );
+}
+
+function FilesTab() {
+  const settings = useCroc((s) => s.settings);
+  const files = useCroc((s) => s.files);
+  const client = getClient();
+  const [used, setUsed] = useState<number | null>(null);
+  const refresh = useCallback(() => void client.fileStorageUsed().then(setUsed), [client]);
+  useEffect(refresh, [refresh, files]);
+  const downloaded = Object.values(files).filter((f) => !f.mine && f.status === 'done').length;
+  return (
+    <>
+      <H sub="Files travel straight from one member's device to another's, end-to-end encrypted, and never through a server. Whoever you fetch a file from sees your IP address while they send it.">
+        Files
+      </H>
+      <Row
+        label="Download pictures and videos by themselves"
+        hint="Up to 10 MB each. Anything bigger, and other files, wait for you to click."
+      >
+        <Select
+          value={settings.autoDownload}
+          onChange={(v) =>
+            void client.updateSettings({ autoDownload: v as typeof settings.autoDownload })
+          }
+        >
+          <option value="friends">From friends and in DMs</option>
+          <option value="everyone">From everyone</option>
+          <option value="never">Never</option>
+        </Select>
+      </Row>
+      <Row
+        label="Share files I've downloaded"
+        hint="Members of the same space or DM can fetch them from you while the app is open, even after the sender has gone offline. Files you sent are always shared."
+      >
+        <Toggle
+          checked={settings.shareDownloads}
+          onChange={(v) => void client.updateSettings({ shareDownloads: v })}
+          label="Share files I've downloaded"
+        />
+      </Row>
+      <Row
+        label="Files on this computer"
+        hint={
+          <>
+            {used === null ? 'Counting…' : formatBytes(used)}, stored encrypted. Deleting the ones
+            you downloaded frees the space; you can download them again while someone who has them
+            is online.
+          </>
+        }
+      >
+        <Button
+          variant="secondary"
+          disabled={downloaded === 0}
+          onClick={() => void client.clearDownloadedFiles().then(refresh)}
+        >
+          <Trash2 size={15} /> Delete downloaded files
+        </Button>
+      </Row>
     </>
   );
 }

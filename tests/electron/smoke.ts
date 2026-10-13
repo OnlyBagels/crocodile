@@ -4,7 +4,7 @@
  * screenshots along the way. Run: xvfb-run -a npx tsx tests/electron/smoke.ts <outdir>
  */
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright-core';
-import { mkdtempSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -147,6 +147,42 @@ await b.page.waitForFunction(
   { timeout: 15_000 },
 );
 await shot(a.page, '06-chat');
+
+// Files: a picture and a document, straight from Alice's device to Bob's.
+const picture = readFileSync(join(appDir, 'resources/icon.png'));
+const notes = Buffer.from('Meet at the swamp at 8.\n'.repeat(5000));
+await a.page.getByLabel('Choose files to send').setInputFiles([
+  { name: 'swamp.png', mimeType: 'image/png', buffer: picture },
+  { name: 'notes.txt', mimeType: 'text/plain', buffer: notes },
+]);
+await a.page.getByRole('list', { name: 'Files to send' }).getByText('notes.txt').waitFor();
+await a.page.getByPlaceholder('Message general').fill('the map and the plan');
+await shot(a.page, '06h-attachments');
+await a.page.keyboard.press('Enter');
+// Bob isn't Alice's friend (yet): her picture waits for his click.
+const tile = b.page.getByRole('button', { name: /^Download: swamp\.png/ });
+await tile.waitFor({ timeout: 20_000 });
+await shot(b.page, '06i-file-offered');
+await tile.click();
+await b.page.getByRole('button', { name: 'Picture: swamp.png' }).waitFor({ timeout: 30_000 });
+const notesCard = b.page.getByRole('group', { name: 'File: notes.txt' });
+await notesCard.getByRole('button', { name: 'Download', exact: true }).click();
+await notesCard.getByRole('button', { name: 'Save as…' }).waitFor({ timeout: 30_000 });
+await shot(b.page, '06j-file-received');
+const savedPath = join(mkdtempSync(join(tmpdir(), 'croc-saved-')), 'notes.txt');
+await b.app.evaluate(({ dialog, shell }, path) => {
+  dialog.showSaveDialog = (async () => ({ canceled: false, filePath: path })) as never;
+  shell.showItemInFolder = () => {};
+}, savedPath);
+await notesCard.getByRole('button', { name: 'Save as…' }).click();
+for (let i = 0; i < 50 && !(existsSync(savedPath) && readFileSync(savedPath).equals(notes)); i++)
+  await b.page.waitForTimeout(100);
+if (!readFileSync(savedPath).equals(notes))
+  throw new Error('the saved file differs from the one sent');
+await b.page.getByRole('button', { name: 'Picture: swamp.png' }).click();
+await b.page.getByRole('dialog', { name: 'swamp.png' }).waitFor();
+await shot(b.page, '06k-picture-zoom');
+await b.page.keyboard.press('Escape');
 // Links open in the browser; an invite link becomes a card to join the space.
 await a.page
   .getByPlaceholder('Message general')
@@ -313,6 +349,10 @@ await a.page.getByRole('button', { name: 'Privacy & alerts' }).click();
 await a.page.getByRole('switch', { name: 'Sounds' }).waitFor();
 await a.page.getByLabel('Sound volume').waitFor();
 await shot(a.page, '12b-settings-sounds');
+await a.page.getByRole('button', { name: 'Files', exact: true }).click();
+await a.page.getByRole('switch', { name: "Share files I've downloaded" }).waitFor();
+await a.page.getByText(/Files on this computer/).waitFor();
+await shot(a.page, '12c-settings-files');
 await a.page.getByRole('button', { name: 'Network' }).click();
 // The network check ran on connecting, and can run again.
 const test = a.page.getByRole('region', { name: 'Connection test' });

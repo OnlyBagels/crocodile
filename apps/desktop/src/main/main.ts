@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   Menu,
   nativeImage,
@@ -14,10 +15,11 @@ import {
   type UtilityProcess,
 } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
+import { FileExports, FileStore, RISKY_EXTENSIONS } from './file-store';
 import { SecureStore } from './secure-store';
 import { createUpdateEngine } from './update-engines';
 import { UpdateController } from './updates';
@@ -165,6 +167,72 @@ ipcMain.handle('coordinator:set', (_e, patch: Partial<CoordinatorSettings>) => {
   writeFileSync(coordSettingsPath(), JSON.stringify(next, null, 2));
   applyCoordinator();
   return next;
+});
+
+// ---------------------------------------------------------------------------
+// Files: encrypted blocks, and saving or opening what the UI decrypts.
+// ---------------------------------------------------------------------------
+
+const fileStore = new FileStore(join(userData(), 'files'));
+const exportsInProgress = new FileExports();
+
+ipcMain.handle('files:write', (_e, id: string, index: number, block: Uint8Array) =>
+  fileStore.write(id, index, block),
+);
+ipcMain.handle('files:read', (_e, id: string, index: number, length: number) =>
+  fileStore.read(id, index, length),
+);
+ipcMain.handle('files:delete', (_e, id: string) => fileStore.delete(id));
+ipcMain.handle('files:usage', () => fileStore.usage());
+
+/** A name to offer when saving: the UI's suggestion without folders. */
+function safeName(name: unknown) {
+  const n = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
+  return n.replace(/^[.\s]+/, '').slice(0, 255) || 'file';
+}
+
+ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
+  const options = {
+    defaultPath: join(app.getPath('downloads'), safeName(name)),
+  };
+  const res = win
+    ? await dialog.showSaveDialog(win, options)
+    : await dialog.showSaveDialog(options);
+  if (res.canceled || !res.filePath) return null;
+  return exportsInProgress.begin(res.filePath, false);
+});
+ipcMain.handle('files:open-begin', async (_e, name: unknown) =>
+  exportsInProgress.begin(await exportsInProgress.tempPath(safeName(name)), true),
+);
+ipcMain.handle('files:chunk', (_e, token: string, data: Uint8Array) =>
+  exportsInProgress.chunk(token, data),
+);
+ipcMain.handle('files:abort', (_e, token: string) => exportsInProgress.abort(token));
+/** Finish a save or open: `open` opens it, `reveal` shows it in its folder. */
+ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 'none') => {
+  const path = await exportsInProgress.end(token);
+  if (then === 'reveal') shell.showItemInFolder(path);
+  if (then === 'open') {
+    // Asked here rather than in the UI, so nothing the UI does can skip it.
+    if (RISKY_EXTENSIONS.has(extname(path).slice(1).toLowerCase())) {
+      const options = {
+        type: 'warning' as const,
+        buttons: ['Cancel', 'Open anyway'],
+        defaultId: 0,
+        cancelId: 0,
+        message: `Open ${safeName(path)}?`,
+        detail:
+          'This kind of file can run programs on your computer. Only open it if you trust ' +
+          'the person who sent it and expected it.',
+      };
+      const res = win
+        ? await dialog.showMessageBox(win, options)
+        : await dialog.showMessageBox(options);
+      if (res.response !== 1) return;
+    }
+    const err = await shell.openPath(path);
+    if (err) throw new Error(err);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -381,6 +449,7 @@ app.on('activate', showWindow);
 app.on('before-quit', () => {
   quitting = true;
   stopGlobalPtt();
+  exportsInProgress.cleanup();
   relayProc?.kill();
   coordProc?.postMessage({ type: 'stop' });
   setTimeout(() => coordProc?.kill(), 1500);
