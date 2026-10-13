@@ -44,6 +44,7 @@ declare global {
     audioStats(): Promise<
       { packets: number; energy: number; concealed: number; samples: number }[]
     >;
+    videoStats(): Promise<{ framesDecoded: number; width: number; height: number }[]>;
   }
 }
 
@@ -100,6 +101,25 @@ async function toneMicrophone(): Promise<MediaStream> {
   return dst.stream;
 }
 
+/** Deterministic "screen": a canvas with moving shapes and text. */
+function canvasScreen(): MediaStream {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1280;
+  canvas.height = 720;
+  const g = canvas.getContext('2d')!;
+  let t = 0;
+  setInterval(() => {
+    t += 1;
+    g.fillStyle = '#123';
+    g.fillRect(0, 0, canvas.width, canvas.height);
+    g.fillStyle = '#9f6';
+    g.fillRect((t * 7) % 1200, 300, 80, 80);
+    g.font = '48px sans-serif';
+    g.fillText(`shared screen ${t}`, 40, 100);
+  }, 50);
+  return canvas.captureStream(15);
+}
+
 window.routeFromStats = routeFromStats;
 window.checkNetwork = async (stun) => networkVerdict(await probeNetwork(RTCPeerConnection, stun));
 
@@ -126,7 +146,9 @@ window.startClient = async ({ server, name, canHost, nat }) => {
   );
   client.voiceEngine = new VoiceEngine(
     {
-      getUserMedia: () => toneMicrophone(),
+      // Chromium's fake camera for video; a tone for the microphone.
+      getUserMedia: (c) => (c.video ? navigator.mediaDevices.getUserMedia(c) : toneMicrophone()),
+      getDisplayMedia: async () => canvasScreen(),
       createFrameWorker: () => new Worker('/frame-worker.js'),
     },
     { vadThresholdDb: -100 },
@@ -135,6 +157,23 @@ window.startClient = async ({ server, name, canHost, nat }) => {
   await client.init();
   await client.createAccount(name);
   return client.userId;
+};
+
+window.videoStats = async () => {
+  const out: { framesDecoded: number; width: number; height: number }[] = [];
+  for (const pc of peerConnections) {
+    if (pc.connectionState === 'closed') continue;
+    const stats = await pc.getStats();
+    stats.forEach((s) => {
+      if (s.type === 'inbound-rtp' && s.kind === 'video' && (s.framesDecoded ?? 0) > 0)
+        out.push({
+          framesDecoded: s.framesDecoded ?? 0,
+          width: s.frameWidth ?? 0,
+          height: s.frameHeight ?? 0,
+        });
+    });
+  }
+  return out;
 };
 
 window.audioStats = async () => {

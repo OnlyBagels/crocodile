@@ -94,7 +94,8 @@ export class VideoRewriter {
       const ticks = this.lastAt ? Math.max(3000, Math.round((now - this.lastAt) * 90)) : 0;
       this.seqOffset = (this.lastSeq + 1 - seq) & 0xffff;
       this.tsOffset = (this.lastTs + ticks - ts) >>> 0;
-      if (info?.pictureId) this.picOffset = (this.lastPic + 1 - readPictureId(payload, info.pictureId)) & 0x7fff;
+      if (info?.pictureId)
+        this.picOffset = (this.lastPic + 1 - readPictureId(payload, info.pictureId)) & 0x7fff;
       if (info?.tl0 !== null && info?.tl0 !== undefined)
         this.tl0Offset = (this.lastTl0 + 1 - payload[info.tl0]!) & 0xff;
       this.source = source;

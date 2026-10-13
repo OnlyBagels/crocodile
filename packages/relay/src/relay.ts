@@ -52,8 +52,8 @@ export interface HostRelayOptions {
   log?: RelayLogger;
   /** Observer for each upstream audio payload (metrics and tests). */
   onUpstreamFrame?: (from: string, payload: Uint8Array) => void;
-  /** Observer for each upstream video payload (tests). */
-  onUpstreamVideo?: (stream: string, payload: Uint8Array) => void;
+  /** Observer for each upstream video packet (tests): `last` marks a frame's last packet. */
+  onUpstreamVideo?: (stream: string, payload: Uint8Array, last: boolean) => void;
   /** The host's upload for video at the start, in kbps (it adapts from there). */
   videoKbps?: number;
 }
@@ -427,14 +427,22 @@ export class HostRelay {
     const videoSlots = video.slice(2, 2 + VIDEO_SLOTS);
     for (const t of [screenAudio, camera, screen]) t?.setDirection('recvonly');
     for (const t of [...audioSlots, ...videoSlots]) t.setDirection('sendonly');
-    for (const t of [...audio.slice(2 + this.opts.slots + SCREEN_AUDIO_SLOTS), ...video.slice(2 + VIDEO_SLOTS)])
+    for (const t of [
+      ...audio.slice(2 + this.opts.slots + SCREEN_AUDIO_SLOTS),
+      ...video.slice(2 + VIDEO_SLOTS),
+    ])
       t.setDirection('inactive');
     if (first) {
       if (camera) peer.up.camera = this.upstream(peer, camera, 'camera');
       if (screen) peer.up.screen = this.upstream(peer, screen, 'screen');
       if (screenAudio) peer.up.screenAudio = this.upstream(peer, screenAudio, 'screenAudio');
       peer.videoSlots = videoSlots.map((t) => {
-        const slot: VideoSlot = { t, stream: null, rewriter: new VideoRewriter(), waitingKey: false };
+        const slot: VideoSlot = {
+          t,
+          stream: null,
+          rewriter: new VideoRewriter(),
+          waitingKey: false,
+        };
         // The viewer lost the picture: ask its source for a key frame.
         t.sender.onPictureLossIndication.subscribe(() => {
           if (slot.stream) this.requestKeyframe(slot.stream);
@@ -460,11 +468,7 @@ export class HostRelay {
     this.reassign();
   }
 
-  private upstream(
-    peer: Peer,
-    t: RTCRtpTransceiver,
-    kind: MediaKind | 'screenAudio',
-  ): Upstream {
+  private upstream(peer: Peer, t: RTCRtpTransceiver, kind: MediaKind | 'screenAudio'): Upstream {
     const up: Upstream = { receiver: t.receiver, ssrc: null, meter: new RateMeter(), lastPli: 0 };
     const seen = new Set<unknown>();
     const attach = (track: (typeof t.receiver.tracks)[number]) => {
@@ -485,7 +489,7 @@ export class HostRelay {
   private onVideo(publisher: Peer, kind: MediaKind, rtp: RtpPacket) {
     if (this.peers.get(publisher.id) !== publisher) return;
     const stream = streamIds.make(publisher.id, kind);
-    this.opts.onUpstreamVideo?.(stream, rtp.payload);
+    this.opts.onUpstreamVideo?.(stream, rtp.payload, rtp.header.marker);
     const info = vp8Info(rtp.payload);
     const now = Date.now();
     let raw: Buffer | undefined;

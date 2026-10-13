@@ -442,9 +442,7 @@ describe('HostRelay', () => {
     await Promise.all([a.addVideo(), b.addVideo(), c.addVideo()]);
     for (const p of [a, b])
       p.dc.send(JSON.stringify({ t: 'state', muted: false, deafened: false, camera: true }));
-    await waitFor(
-      () => c.inbox.filter((m) => m.t === 'peer_state' && m.peer.camera).length >= 2,
-    );
+    await waitFor(() => c.inbox.filter((m) => m.t === 'peer_state' && m.peer.camera).length >= 2);
     const first = `${P(b.identity)}:camera`;
     const second = `${P(a.identity)}:camera`;
     c.dc.send(JSON.stringify({ t: 'watch', streams: [first, second] }));

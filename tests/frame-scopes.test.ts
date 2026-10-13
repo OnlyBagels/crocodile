@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FrameScopes, GroupKeyring } from '@crocodile/client-core';
+import { FrameScopes, GroupKeyring, vp8ClearBytes } from '@crocodile/client-core';
 import { AudioReceiver, importChain } from '@crocodile/crypto';
 
 const counterOf = (f: Uint8Array) =>
@@ -47,6 +47,32 @@ describe('voice frame keys in the worker', () => {
     const sent = scopes.get('alice')!.sender!.encrypt(frame);
     const receiver = scopes.get('bob-after-failover')!.receivers.get(alice.kid)!;
     expect(receiver.decrypt(sent)).toEqual(frame);
+    alice.dispose();
+    bob.dispose();
+  });
+
+  it("encrypts video with the sender's key, one counter for camera and screen, readable by members", () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('alice', alice.frameKeys());
+    scopes.update('bob', bob.frameKeys());
+    const frame = Uint8Array.from({ length: 500 }, (_, i) => i & 0xff);
+    const video = scopes.get('alice')!.video!;
+    const cam = video.encrypt(frame, vp8ClearBytes(true));
+    const screen = video.encrypt(frame, vp8ClearBytes(false));
+    const vcounter = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 12, 12).getUint32(6);
+    expect(vcounter(screen)).toBe((vcounter(cam) + 1) >>> 0);
+    // The VP8 header stays as it was: 10 bytes of a key frame, 3 of another.
+    expect(cam.subarray(0, 10)).toEqual(frame.subarray(0, 10));
+    expect(screen.subarray(0, 3)).toEqual(frame.subarray(0, 3));
+    const rx = scopes.get('bob')!.videoReceivers.get(alice.kid)!;
+    expect(rx.decrypt(cam)).toEqual(frame);
+    expect(rx.decrypt(screen)).toEqual(frame);
+    // Audio receivers don't take video frames.
+    expect(scopes.get('bob')!.receivers.get(alice.kid)!.decrypt(cam)).toBeNull();
     alice.dispose();
     bob.dispose();
   });

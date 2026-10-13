@@ -83,11 +83,7 @@ interface MessageKey {
   salt: Uint8Array;
 }
 
-function messageKey(
-  chain: ChainState,
-  kid: number,
-  label: 'text' | 'audio' | 'video',
-): MessageKey {
+function messageKey(chain: ChainState, kid: number, label: 'text' | 'audio' | 'video'): MessageKey {
   const okm = hkdfSha256(chain.key, kidBytes(kid), `croc/v2/${label}-message`, 44);
   return { key: okm.slice(0, 32), salt: okm.slice(32, 44) };
 }
@@ -350,7 +346,12 @@ export class VideoSender {
     const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
     aad.set(head, 0);
     aad.set(trailer, n);
-    const ct = aesGcmEncrypt(this.mk.key, frameNonce(this.mk.salt, counter), frame.subarray(n), aad);
+    const ct = aesGcmEncrypt(
+      this.mk.key,
+      frameNonce(this.mk.salt, counter),
+      frame.subarray(n),
+      aad,
+    );
     const out = new Uint8Array(n + ct.length + VIDEO_FRAME_TRAILER_BYTES);
     out.set(head, 0);
     out.set(ct, n);

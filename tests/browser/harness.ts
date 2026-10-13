@@ -7,7 +7,7 @@ import { build } from 'esbuild';
 import { chromium, type Browser, type Page } from 'playwright-core';
 import { HostRelay } from '@crocodile/relay';
 import { fromB64u, type SignalData } from '@crocodile/protocol';
-import { FRAME_MAGIC, identityFromSeed, randomId } from '@crocodile/crypto';
+import { FRAME_MAGIC, VIDEO_FRAME_MAGIC, identityFromSeed, randomId } from '@crocodile/crypto';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CHROMIUM = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
@@ -59,6 +59,8 @@ export async function launchBrowser(): Promise<Browser> {
 
 /** Wires the page's relay adapter to a real HostRelay running in this Node process. */
 export const relayFrames = { total: 0, encrypted: 0 };
+/** Video frames the relay forwarded (their last packets), and how many ended in the E2EE trailer. */
+export const relayVideo = { frames: 0, encrypted: 0, streams: new Set<string>() };
 
 export async function attachRelayBridge(
   page: Page,
@@ -87,6 +89,12 @@ export async function attachRelayBridge(
         iceServers: stunUrls(),
         includeLoopback: true,
         admit: (u) => entry.members.has(u),
+        onUpstreamVideo: (stream, payload, last) => {
+          relayVideo.streams.add(stream);
+          if (!last) return;
+          relayVideo.frames += 1;
+          if (payload[payload.length - 1] === VIDEO_FRAME_MAGIC) relayVideo.encrypted += 1;
+        },
         onUpstreamFrame: (_from, payload) => {
           relayFrames.total += 1;
           // Every E2EE frame ends with the sender-key trailer magic byte.

@@ -21,10 +21,7 @@ function vp8(opts: {
   const b: number[] = [];
   const x = !!(opts.pic || opts.tl0 !== undefined || opts.tk);
   b.push((x ? 0x80 : 0) | (opts.start === false ? 0 : 0x10) | (opts.pid ?? 0));
-  if (x)
-    b.push(
-      (opts.pic ? 0x80 : 0) | (opts.tl0 !== undefined ? 0x40 : 0) | (opts.tk ? 0x20 : 0),
-    );
+  if (x) b.push((opts.pic ? 0x80 : 0) | (opts.tl0 !== undefined ? 0x40 : 0) | (opts.tk ? 0x20 : 0));
   if (opts.pic?.bits === 15) b.push(0x80 | (opts.pic.v >> 8), opts.pic.v & 0xff);
   else if (opts.pic) b.push(opts.pic.v & 0x7f);
   if (opts.tl0 !== undefined) b.push(opts.tl0);
@@ -65,7 +62,14 @@ describe('VideoRewriter', () => {
   it('keeps one stream continuous when its source changes', () => {
     const r = new VideoRewriter();
     const outs: { seq: number; ts: number; pic: number; tl0: number }[] = [];
-    const send = (source: string, seq: number, ts: number, picture: number, tl0: number, at: number) => {
+    const send = (
+      source: string,
+      seq: number,
+      ts: number,
+      picture: number,
+      tl0: number,
+      at: number,
+    ) => {
       const p = vp8({ key: true, pic: { v: picture, bits: 15 }, tl0 });
       const { seq: s, ts: t } = r.rewrite(source, seq, ts, p, at);
       outs.push({ seq: s, ts: t, pic: pic(p), tl0: p[4]! });
@@ -149,20 +153,42 @@ describe('sharing the host upload', () => {
 });
 
 describe('VideoLimits', () => {
-  it("backs the host off when most watchers lose packets, and grows back slowly", () => {
+  it('backs the host off when most watchers lose packets, and grows back slowly', () => {
     const l = new VideoLimits(8000);
     l.report('v1', 0.3);
     l.report('v2', 0.2);
-    expect(l.tick(new Map([['v1', 3000], ['v2', 3000]]), 1000)).toBe(true);
+    expect(
+      l.tick(
+        new Map([
+          ['v1', 3000],
+          ['v2', 3000],
+        ]),
+        1000,
+      ),
+    ).toBe(true);
     expect(l.host).toBe(Math.floor(6000 * 0.85));
     // Calm for a while: it rises again.
     const low = l.host;
-    expect(l.tick(new Map([['v1', 2000], ['v2', 2000]]), 5000)).toBe(false);
-    l.tick(new Map([['v1', 2000], ['v2', 2000]]), 10_000);
+    expect(
+      l.tick(
+        new Map([
+          ['v1', 2000],
+          ['v2', 2000],
+        ]),
+        5000,
+      ),
+    ).toBe(false);
+    l.tick(
+      new Map([
+        ['v1', 2000],
+        ['v2', 2000],
+      ]),
+      10_000,
+    );
     expect(l.host).toBeGreaterThan(low);
   });
 
-  it("limits only the one watcher whose own connection is lossy", () => {
+  it('limits only the one watcher whose own connection is lossy', () => {
     const l = new VideoLimits();
     l.report('slow', 0.4);
     l.tick(

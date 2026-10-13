@@ -4,6 +4,7 @@ import {
   GroupPayload,
   SealedPayload,
   peerIds,
+  streamIds,
   utf8,
   type ChatMessage,
   type HostCaps,
@@ -20,14 +21,17 @@ import { GroupKeyring } from './keyring';
 import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
 import {
   RelayLink,
+  VIDEO_BITRATE,
   type ConnectStep,
   type ConnectionRoute,
   type FailStage,
   type FrameCryptoHooks,
   type LinkStats,
+  type OutgoingMedia,
   type RelayLinkEvents,
   type RelayLinkOptions,
 } from './relay-link';
+import type { OutgoingVideo } from './voice';
 
 /** What a GroupSession needs from the client around it. */
 export interface SessionContext {
@@ -75,7 +79,16 @@ export interface SessionContext {
 export interface VoiceHooks {
   micTrack(): MediaStreamTrack | null;
   frameCrypto(keyring: GroupKeyring): FrameCryptoHooks | undefined;
+  /** The camera and shared screen to send (none on devices without video). */
+  outgoing?(): OutgoingVideo;
 }
+
+/** Why video can't be used in a call right now. */
+export type VideoBlock =
+  /** Our connection goes through a coordination server's relay: voice only. */
+  | 'relayed'
+  /** The host's app is too old to carry video. */
+  | 'old-host';
 
 /** Transport to the host relay; RelayLink in real clients, fakes in tests. */
 export interface RelayTransport extends Emitter<RelayLinkEvents> {
@@ -85,6 +98,14 @@ export interface RelayTransport extends Emitter<RelayLinkEvents> {
   close(): void;
   readonly isOpen: boolean;
   setMicTrack?(track: MediaStreamTrack | null): Promise<void>;
+  /** Add video to the connection (the host said it carries it). */
+  addMedia?(slots: { video: number; audio: number }): Promise<void>;
+  /** Send a camera, screen or screen's sound (null stops it). */
+  setOutgoing?(
+    kind: OutgoingMedia,
+    track: MediaStreamTrack | null,
+    opts?: { bitrate?: number; hint?: 'text' | 'motion' },
+  ): Promise<void>;
   /** How the connection travels once it is up. */
   route?(): Promise<ConnectionRoute | null>;
   /** Live WebRTC numbers (debug panel). */
@@ -125,6 +146,8 @@ export type RelayStatus =
 export type GroupSessionEvents = {
   update: void;
   track: { slot: number; track: MediaStreamTrack; receiver: RTCRtpReceiver };
+  /** A screen-sound slot's track: whoever's screen it carries is in `screenAudioSlots`. */
+  screenAudio: { slot: number; track: MediaStreamTrack };
   typing: { userId: string; ch: string };
   call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end' };
   error: { message: string };
@@ -171,6 +194,22 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   isVoice = false;
   /** Active server-relay grant, if we fell back to one. */
   relayGrant: RelayGrant | null = null;
+
+  /** The host can carry video, with this many slots (from its hello); null if not, or unknown yet. */
+  hostMedia: { video: number; audio: number } | null = null;
+  /** Video was added to the current connection. */
+  mediaReady = false;
+  /** The camera or screen each of our video slots carries now (stream ids). */
+  videoSlots: (string | null)[] = [];
+  /** The screen whose sound each of our screen-sound slots carries. */
+  screenAudioSlots: (string | null)[] = [];
+  /** Streams we asked for that the host can't send at the moment. */
+  pausedStreams: string[] = [];
+  /** Screens this member chose to watch, first chosen first. */
+  watchedScreens: string[] = [];
+  private videoTracks: (MediaStreamTrack | undefined)[] = [];
+  private videoStreams = new Map<number, MediaStream>();
+  private sentWatch: string | null = null;
 
   private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
   private transport?: { epoch: number; host: string; t: RelayTransport; attempt?: ConnectAttempt };
@@ -437,6 +476,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.welcomed = false;
     this.slots = [];
     this.speaking = [];
+    this.hostMedia = null;
+    this.mediaReady = false;
+    this.videoSlots = [];
+    this.screenAudioSlots = [];
+    this.pausedStreams = [];
+    this.videoTracks = [];
+    this.videoStreams.clear();
+    this.sentWatch = null;
     this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
 
     this.route = null;
@@ -457,6 +504,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
           .then((route) => {
             if (this.transport !== entry || !route || route === this.route) return;
             this.route = route;
+            // Through the server relay: no video (and back again if ICE moves).
+            this.refreshVideo();
             this.emit('update', undefined);
           })
           .catch(() => {});
@@ -469,6 +518,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       if (this.transport === entry) this.onRelayMessage(msg);
     });
     t.on('track', (ev) => this.emit('track', ev));
+    t.on('video', ({ slot, track }) => {
+      if (this.transport !== entry) return;
+      this.videoTracks[slot] = track;
+      this.videoStreams.delete(slot);
+      this.emit('update', undefined);
+    });
+    t.on('screenAudio', (ev) => {
+      if (this.transport === entry) this.emit('screenAudio', ev);
+    });
+    t.on('media', () => {
+      if (this.transport !== entry) return;
+      this.mediaReady = true;
+      this.refreshVideo();
+      this.emit('update', undefined);
+    });
     t.on('failed', ({ reason, stage }) => {
       if (this.transport !== entry) return;
       this.transport = undefined;
@@ -678,12 +742,95 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   /** Tell the relay (and through it, everyone) our mute state, call presence and latency. */
   private sendState() {
     this.sentRtt = this.rttMs;
+    const out = this.sending();
     this.transport?.t.send({
       t: 'state',
       ...this.voiceState,
       voice: this.isVoice,
       ...(this.rttMs !== null ? { rtt: this.rttMs } : {}),
+      ...(out.camera ? { camera: true } : {}),
+      ...(out.screen ? { screen: { audio: !!out.screen.audio } } : {}),
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // Video
+  // -------------------------------------------------------------------------
+
+  /** Why video can't be used on this connection, if it can't. */
+  get videoBlocked(): VideoBlock | null {
+    if (this.route === 'relay') return 'relayed';
+    if (this.welcomed && !this.hostMedia) return 'old-host';
+    return null;
+  }
+
+  /** What we send now: nothing until video is on the connection, or when it can't be used. */
+  private sending(): OutgoingVideo {
+    if (!this.mediaReady || this.videoBlocked || !this.voice?.outgoing)
+      return { camera: null, screen: null };
+    return this.voice.outgoing();
+  }
+
+  /** The camera or screen changed, or whether video can be used: send and ask accordingly. */
+  refreshVideo() {
+    const t = this.transport?.t;
+    if (t?.setOutgoing && this.mediaReady) {
+      const out = this.sending();
+      const screen = out.screen;
+      void t.setOutgoing('camera', out.camera, { bitrate: VIDEO_BITRATE.camera }).catch(() => {});
+      void t
+        .setOutgoing('screen', screen?.video ?? null, {
+          bitrate: VIDEO_BITRATE[screen?.quality ?? 'text'],
+          hint: screen?.quality ?? 'text',
+        })
+        .catch(() => {});
+      void t.setOutgoing('screenAudio', screen?.audio ?? null).catch(() => {});
+    }
+    this.sendState();
+    this.updateWatch();
+  }
+
+  /**
+   * Ask the host for what we want to see: the screens we chose, then
+   * everyone's camera. It sends what fits and says what it held back.
+   */
+  private updateWatch() {
+    if (!this.mediaReady) return;
+    const live = (stream: string) => {
+      const p = this.peers.get(streamIds.peer(stream));
+      return streamIds.kind(stream) === 'camera' ? !!p?.camera : !!p?.screen;
+    };
+    const cameras = [...this.peers.values()]
+      .filter((p) => p.camera && p.id !== this.me)
+      .map((p) => streamIds.make(p.id, 'camera'));
+    const streams = this.videoBlocked
+      ? []
+      : [...new Set([...this.watchedScreens.filter(live), ...cameras])].slice(0, 32);
+    const key = streams.join();
+    if (key === this.sentWatch) return;
+    if (this.transport?.t.send({ t: 'watch', streams })) this.sentWatch = key;
+  }
+
+  /** Start or stop watching a member's shared screen. */
+  watchScreen(stream: string, on: boolean) {
+    this.watchedScreens = on
+      ? [...this.watchedScreens.filter((s) => s !== stream), stream]
+      : this.watchedScreens.filter((s) => s !== stream);
+    this.updateWatch();
+    this.emit('update', undefined);
+  }
+
+  /** The picture of a camera or screen the host sends us, while it does. */
+  videoStream(stream: string): MediaStream | null {
+    const slot = this.videoSlots.indexOf(stream);
+    const track = slot >= 0 ? this.videoTracks[slot] : undefined;
+    if (!track || typeof MediaStream === 'undefined') return null;
+    let out = this.videoStreams.get(slot);
+    if (!out) {
+      out = new MediaStream([track]);
+      this.videoStreams.set(slot, out);
+    }
+    return out;
   }
 
   /** In calls, measure the round trip to the host every few seconds. */
@@ -719,18 +866,27 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
 
   private onRelayMessage(msg: RelayToClient) {
     switch (msg.t) {
-      case 'hello':
+      case 'hello': {
         this.welcomed = true;
         this.peers = new Map(msg.peers.map((p) => [p.id, p]));
         this.slots = new Array(msg.slots).fill(null);
+        this.hostMedia = msg.media ?? null;
+        // In a call, with a host that carries video: add it to the connection.
+        const t = this.transport?.t;
+        if (msg.media && msg.slots > 0 && this.isVoice && this.voice?.outgoing && t?.addMedia)
+          t.addMedia(msg.media).catch((err: unknown) =>
+            this.ctx.log('could not add video to the call', { err: String(err) }),
+          );
         this.historyAsked.clear();
         this.outboxOffered.clear();
         for (const p of msg.peers) this.onPeerPresent(p.id);
         this.requestHistory([...this.peers.keys()]);
         break;
+      }
       case 'peer_join':
         this.peers.set(msg.peer.id, msg.peer);
         this.onPeerPresent(msg.peer.id);
+        this.updateWatch();
         // DMs and our own other devices sync history from each newcomer.
         if (this.isDm || peerIds.user(msg.peer.id) === peerIds.user(this.me))
           this.requestHistory([msg.peer.id]);
@@ -738,11 +894,18 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       case 'peer_leave':
         this.peers.delete(msg.peer);
         this.outboxOffered.delete(msg.peer);
+        this.updateWatch();
         this.keyring.peerLeft(msg.peer);
         this.keyring.rotate();
         break;
       case 'peer_state':
         if (this.peers.has(msg.peer.id)) this.peers.set(msg.peer.id, msg.peer);
+        this.updateWatch();
+        break;
+      case 'media':
+        this.videoSlots = msg.video;
+        this.screenAudioSlots = msg.audio;
+        this.pausedStreams = msg.paused;
         break;
       case 'slots':
         this.slots = msg.map;

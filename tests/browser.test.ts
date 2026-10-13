@@ -2,7 +2,13 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Browser, Page } from 'playwright-core';
 import type { Server } from 'node:http';
 import type { Coordinator } from '@crocodile/coordinator';
-import { attachRelayBridge, launchBrowser, relayFrames, serveHarness } from './browser/harness';
+import {
+  attachRelayBridge,
+  launchBrowser,
+  relayFrames,
+  relayVideo,
+  serveHarness,
+} from './browser/harness';
 import { existsSync } from 'node:fs';
 import { startCoordinator, waitFor } from './helpers';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -75,6 +81,74 @@ async function until(page: Page, fn: string, timeoutMs = 15_000) {
 }
 
 describe.skipIf(!haveChromium)('browser end-to-end', () => {
+  it('cameras and screens reach those who watch, end-to-end encrypted through the host', async () => {
+    const alice = await openClient('vid-alice', true, 'open');
+    const bob = await openClient('vid-bob', false);
+    const carol = await openClient('vid-carol', false);
+    const spaceId = await alice.page.evaluate(() => window.croc.createSpace('Video Swamp'));
+    const code = await alice.page.evaluate((s) => window.croc.createInvite(s), spaceId);
+    await bob.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+    await carol.page.evaluate((c) => window.croc.joinWithInvite(c), code);
+    const channel = await alice.page.evaluate(
+      (s) => window.croc.state.spaces[s]!.channels.find((c) => c.kind === 'voice')!.id,
+      spaceId,
+    );
+    const sid = `voice:${spaceId}:${channel}`;
+    for (const c of [alice, bob, carol])
+      await c.page.evaluate(([s, ch]) => window.croc.joinVoice(s as string, ch as string), [
+        spaceId,
+        channel,
+      ] as const);
+    // Each connection gets video added once the host says it carries it.
+    for (const c of [alice, bob, carol])
+      await until(
+        c.page,
+        `window.croc.state.sessions['${sid}']?.video.ready && window.croc.state.sessions['${sid}'].peers.length === 2`,
+        30_000,
+      );
+    const before = { ...relayVideo };
+
+    // Bob's camera (Chromium's fake one): Alice and Carol decode it.
+    await bob.page.evaluate(() => window.croc.setCamera(true));
+    // Pictures decoded from what the relay forwarded (so decrypted, too).
+    const decoding = async (page: Page, streams: number) => {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        const v = await page.evaluate(() => window.videoStats());
+        if (v.filter((s) => s.framesDecoded > 10 && s.width > 0).length >= streams) return v;
+        if (Date.now() > deadline) throw new Error(`no video decoded: ${JSON.stringify(v)}`);
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    };
+    await decoding(carol.page, 1);
+    await decoding(alice.page, 1);
+    await until(
+      carol.page,
+      `window.croc.state.sessions['${sid}'].video.streams.some(s => s.kind === 'camera' && s.state === 'live')`,
+    );
+
+    // Alice shares a screen. Only Carol chooses to watch it.
+    await alice.page.evaluate(() => window.croc.shareScreen({ quality: 'motion', audio: false }));
+    const screen = await alice.page.evaluate(() => `${window.croc.peer}:screen`);
+    await until(
+      carol.page,
+      `window.croc.state.sessions['${sid}'].video.streams.some(s => s.id === '${screen}' && s.state === 'off')`,
+    );
+    await carol.page.evaluate(
+      ([s, id]) => window.croc.watchScreen(s as string, id as string, true),
+      [sid, screen] as const,
+    );
+    await decoding(carol.page, 2);
+    // Bob didn't ask for it: he gets Alice's nothing (she has no camera on).
+    expect(await bob.page.evaluate(() => window.videoStats().then((v) => v.length))).toBe(0);
+
+    // Everything the relay forwarded was encrypted end to end.
+    const frames = relayVideo.frames - before.frames;
+    expect(frames).toBeGreaterThan(30);
+    expect(relayVideo.encrypted - before.encrypted).toBe(frames);
+    for (const c of [alice, bob, carol]) await c.page.evaluate(() => window.croc.shutdown());
+  }, 150_000);
+
   it('voice and text flow through the elected host relay, end-to-end encrypted', async () => {
     const alice = await openClient('alice', true, 'open');
     const bob = await openClient('bob', true, 'cone');
