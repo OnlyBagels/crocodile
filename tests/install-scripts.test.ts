@@ -156,5 +156,20 @@ describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
     expect(() => installUnix(['--cli'], { os: 'Darwin', arch: 'x86_64' }, CLI_ASSETS)).toThrow(
       /npm install -g crocodile-cli/,
     );
+    // Never taken for ARM: a program that can't run there.
+    for (const arch of ['i686', 'riscv64', 'armv7l'])
+      expect(() => installUnix(['--cli'], { os: 'Linux', arch }, CLI_ASSETS)).toThrow(
+        /unsupported CPU architecture/,
+      );
+  });
+});
+
+describe('release workflow', () => {
+  it('publishes a release only once every program the installers fetch is in it', () => {
+    const yml = readFileSync(resolve(__dirname, '../.github/workflows/release.yml'), 'utf8');
+    const needs = /\n {2}publish:\n(?: {4}.*\n)*? {4}needs: \[([^\]]*)\]/.exec(yml)?.[1];
+    expect(needs?.split(',').map((s) => s.trim())).toEqual(
+      expect.arrayContaining(['installers', 'cli']),
+    );
   });
 });

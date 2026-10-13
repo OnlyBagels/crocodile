@@ -114,6 +114,16 @@ class SlowBlocks extends MemoryFileBlockStore {
 
 type Stores = { files?: MemoryFileBlockStore; kv?: MemoryKeyValueStore };
 
+/** Notes writes made after the app said it had closed. */
+class WatchedKv extends MemoryKeyValueStore {
+  closed = false;
+  late: string[] = [];
+  override async set<T>(key: string, value: T) {
+    if (this.closed) this.late.push(key);
+    await super.set(key, value);
+  }
+}
+
 async function dmPair(
   net: FakeRelayNetwork,
   coord: Coordinator,
@@ -430,6 +440,51 @@ describe('files', () => {
     expect(net.fileBytesFrom.get(alice.userId)! - sentAtBan).toBeLessThanOrEqual(1024 * 1024);
   });
 
+  it('has written everything once it has shut down, a download in progress included', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bobKv = new WatchedKv();
+    const { alice, bob, dm } = await dmPair(net, coord, { bob: { kv: bobKv } });
+    const id = await alice.sendFile(dm, source('half.bin', content(6 * 1024 * 1024, 11)));
+    await waitFor(() => bob.state.files[id], 8000, 'known');
+    net.pauseFileLinksAfter = { user: alice.userId, bytes: 2 * 1024 * 1024 };
+    await bob.downloadFile(id);
+    await waitFor(() => net.fileLinksPaused, 15000, 'under way');
+    await waitFor(() => (bob.state.files[id]?.done ?? 0) > 0, 5000, 'some in');
+
+    await bob.shutdown();
+    bobKv.closed = true;
+    // Saves on timers (the record cache's, the download's progress) came before.
+    await new Promise((r) => setTimeout(r, 1500));
+    net.resumeFileLinks();
+    expect(bobKv.late).toEqual([]);
+    const saved = await bobKv.get<{ have: string }>(`file:${id}`);
+    expect(saved?.have).not.toMatch(/^A+$/);
+  });
+
+  it("gets going when someone's first key to the other side is lost", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const kv = new MemoryKeyValueStore();
+    const files = new MemoryFileBlockStore();
+    const { alice, bob, dm } = await dmPair(net, coord, { bob: { kv, files } });
+    const id = await alice.sendFile(dm, source('k.bin', content(100_000, 12)));
+    await waitFor(() => bob.state.files[id], 8000, 'known');
+
+    // Bob's app starts again; the key it sends first goes missing on the way
+    // (sent while its side was still connecting, say).
+    await bob.shutdown();
+    net.dropDirectFrom = { user: bob.userId, count: 1 };
+    const again = makeClient(net, coord, { kv, files }).client;
+    await again.init();
+    await again.openDm(alice.userId);
+    await again.openChannel(dm);
+    await waitFor(() => net.dropDirectFrom!.count === 0, 8000, 'key lost');
+    // Asking for the file is encrypted with that key.
+    await again.downloadFile(id);
+    await waitFor(() => again.state.files[id]?.status === 'done', 15000, 'downloaded');
+  });
+
   it('deleting the message deletes the file and nobody can fetch it any more', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -573,7 +628,7 @@ describe('uploads', () => {
     expect(sent.find((s) => s.to === 'bob.laptop')?.kind).toBe('reject');
     expect(sent.find((s) => s.to === 'carol.desk')?.kind).toBe('answer');
     expect(sent.filter((s) => s.to === 'bob.phone' && s.kind === 'answer')).toHaveLength(2);
-    files.close();
+    await files.close();
   });
 });
 

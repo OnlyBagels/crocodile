@@ -9,7 +9,7 @@ import {
   type FileSource,
   type FileView,
 } from '@crocodile/client-core';
-import type { ChatMessage } from '@crocodile/protocol';
+import type { FileManifest } from '@crocodile/protocol';
 import { createCliPlatform, type CliFileStore, type JsonFileStore } from './platform';
 
 /** What the commands need from the outside world; tests pass their own. */
@@ -129,7 +129,13 @@ export async function run(argv: string[], io: Io): Promise<number> {
     return 2;
   }
 
-  const ctx = await start(io, opts);
+  let ctx: Ctx;
+  try {
+    ctx = await start(io, opts);
+  } catch (err) {
+    io.err(`Error: ${(err as Error).message}`);
+    return 1;
+  }
   try {
     switch (command) {
       case 'init':
@@ -428,18 +434,21 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
   const from = opts.from ? await findUser(ctx, opts.from) : null;
   const saved = new Set((await ctx.kv.get<string[]>(SAVED_KEY)) ?? []);
   const client = ctx.client;
-  const queue: ChatMessage[] = [];
-  const wanted = (m: ChatMessage) =>
-    !!m.file &&
-    !m.deleted &&
-    m.ch.startsWith('dm:') &&
-    m.author !== client.userId &&
-    (!from || m.author === from) &&
-    !saved.has(m.file.id) &&
-    !queue.some((q) => q.file!.id === m.file!.id);
-  client.on('message', ({ message }) => {
-    if (wanted(message)) queue.push(message);
+  const queue: { author: string; file: FileManifest }[] = [];
+  const add = (author: string, file: FileManifest) => {
+    if (author === client.userId || (from && author !== from)) return;
+    if (saved.has(file.id) || queue.some((q) => q.file.id === file.id)) return;
+    queue.push({ author, file });
+  };
+  client.on('message', ({ message: m }) => {
+    if (m.file && !m.deleted && m.ch.startsWith('dm:')) add(m.author, m.file);
   });
+  // Files that arrived before (a download stopped half way, or sent while
+  // this wasn't running): their messages won't come again.
+  for (const f of client.files?.list() ?? []) {
+    const file = client.files!.manifest(f.id);
+    if (file && !f.complete && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
+  }
   // Conversations with something waiting are joined as the senders invite us.
   io.err(`Waiting for files${opts.from ? ` from ${opts.from}` : ''} (Ctrl+C to stop)…`);
   let received = 0;
@@ -447,7 +456,7 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     const next = await until(ctx, () => queue[0], Number.POSITIVE_INFINITY);
     if (!next) break;
     const m = queue.shift()!;
-    const file = m.file!;
+    const file = m.file;
     const name = cleanFileName(file.name);
     const sender = client.state.profiles[m.author];
     const who = sender ? `${sender.username}#${sender.tag}` : m.author;
@@ -487,10 +496,10 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     } finally {
       await out.close();
     }
-    // The copy in the profile isn't needed any more; remember not to fetch it again.
-    await client.files?.forget(file.id, { keepRecord: true });
+    // Remember not to fetch it again; the copy in the profile isn't needed any more.
     saved.add(file.id);
     await ctx.kv.set(SAVED_KEY, [...saved].slice(-5000));
+    await client.files?.forget(file.id, { keepRecord: true });
     io.err(`Saved ${path}`);
     io.out(path);
     received++;

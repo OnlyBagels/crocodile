@@ -37,11 +37,29 @@ export class JsonFileStore implements KeyValueStore {
   private timer?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly path: string) {
+    let text: string;
     try {
-      this.data = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    } catch {
-      this.data = {};
+      text = readFileSync(path, 'utf8');
+    } catch (err) {
+      // Only a file that isn't there yet means a new profile: anything else
+      // would be overwritten, keys and all, by the next save.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.data = {};
+        return;
+      }
+      throw new Error(`Can't read ${path}: ${(err as Error).message}`);
     }
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data))
+      throw new Error(
+        `${path} is damaged. It holds this computer's keys, so it was left as it is: restore it from a backup, or move it away to start again.`,
+      );
+    this.data = data as Record<string, unknown>;
   }
 
   async get<T>(key: string) {

@@ -203,7 +203,7 @@ jobs:
   # whatever title, notes and pre-release choice a UI-published release has.
   publish:
     name: Publish release
-    needs: [prepare, installers]
+    needs: [prepare, installers, cli]
     permissions:
       contents: write # publish the release
     if: needs.prepare.outputs.skip != 'true'

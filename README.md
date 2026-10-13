@@ -58,7 +58,8 @@ Mobile apps are on the [roadmap](docs/ROADMAP.md).
 scripts, straight to and from the people you'd send them to in the app:
 
 ```sh
-npm install -g crocodile-cli      # or: curl -fsSL …/scripts/install.sh | sh -s -- --cli
+npm install -g crocodile-cli
+# or: curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh -s -- --cli
 crocodile link                    # use your account (or: crocodile init <name>)
 crocodile send backup.tar.gz --to alice#1234
 crocodile get --from bob#5678

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run, type Io } from '../apps/cli/src/cli';
-import { startCoordinator } from './helpers';
+import { startCoordinator, waitFor } from './helpers';
 
 /**
  * The command line tool end to end: real coordinator, real WebRTC (werift)
@@ -22,9 +22,10 @@ function tempDir(name: string) {
   return d;
 }
 
-function person(name: string, server: string) {
-  const home = tempDir(`${name}-home`);
-  const cwd = tempDir(`${name}-cwd`);
+/** Someone at a terminal; `at` runs the command again in the same home and folder. */
+function person(name: string, server: string, at?: { home: string; cwd: string }) {
+  const home = at?.home ?? tempDir(`${name}-home`);
+  const cwd = at?.cwd ?? tempDir(`${name}-cwd`);
   const out: string[] = [];
   const err: string[] = [];
   let stop!: () => void;
@@ -75,6 +76,48 @@ describe('crocodile (command line)', () => {
     expect(readFileSync(saved).equals(data)).toBe(true);
     expect(alice.err.join('\n')).toMatch(new RegExp(`${bobTag} has report.bin`));
   }, 120_000);
+
+  it('carries on a download stopped half way when run again', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'alice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const aliceTag = alice.out.at(-1)!;
+    const bobTag = bob.out.at(-1)!;
+    const data = Buffer.alloc(24 * 1024 * 1024);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 13 + 5) & 0xff;
+    writeFileSync(join(alice.cwd, 'big.bin'), data);
+
+    const first = bob.cmd('get', '--from', aliceTag);
+    const sending = alice.cmd('send', 'big.bin', '--to', bobTag);
+    await waitFor(() => bob.err.some((l) => l.startsWith('Receiving')), 30_000, 'receiving');
+    bob.stop();
+    expect(await first).toBe(130);
+
+    // The message won't arrive again; the download it started carries on.
+    const again = person('bob', coord.url, bob);
+    const giveUp = setTimeout(() => again.stop(), 60_000);
+    const got = await again.cmd('get', '--from', aliceTag);
+    clearTimeout(giveUp);
+    expect({ got, err: again.err }).toMatchObject({ got: 0 });
+    expect(readFileSync(again.out.at(-1)!).equals(data)).toBe(true);
+    expect(await sending).toBe(0);
+  }, 180_000);
+
+  it('leaves a damaged keys file alone instead of starting over', async () => {
+    const coord = await startCoordinator();
+    stops.push(() => coord.stop());
+    const dana = person('dana', coord.url);
+    expect(await dana.cmd('init', 'dana')).toBe(0);
+    const path = join(dana.home, 'state.json');
+    const damaged = readFileSync(path, 'utf8').slice(0, 100);
+    writeFileSync(path, damaged);
+    expect(await dana.cmd('init', 'dana')).toBe(1);
+    expect(dana.err.at(-1)).toMatch(/damaged/);
+    expect(readFileSync(path, 'utf8')).toBe(damaged);
+  }, 60_000);
 
   it('explains what to do first, and rejects unclear input', async () => {
     const coord = await startCoordinator();

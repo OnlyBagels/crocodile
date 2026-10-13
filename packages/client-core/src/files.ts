@@ -171,11 +171,12 @@ export class FileTransfers {
     return this.records.get(id)?.manifest;
   }
 
-  /** Every file this device knows of and the session it belongs to. */
+  /** Every file this device knows of, the session it belongs to and who posted it. */
   list() {
     return [...this.records.values()].map((r) => ({
       id: r.manifest.id,
       sessionId: r.sessionId,
+      author: r.author,
       mine: !!r.mine,
       complete: r.complete,
     }));
@@ -622,9 +623,12 @@ export class FileTransfers {
     return this.loaded;
   }
 
-  close() {
-    for (const d of this.active.values()) d.cancel();
+  /** Stops every transfer; resolves once downloads have saved their progress. */
+  async close() {
+    const downloads = [...this.active.values()];
+    for (const d of downloads) d.cancel();
     for (const l of this.uploads.keys()) l.close();
+    await Promise.all(downloads.map((d) => d.finished));
   }
 }
 

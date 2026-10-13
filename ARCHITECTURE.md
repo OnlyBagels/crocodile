@@ -291,7 +291,10 @@ effort. Everything below is automatic.
   (per-message forward secrecy); the audio chain advances every 30 s. Keys are
   replaced with fresh randomness every 30 minutes and whenever someone leaves
   (post-compromise healing), and are only ever sent to devices whose
-  membership the client verified itself from signed records.
+  membership the client verified itself from signed records. The first key
+  a member gets from someone is answered with its own key once more, so a
+  key lost on the way (sent while a restarted app was still connecting)
+  doesn't leave one side unable to read the other.
 - **Voice.** An Encoded Transform worker encrypts every Opus frame with
   AES-256-GCM before packetisation:
   `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
