@@ -18,6 +18,13 @@ independent security audit yet.
   where it stopped, and every piece is checked against what the sender
   signed. You can turn sharing off, and see and free the space files take,
   under _Settings → Files_.
+- **Crocodile on the command line.** `crocodile send report.pdf --to
+alice#1234` and `crocodile get` send and receive files from a terminal,
+  peer-to-peer like the app, for servers, scripts and anyone who prefers a
+  shell. Link it to your account with `crocodile link`, or give it its own
+  with `crocodile init`. Install it with `npm install -g crocodile-cli`, or as
+  a standalone program with the install script's `--cli` option; see the
+  [README](https://github.com/pwalda/crocodile/tree/main/apps/cli#readme).
 - Everyone needs 0.7.0 to see files: older versions skip those messages.
 
 ## Download

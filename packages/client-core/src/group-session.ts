@@ -880,15 +880,19 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const parked = this.parkedKeys.filter((p) => now - p.at < 30_000);
     this.parkedKeys = [];
     for (const p of parked) {
-      if (this.ctx.isAllowedPeer(this.sessionId, p.from)) {
-        this.keyring.addPeerKey(p.from, {
-          kid: p.payload.kid,
-          text: p.payload.text,
-          audio: p.payload.audio,
-        });
-        await this.flushPending();
-      } else this.parkedKeys.push(p);
+      if (this.ctx.isAllowedPeer(this.sessionId, p.from)) await this.acceptKey(p.from, p.payload);
+      else this.parkedKeys.push(p);
     }
+  }
+
+  private async acceptKey(from: string, payload: Extract<SealedPayload, { type: 'sender_key' }>) {
+    // The first key from someone means they (re)joined, or we did: ours may
+    // not have reached them (sent while their side was still connecting, or
+    // to an earlier run of their app), so it goes again, once.
+    const first = !this.keyring.hasKeyFrom(from);
+    this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
+    await this.flushPending();
+    if (first) await this.sendKeyTo(from);
   }
 
   private distributeKey() {
@@ -964,12 +968,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
           await this.processParkedKeys();
           return;
         }
-        this.keyring.addPeerKey(from, {
-          kid: payload.kid,
-          text: payload.text,
-          audio: payload.audio,
-        });
-        await this.flushPending();
+        await this.acceptKey(from, payload);
         return;
       case 'history_req':
         if (!(await this.mayHear(from))) return;

@@ -7,12 +7,22 @@
 #   macOS  -> /Applications/Crocodile.app (or ~/Applications)
 #   Linux  -> the .deb/.rpm through your package manager, or an AppImage
 #             in ~/.local/bin when neither apt nor dnf/zypper is available.
+#
+# The command line tool instead (to ~/.local/bin/crocodile):
+#
+#   curl -fsSL https://raw.githubusercontent.com/pwalda/crocodile/main/scripts/install.sh | sh -s -- --cli
 # Files fetched with curl are not quarantined, so macOS does not show the
 # "unidentified developer" warning for builds without an Apple Developer ID.
 set -eu
 
 REPO="${CROC_REPO:-pwalda/crocodile}"
 API="https://api.github.com/repos/$REPO/releases/latest"
+WHAT="${CROC_INSTALL:-app}"
+for a in "$@"; do
+  case "$a" in
+    --cli) WHAT=cli ;;
+  esac
+done
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -34,6 +44,34 @@ assets=$(curl -fsSL "$API" | grep -o '"browser_download_url": *"[^"]*"' | sed 's
 pick() { printf '%s\n' "$assets" | grep -E -e "$1" | grep -v '\.blockmap$' | head -n 1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+if [ "$WHAT" = cli ]; then
+  case "$os" in
+    Darwin) cli_os=macos ;;
+    Linux) cli_os=linux ;;
+    *) die "unsupported system: $os (on Windows use install.ps1)" ;;
+  esac
+  case "$arch" in
+    x86_64 | amd64) cli_arch=x64 ;;
+    *) cli_arch=arm64 ;;
+  esac
+  name="crocodile-cli-$cli_os-$cli_arch"
+  url=$(pick "/$name\.tar\.gz$")
+  [ -n "$url" ] || die "no command line build for $cli_os $cli_arch; with Node.js 22 or newer: npm install -g crocodile-cli"
+  say "Downloading $(basename "$url")"
+  curl -fL --progress-bar "$url" -o "$tmp/cli.tar.gz"
+  tar -xzf "$tmp/cli.tar.gz" -C "$tmp"
+  mkdir -p "$HOME/.local/bin"
+  cp "$tmp/$name" "$HOME/.local/bin/crocodile"
+  chmod 755 "$HOME/.local/bin/crocodile"
+  say "Installed ~/.local/bin/crocodile"
+  case ":$PATH:" in
+    *":$HOME/.local/bin:"*) ;;
+    *) say "Add ~/.local/bin to your PATH to run it as crocodile" ;;
+  esac
+  say "Done. Start with: crocodile help"
+  exit 0
+fi
 
 case "$os" in
   Darwin)

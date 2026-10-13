@@ -1,0 +1,48 @@
+{
+  "name": "crocodile-cli",
+  "license": "AGPL-3.0-only",
+  "version": "0.7.0",
+  "description": "Crocodile on the command line: send and receive files peer-to-peer, end-to-end encrypted.",
+  "type": "module",
+  "homepage": "https://crocodilechat.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pwalda/crocodile.git",
+    "directory": "apps/cli"
+  },
+  "bugs": "https://github.com/pwalda/crocodile/issues",
+  "keywords": [
+    "p2p",
+    "file-transfer",
+    "end-to-end-encryption",
+    "webrtc",
+    "crocodile"
+  ],
+  "bin": {
+    "crocodile": "dist/crocodile.cjs"
+  },
+  "files": [
+    "dist/crocodile.cjs",
+    "dist/crocodile.cjs.LEGAL.txt",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "engines": {
+    "node": ">=22.4"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "tsx src/bin.ts",
+    "standalone": "node scripts/build.mjs && node scripts/sea.mjs"
+  },
+  "devDependencies": {
+    "@crocodile/client-core": "workspace:*",
+    "@crocodile/crypto": "workspace:*",
+    "@crocodile/protocol": "workspace:*",
+    "@crocodile/relay": "workspace:*",
+    "esbuild": "^0.28.2",
+    "postject": "1.0.0-alpha.6",
+    "werift": "0.24.4"
+  }
+}

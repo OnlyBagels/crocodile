@@ -706,7 +706,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.outbox.dispose();
     await this.platform.messages.clear();
     if (this.files) {
-      this.files.close();
+      await this.files.close();
       for (const f of this.files.list()) await this.files.forget(f.id);
     }
     await this.platform.kv.delete('identity-seed');
@@ -3049,9 +3049,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     clearTimeout(this.ringingTimer);
     await this.leaveVoice().catch(() => {});
     for (const s of this.sessions.values()) await s.leave().catch(() => {});
-    this.files?.close();
+    await this.files?.close();
     this.link?.stop();
     await this.outbox.flush().catch(() => {});
+    // Nothing is written after this returns: the platform may close its storage.
+    await this.records.flush().catch(() => {});
   }
 
   private makeFiles(blocks: NonNullable<PlatformAdapter['files']>, links: FileLinkFactory) {

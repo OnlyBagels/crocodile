@@ -26,7 +26,7 @@ export class FakeRelayNetwork {
     return {
       start: async (opts) => {
         this.started++;
-        const relay = new FakeRelay(opts.hostPeer, opts.members);
+        const relay = new FakeRelay(opts.hostPeer, opts.members, this);
         const key = `${opts.sessionId}|${opts.epoch}|${opts.hostPeer}`;
         this.relays.set(key, relay);
         if (opts.onFailed) this.onFailed.set(key, opts.onFailed);
@@ -93,6 +93,9 @@ export class FakeRelayNetwork {
   cutFileLinksAfter?: { user: string; bytes: number };
   /** Block bytes the holder had sent when that cut happened. */
   bytesAtCut = 0;
+
+  /** Lose the next `count` direct (sealed) session messages a user sends. */
+  dropDirectFrom?: { user: string; count: number };
 
   /** Hold all file link traffic once a holder has sent this many block bytes (once). */
   pauseFileLinksAfter?: { user: string; bytes: number };
@@ -165,6 +168,7 @@ class FakeRelay {
   constructor(
     readonly host: string,
     private readonly members: () => string[],
+    private readonly net: FakeRelayNetwork,
   ) {}
 
   attach(t: FakeTransport): boolean {
@@ -205,6 +209,11 @@ class FakeRelay {
       for (const [id, o] of this.peers)
         if (id !== from) o.t.deliver({ t: 'msg', from, direct: false, d: msg.d });
     } else if (msg.t === 'direct' && msg.to) {
+      const drop = this.net.dropDirectFrom;
+      if (drop && drop.count > 0 && from.startsWith(`${drop.user}.`)) {
+        drop.count--;
+        return;
+      }
       this.peers.get(msg.to)?.t.deliver({ t: 'msg', from, direct: true, d: msg.d });
     }
   }

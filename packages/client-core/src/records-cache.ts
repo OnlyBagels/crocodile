@@ -149,7 +149,18 @@ export class RecordCache extends Emitter<{ changed: SignedRecord; wanted: string
 
   private scheduleSave() {
     clearTimeout(this.saveTimer);
-    this.saveTimer = setTimeout(() => void this.kv.set(KV_KEY, [...this.map.values()]), 1000);
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      void this.kv.set(KV_KEY, [...this.map.values()]);
+    }, 1000);
+  }
+
+  /** Writes a save that is waiting now (the app is closing). */
+  async flush() {
+    if (!this.saveTimer) return;
+    clearTimeout(this.saveTimer);
+    this.saveTimer = undefined;
+    await this.kv.set(KV_KEY, [...this.map.values()]);
   }
 }
 

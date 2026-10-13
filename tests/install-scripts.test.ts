@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -86,5 +86,90 @@ describe.skipIf(!process.env.CI && !hasPwsh())('install.ps1', () => {
         PROCESSOR_ARCHITECTURE: 'AMD64',
       }),
     ).toBe('Crocodile-0.2.0-win.exe');
+  });
+});
+
+/**
+ * Runs scripts/install.sh with `curl` and `uname` replaced: the release lists
+ * `assets`, and every download is a tarball holding a fake program.
+ */
+function installUnix(args: string[], system: { os: string; arch: string }, assets: string[]) {
+  const temp = mkdtempSync(join(tmpdir(), 'croc-install-sh-'));
+  temps.push(temp);
+  const bin = join(temp, 'bin');
+  const home = join(temp, 'home');
+  const fixture = join(temp, 'fixture');
+  for (const d of [bin, home, fixture]) mkdirSync(d);
+  for (const a of assets.filter((n) => n.endsWith('.tar.gz'))) {
+    const program = join(fixture, a.replace(/\.tar\.gz$/, ''));
+    writeFileSync(program, `#!/bin/sh\necho ${a}\n`);
+    chmodSync(program, 0o755);
+  }
+  const listing = assets
+    .map((n) => `"browser_download_url": "https://example.test/${n}"`)
+    .join('\n');
+  writeFileSync(
+    join(bin, 'curl'),
+    `#!/bin/sh
+out=""; url=""
+while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift ;; http*) url="$1" ;; esac; shift; done
+if [ -z "$out" ]; then printf '%s\\n' '${listing}'; exit 0; fi
+name=$(basename "$url" .tar.gz)
+tar -czf "$out" -C "${fixture}" "$name"
+`,
+  );
+  writeFileSync(
+    join(bin, 'uname'),
+    `#!/bin/sh\ncase "$1" in -s) echo ${system.os} ;; -m) echo ${system.arch} ;; esac\n`,
+  );
+  chmodSync(join(bin, 'curl'), 0o755);
+  chmodSync(join(bin, 'uname'), 0o755);
+  const out = execFileSync('sh', [resolve('scripts/install.sh'), ...args], {
+    encoding: 'utf8',
+    env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home },
+  });
+  const installed = join(home, '.local/bin/crocodile');
+  return { out, program: execFileSync(installed, { encoding: 'utf8' }).trim(), installed };
+}
+
+const CLI_ASSETS = [
+  'Crocodile-0.7.0-linux-x86_64.AppImage',
+  'crocodile-cli-linux-arm64.tar.gz',
+  'crocodile-cli-linux-x64.tar.gz',
+  'crocodile-cli-macos-arm64.tar.gz',
+  'crocodile-cli-windows-x64.zip',
+];
+
+describe.skipIf(process.platform === 'win32')('install.sh --cli', () => {
+  it('installs the command line tool for this system and processor', () => {
+    const linux = installUnix(['--cli'], { os: 'Linux', arch: 'x86_64' }, CLI_ASSETS);
+    expect(linux.program).toBe('crocodile-cli-linux-x64.tar.gz');
+    expect(linux.out).toMatch(/Add ~\/.local\/bin to your PATH/);
+    const arm = installUnix(['--cli'], { os: 'Linux', arch: 'aarch64' }, CLI_ASSETS);
+    expect(arm.program).toBe('crocodile-cli-linux-arm64.tar.gz');
+    const mac = installUnix(['--cli'], { os: 'Darwin', arch: 'arm64' }, CLI_ASSETS);
+    expect(mac.program).toBe('crocodile-cli-macos-arm64.tar.gz');
+    expect(readFileSync(mac.installed, 'utf8')).toMatch(/^#!\/bin\/sh/);
+  });
+
+  it('points to npm when there is no build for the processor', () => {
+    expect(() => installUnix(['--cli'], { os: 'Darwin', arch: 'x86_64' }, CLI_ASSETS)).toThrow(
+      /npm install -g crocodile-cli/,
+    );
+    // Never taken for ARM: a program that can't run there.
+    for (const arch of ['i686', 'riscv64', 'armv7l'])
+      expect(() => installUnix(['--cli'], { os: 'Linux', arch }, CLI_ASSETS)).toThrow(
+        /unsupported CPU architecture/,
+      );
+  });
+});
+
+describe('release workflow', () => {
+  it('publishes a release only once every program the installers fetch is in it', () => {
+    const yml = readFileSync(resolve(__dirname, '../.github/workflows/release.yml'), 'utf8');
+    const needs = /\n {2}publish:\n(?: {4}.*\n)*? {4}needs: \[([^\]]*)\]/.exec(yml)?.[1];
+    expect(needs?.split(',').map((s) => s.trim())).toEqual(
+      expect.arrayContaining(['installers', 'cli']),
+    );
   });
 });
