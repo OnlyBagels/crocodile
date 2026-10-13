@@ -594,6 +594,9 @@ export class HostRelay {
         if (slot.stream && !want.includes(slot.stream)) {
           slot.stream = null;
           slot.waitingKey = false;
+          // The same stream may come back to this slot later: continue from
+          // here then, not across the gap.
+          slot.rewriter.reset();
           changed = true;
         }
       }
@@ -614,6 +617,7 @@ export class HostRelay {
       for (const slot of viewer.screenAudioSlots) {
         if (slot.stream && !sounds.includes(slot.stream)) {
           slot.stream = null;
+          slot.rewriter.reset();
           changed = true;
         }
       }

@@ -385,6 +385,54 @@ describe('HostRelay', () => {
     await waitFor(() => lastMedia(c)?.video[0] === null);
   });
 
+  it('continues a stream that comes back to a slot from where the slot left off', async () => {
+    const host = createIdentity();
+    const deliver = new Map<string, (d: SignalData) => void>();
+    const relay = new HostRelay({
+      sessionId: SESSION,
+      epoch: 1,
+      identity: host,
+      hostPeer: P(host),
+      slots: SLOTS,
+      iceServers: stun(),
+      includeLoopback: true,
+      sendSignal: (to, data) => void deliver.get(to)?.(data),
+    });
+    closers.push(() => relay.close());
+    const a = await joinRelay(relay, host, host, deliver);
+    const b = await joinRelay(relay, host, createIdentity(), deliver);
+    const [av, bv] = await Promise.all([a.addVideo(), b.addVideo()]);
+    const screen = `${P(a.identity)}:screen`;
+    a.dc.send(
+      JSON.stringify({ t: 'state', muted: false, deafened: false, screen: { audio: false } }),
+    );
+    await waitFor(() => b.inbox.some((m) => m.t === 'peer_state' && m.peer.screen));
+    const watch = async (on: boolean) => {
+      b.dc.send(JSON.stringify({ t: 'watch', streams: on ? [screen] : [] }));
+      await waitFor(() => (lastMedia(b)?.video[0] === screen) === on);
+    };
+    await watch(true);
+    await waitFor(() => {
+      av.sendVideo('screen', { key: true });
+      return bv.video.length >= 3;
+    });
+    // B looks away while the screen goes on.
+    await watch(false);
+    await new Promise((r) => setTimeout(r, 100));
+    const before = bv.video.length;
+    const last = bv.video.at(-1)!.seq;
+    for (let i = 0; i < 300; i++) av.sendVideo('screen', { key: false });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(bv.video).toHaveLength(before);
+    // And back: the slot runs on from its last packet, not 300 later.
+    await watch(true);
+    await waitFor(() => {
+      av.sendVideo('screen', { key: true });
+      return bv.video.length > before;
+    });
+    expect(bv.video[before]!.seq).toBe((last + 1) & 0xffff);
+  });
+
   it("brings a watched screen's sound along with it", async () => {
     const host = createIdentity();
     const deliver = new Map<string, (d: SignalData) => void>();

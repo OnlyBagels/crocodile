@@ -66,6 +66,13 @@ export class FakeRelayNetwork {
   videoRoom = VIDEO_SLOTS;
   /** What each device sends now: `<peer>:camera|screen|screenAudio` → track (or null). */
   readonly outgoing = new Map<string, unknown>();
+  /** How a device's connection travels, if not what its network allows (null: not known yet). */
+  readonly routes = new Map<string, 'lan' | 'relay' | null>();
+  /**
+   * Frames decoded on each of a device's video slots, if held still; by
+   * default every look finds new ones, as with video flowing.
+   */
+  readonly framesDecoded = new Map<string, number>();
 
   /** Users whose network allows no direct connections (only a TURN relay gets through). */
   readonly blocked = new Set<string>();
@@ -308,7 +315,19 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   async addMedia() {
     if (!this.isOpen) throw new Error('not connected');
     this.relay!.mediaOn(this);
-    setTimeout(() => !this.closed && this.emit('media', undefined), 2);
+    setTimeout(() => {
+      if (this.closed) return;
+      this.emit('media', undefined);
+      // Like WebRTC: a track per video slot, kept whatever it carries.
+      for (let slot = 0; slot < VIDEO_SLOTS; slot++)
+        this.emit('video', { slot, track: { kind: 'video', id: `slot${slot}` } as never });
+    }, 2);
+  }
+
+  private frames = 0;
+  async videoFrames() {
+    if (!this.isOpen) return null;
+    return this.net.framesDecoded.get(this.userId) ?? ++this.frames;
   }
 
   async setOutgoing(kind: string, track: unknown) {
@@ -318,6 +337,7 @@ class FakeTransport extends Emitter<RelayLinkEvents> implements RelayTransport {
   /** Like ICE: a direct path when one exists, even with the server relay on offer. */
   async route() {
     if (!this.isOpen) return null;
+    if (this.net.routes.has(this.userId)) return this.net.routes.get(this.userId)!;
     const direct = !this.net.blocksDirect(this.userId, this.relay!.host);
     return direct ? ('lan' as const) : ('relay' as const);
   }

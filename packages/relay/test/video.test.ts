@@ -202,10 +202,26 @@ describe('VideoLimits', () => {
     expect(l.host).toBe(HOST_START_KBPS);
     expect(l.viewerCap('slow')).toBe(1700);
     expect(l.viewerCap('fine1')).toBe(Number.POSITIVE_INFINITY);
-    // Clean again for long enough: the limit lifts.
-    for (let t = 10_000; t < 60_000; t += 2000) l.tick(new Map([['slow', 1700]]), t);
+    // Clean again for long enough: the limit lifts, a step at a time.
+    for (let t = 10_000; t < 200_000; t += 2000) l.tick(new Map([['slow', 1700]]), t);
     expect(l.viewerCap('slow')).toBe(Number.POSITIVE_INFINITY);
     l.forget('slow');
+  });
+
+  it('rises a step per calm period, not on every tick', () => {
+    const l = new VideoLimits(8000);
+    const usage = new Map([['v', 1000]]);
+    // Real clock times: the first tick is no reason to grow.
+    const start = Date.now();
+    l.tick(usage, start);
+    expect(l.host).toBe(8000);
+    const seen: number[] = [];
+    for (let t = start + 2000; t <= start + 20_000; t += 2000) {
+      l.tick(usage, t);
+      seen.push(l.host);
+    }
+    // 20 s of calm: two steps of 15 %, each held for a calm period.
+    expect([...new Set(seen)]).toEqual([8000, 9200, 10_580]);
   });
 
   it('never goes below a floor', () => {

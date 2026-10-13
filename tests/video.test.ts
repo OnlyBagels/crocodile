@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CrocodileClient,
   Emitter,
@@ -99,7 +99,10 @@ function videoVoice() {
 }
 
 /** A space whose voice room everyone has joined. */
-async function room(count = 3) {
+async function room(
+  count = 3,
+  opts: { before?: (net: FakeRelayNetwork, clients: CrocodileClient[]) => void } = {},
+) {
   const coord = await server();
   const net = new FakeRelayNetwork();
   const names = ['alice', 'bob', 'carol', 'dave'].slice(0, count);
@@ -121,7 +124,9 @@ async function room(count = 3) {
   );
   const channel = owner!.state.spaces[spaceId]!.channels.find((c) => c.kind === 'voice')!.id;
   const sid = sessionIds.voice(spaceId, channel);
+  opts.before?.(net, clients);
   for (const c of clients) await c.joinVoice(spaceId, channel);
+  if (opts.before) return { net, clients, sid, spaceId, channel };
   await waitFor(
     () => clients.every((c) => c.state.sessions[sid]?.video.ready),
     10000,
@@ -240,6 +245,60 @@ describe('video calls', () => {
     expect(net.outgoing.get(`${bob.peer}:camera`) ?? null).toBeNull();
     expect(slotsOf(bob, sid).videoSlots.filter(Boolean)).toEqual([]);
     expect(bob.state.sessions[sid]!.video.streams.every((s) => !s.mine)).toBe(true);
+  });
+
+  it('sends video only once the call is known to go directly, and stops if it moves to a server relay', async () => {
+    const { net, clients, sid } = await room(2, {
+      // ICE hasn't said how Bob's connection travels yet.
+      before: (n, [, b]) => void n.routes.set(b!.peer, null),
+    });
+    const [alice, bob] = clients as [CrocodileClient, CrocodileClient];
+    await waitFor(() => alice.state.sessions[sid]?.video.ready, 10000, 'alice ready');
+    await bob.setCamera(true);
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(bob.state.sessions[sid]!.video.ready).toBe(false);
+    expect(net.outgoing.get(`${bob.peer}:camera`) ?? null).toBeNull();
+    // A direct path: the camera goes out.
+    net.routes.delete(bob.peer);
+    await waitFor(() => net.outgoing.get(`${bob.peer}:camera`), 8000, 'camera sent');
+    expect(bob.state.sessions[sid]!.video.ready).toBe(true);
+    // Well after connecting, ICE moves to the server relay: video stops.
+    await new Promise((r) => setTimeout(r, 9000));
+    net.routes.set(bob.peer, 'relay');
+    await waitFor(() => bob.state.sessions[sid]?.video.blocked === 'relayed', 8000, 'relayed');
+    expect(net.outgoing.get(`${bob.peer}:camera`)).toBeNull();
+  });
+
+  it("shows a stream new in a slot only once its own picture arrives, not the slot's last one", async () => {
+    // Node has no MediaStream; a stand-in that just holds the track.
+    vi.stubGlobal(
+      'MediaStream',
+      class {
+        constructor(readonly tracks: unknown[]) {}
+      },
+    );
+    cleanup.push(() => vi.unstubAllGlobals());
+    const { net, clients, sid } = await room();
+    const [alice, bob, carol] = clients as [CrocodileClient, CrocodileClient, CrocodileClient];
+    const stateOf = (stream: string) => streamsOf(alice, sid).find((s) => s.id === stream)?.state;
+    // Alice's slots carry nothing new for now.
+    net.framesDecoded.set(alice.peer, 10);
+    await bob.setCamera(true);
+    const bobCam = streamIds.make(bob.peer, 'camera');
+    await waitFor(() => slotsOf(alice, sid).videoSlots[0] === bobCam, 5000, 'in a slot');
+    await new Promise((r) => setTimeout(r, 500));
+    expect(stateOf(bobCam)).toBe('loading');
+    net.framesDecoded.set(alice.peer, 11);
+    await waitFor(() => stateOf(bobCam) === 'live', 3000, 'bob shows');
+    // Bob's camera goes; Carol's takes the same slot (and track).
+    await bob.setCamera(false);
+    await carol.setCamera(true);
+    const carolCam = streamIds.make(carol.peer, 'camera');
+    await waitFor(() => slotsOf(alice, sid).videoSlots[0] === carolCam, 5000, 'carol in slot 0');
+    await new Promise((r) => setTimeout(r, 500));
+    expect(stateOf(carolCam)).toBe('loading');
+    net.framesDecoded.set(alice.peer, 12);
+    await waitFor(() => stateOf(carolCam) === 'live', 3000, 'carol shows');
   });
 
   it("keeps the call voice-only with a host whose app can't carry video", async () => {

@@ -2200,7 +2200,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const inThisCall = this.state.voiceSession === session.sessionId;
     const out = inThisCall ? this.voiceEngine?.outgoing() : undefined;
     const blocked = session.videoBlocked;
-    if (out && session.mediaReady && !blocked) {
+    if (out && session.videoUsable) {
       if (out.camera)
         streams.push({
           id: streamIds.make(this.peer, 'camera'),
@@ -2237,13 +2237,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             ? 'off'
             : session.pausedStreams.includes(id)
               ? 'paused'
-              : slot >= 0 && session.videoStream(id)
+              : slot >= 0 && session.videoStream(id) && session.videoShowingNow(id)
                 ? 'live'
                 : 'loading',
         });
       }
     }
-    return { blocked: inThisCall ? blocked : null, ready: session.mediaReady, streams };
+    return {
+      blocked: inThisCall ? blocked : null,
+      ready: session.mediaReady && session.route !== null,
+      streams,
+    };
   }
 
   // ===========================================================================

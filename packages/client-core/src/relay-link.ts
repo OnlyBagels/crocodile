@@ -304,6 +304,15 @@ export class RelayLink extends Emitter<RelayLinkEvents> {
     return routeFromStats(await this.pc.getStats());
   }
 
+  /** Frames decoded so far on a video slot. */
+  async videoFrames(slot: number): Promise<number | null> {
+    const t = this.videoSlots[slot];
+    if (!t || this.closed) return null;
+    for (const s of (await t.receiver.getStats()).values())
+      if (s.type === 'inbound-rtp') return (s as { framesDecoded?: number }).framesDecoded ?? 0;
+    return 0;
+  }
+
   /** Live numbers about the connection (debug panel). */
   async stats(): Promise<LinkStats | null> {
     if (this.closed) return null;

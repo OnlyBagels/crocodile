@@ -319,8 +319,10 @@ Electron can capture it.
 
 **Not over server relays.** A member whose connection goes through the
 opt-in server relay (TURN) gets voice only: video would multiply what
-volunteers carry. The app says so instead of showing the camera button as
-broken.
+volunteers carry. Video starts only once the connection is known to go
+directly to the host, and the call keeps checking, so video stops if ICE
+moves to the server relay later. The app says so instead of showing the
+camera button as broken.
 
 ## 7. End-to-end encryption
 

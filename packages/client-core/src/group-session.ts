@@ -108,6 +108,8 @@ export interface RelayTransport extends Emitter<RelayLinkEvents> {
   ): Promise<void>;
   /** How the connection travels once it is up. */
   route?(): Promise<ConnectionRoute | null>;
+  /** Frames decoded so far on a video slot (null if it can't tell). */
+  videoFrames?(slot: number): Promise<number | null>;
   /** Live WebRTC numbers (debug panel). */
   stats?(): Promise<LinkStats | null>;
 }
@@ -131,6 +133,10 @@ export interface ConnectAttempt {
 const ATTEMPTS_KEPT = 8;
 /** How often a call measures its round trip to the host. */
 const PING_INTERVAL_MS = 3000;
+/** How often a call checks how its connection travels (direct or server relay). */
+const ROUTE_CHECK_MS = 5000;
+/** Longest a stream new in a video slot waits for its first frame before showing. */
+const FIRST_PICTURE_WAIT_MS = 3000;
 /** Renew a relay grant this long before it ends (the server extends grants in their last 10 minutes). */
 const RELAY_RENEW_BEFORE_MS = 5 * 60_000;
 /** How soon a failed renewal is tried again. */
@@ -209,6 +215,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   watchedScreens: string[] = [];
   private videoTracks: (MediaStreamTrack | undefined)[] = [];
   private videoStreams = new Map<number, MediaStream>();
+  /**
+   * Video slots whose current stream has shown a picture since it was put
+   * there. A slot's track outlives what it carries, so until then it would
+   * still show the previous stream's last frame.
+   */
+  private videoShowing = new Set<number>();
   private sentWatch: string | null = null;
 
   private hosting?: { epoch: number; handle: Promise<RelayHandle | null> };
@@ -483,6 +495,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.pausedStreams = [];
     this.videoTracks = [];
     this.videoStreams.clear();
+    this.videoShowing.clear();
     this.sentWatch = null;
     this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
 
@@ -509,7 +522,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             this.emit('update', undefined);
           })
           .catch(() => {});
-      for (const ms of [0, 1000, 3000, 10_000]) setTimeout(readRoute, ms);
+      for (const ms of [0, 1000, 3000]) setTimeout(readRoute, ms);
+      // And keep watching it: ICE can move to the server relay at any time.
+      const routeTimer = setInterval(() => {
+        if (this.transport !== entry || this.left) return clearInterval(routeTimer);
+        readRoute();
+      }, ROUTE_CHECK_MS);
+      routeTimer.unref?.();
       this.rttMs = null;
       this.sendState();
       this.startPings(entry);
@@ -764,10 +783,17 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     return null;
   }
 
-  /** What we send now: nothing until video is on the connection, or when it can't be used. */
+  /**
+   * Video is on the connection and may be used: the host carries it and the
+   * connection is known to go directly to it, not through a server relay.
+   */
+  get videoUsable(): boolean {
+    return this.mediaReady && this.route !== null && !this.videoBlocked;
+  }
+
+  /** What we send now: nothing until video can be used. */
   private sending(): OutgoingVideo {
-    if (!this.mediaReady || this.videoBlocked || !this.voice?.outgoing)
-      return { camera: null, screen: null };
+    if (!this.videoUsable || !this.voice?.outgoing) return { camera: null, screen: null };
     return this.voice.outgoing();
   }
 
@@ -803,7 +829,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const cameras = [...this.peers.values()]
       .filter((p) => p.camera && p.id !== this.me)
       .map((p) => streamIds.make(p.id, 'camera'));
-    const streams = this.videoBlocked
+    const streams = !this.videoUsable
       ? []
       : [...new Set([...this.watchedScreens.filter(live), ...cameras])].slice(0, 32);
     const key = streams.join();
@@ -818,6 +844,32 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       : this.watchedScreens.filter((s) => s !== stream);
     this.updateWatch();
     this.emit('update', undefined);
+  }
+
+  /**
+   * A stream was put in a slot: it shows once a frame decodes there (the
+   * host starts it at a key frame), or after a while in any case.
+   */
+  private async awaitPicture(slot: number, stream: string) {
+    const entry = this.transport;
+    const still = () => this.transport === entry && this.videoSlots[slot] === stream;
+    const frames = () => entry?.t.videoFrames?.(slot).catch(() => null) ?? Promise.resolve(null);
+    const start = await frames();
+    const until = Date.now() + FIRST_PICTURE_WAIT_MS;
+    while (start !== null && still() && Date.now() < until) {
+      await new Promise((r) => setTimeout(r, 150));
+      const now = await frames();
+      if (now === null || now > start) break;
+    }
+    if (!still()) return;
+    this.videoShowing.add(slot);
+    this.emit('update', undefined);
+  }
+
+  /** Whether a stream we get shows its own picture yet. */
+  videoShowingNow(stream: string): boolean {
+    const slot = this.videoSlots.indexOf(stream);
+    return slot >= 0 && this.videoShowing.has(slot);
   }
 
   /** The picture of a camera or screen the host sends us, while it does. */
@@ -902,11 +954,19 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         if (this.peers.has(msg.peer.id)) this.peers.set(msg.peer.id, msg.peer);
         this.updateWatch();
         break;
-      case 'media':
+      case 'media': {
+        const before = this.videoSlots;
         this.videoSlots = msg.video;
         this.screenAudioSlots = msg.audio;
         this.pausedStreams = msg.paused;
+        msg.video.forEach((stream, slot) => {
+          if (stream === before[slot]) return;
+          this.videoShowing.delete(slot);
+          this.videoStreams.delete(slot);
+          if (stream) void this.awaitPicture(slot, stream);
+        });
         break;
+      }
       case 'slots':
         this.slots = msg.map;
         break;

@@ -204,8 +204,9 @@ export class VideoLimits {
   host: number;
   private viewers = new Map<string, number>();
   private loss = new Map<string, number>();
-  private lastDrop = 0;
-  private lastViewerDrop = new Map<string, number>();
+  /** When the host's limit last moved (or limits were first ticked). */
+  private lastChange: number | null = null;
+  private lastViewerChange = new Map<string, number>();
 
   constructor(startKbps = HOST_START_KBPS) {
     this.host = startKbps;
@@ -223,14 +224,16 @@ export class VideoLimits {
   forget(viewer: string) {
     this.viewers.delete(viewer);
     this.loss.delete(viewer);
-    this.lastViewerDrop.delete(viewer);
+    this.lastViewerChange.delete(viewer);
   }
 
   /**
    * Every couple of seconds: `usage` is the kbps sent to each viewer of
-   * video. Returns whether any limit changed.
+   * video. Returns whether any limit changed. A limit rises at most once
+   * per calm period, so each step up is tried before the next.
    */
   tick(usage: Map<string, number>, now: number): boolean {
+    this.lastChange ??= now;
     const watching = [...usage.entries()].filter(([, k]) => k > 0);
     const lossy = watching.filter(([v]) => (this.loss.get(v) ?? 0) > LOSSY);
     const total = watching.reduce((n, [, k]) => n + k, 0);
@@ -242,7 +245,7 @@ export class VideoLimits {
         this.host = next;
         changed = true;
       }
-      this.lastDrop = now;
+      this.lastChange = now;
       return changed;
     }
     for (const [v, k] of lossy) {
@@ -251,17 +254,19 @@ export class VideoLimits {
         this.viewers.set(v, next);
         changed = true;
       }
-      this.lastViewerDrop.set(v, now);
+      this.lastViewerChange.set(v, now);
     }
-    if (now - this.lastDrop > CALM_MS && lossy.length === 0) {
+    if (now - this.lastChange > CALM_MS && lossy.length === 0) {
       const next = Math.floor(this.host * GROW);
       if (next !== this.host) {
         this.host = next;
         changed = true;
       }
+      this.lastChange = now;
     }
     for (const [v, cap] of this.viewers) {
-      if (now - (this.lastViewerDrop.get(v) ?? 0) <= CALM_MS) continue;
+      if (now - (this.lastViewerChange.get(v) ?? 0) <= CALM_MS) continue;
+      this.lastViewerChange.set(v, now);
       const next = cap * GROW;
       // Far above what they get: no limit at all.
       if (next > 4 * (usage.get(v) ?? 0) + 4 * MIN_KBPS) this.viewers.delete(v);
