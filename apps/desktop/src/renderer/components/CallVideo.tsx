@@ -1,9 +1,10 @@
-import { useEffect, useRef, type RefObject } from 'react';
+import { useEffect, useRef, useState, type RefObject } from 'react';
 import {
   Eye,
   EyeOff,
   Loader2,
   Maximize2,
+  Minimize2,
   MicOff,
   MonitorUp,
   PauseCircle,
@@ -355,12 +356,20 @@ function ScreenStage({
       (HTMLVideoElement & { requestPictureInPicture?: () => Promise<unknown> }) | null;
     void el?.requestPictureInPicture?.().catch(report);
   };
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    const onChange = () => setFull(!!box.current && document.fullscreenElement === box.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+  const toggleFull = () =>
+    void (full ? document.exitFullscreen() : box.current?.requestFullscreen())?.catch(report);
   return (
     <div
       role="group"
       aria-label={`Watching ${name}'s screen`}
       ref={box}
-      className="group relative mx-auto aspect-video shrink-0 overflow-hidden rounded-2xl border border-line bg-black"
+      className="group relative mx-auto aspect-video shrink-0 overflow-hidden rounded-2xl border border-line bg-black [&:fullscreen]:rounded-none [&:fullscreen]:border-0"
       style={{ width: `min(100%, calc(${maxHeight} * 16 / 9))` }}
     >
       {stream.state === 'live' ? (
@@ -381,11 +390,11 @@ function ScreenStage({
           <PictureInPicture2 size={16} />
         </IconButton>
         <IconButton
-          label="Full screen"
+          label={full ? 'Exit full screen' : 'Full screen'}
           className="text-white hover:bg-white/15"
-          onClick={() => void box.current?.requestFullscreen().catch(report)}
+          onClick={toggleFull}
         >
-          <Maximize2 size={16} />
+          {full ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
         </IconButton>
         <IconButton
           label="Stop watching"

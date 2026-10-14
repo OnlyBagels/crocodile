@@ -385,6 +385,28 @@ await shot(a.page, '10g-screen-offer');
 await watch.click();
 await playing(a.page, /^Screen: /);
 await shot(a.page, '10h-watching');
+// Full screen and the pop-out window both open, and close again.
+const screenStage = a.page.getByRole('group', { name: /^Watching .*'s screen$/ });
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Full screen' }).click();
+await a.page.waitForFunction(
+  () => document.fullscreenElement?.getAttribute('role') === 'group',
+  undefined,
+  {
+    timeout: 5000,
+  },
+);
+await a.page.waitForTimeout(800);
+await shot(a.page, '10i-full-screen');
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Exit full screen' }).click();
+await a.page.waitForFunction(() => !document.fullscreenElement, undefined, { timeout: 5000 });
+await screenStage.hover();
+await screenStage.getByRole('button', { name: 'Pop out' }).click();
+await a.page.waitForFunction(() => !!document.pictureInPictureElement, undefined, {
+  timeout: 5000,
+});
+await a.page.evaluate(() => document.exitPictureInPicture());
 await a.page.getByRole('button', { name: 'Stop watching' }).click();
 await watch.waitFor({ timeout: 10_000 });
 await b.page.getByRole('button', { name: 'Stop sharing your screen' }).first().click();
