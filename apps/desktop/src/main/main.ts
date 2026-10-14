@@ -383,10 +383,12 @@ app.whenReady().then(() => {
   }
   handleDeepLink(process.argv.find((a) => a.startsWith(`${APP_PROTOCOL}://`)));
 
-  // Microphone and camera ('media'); screens go through the picker (screen-share.ts).
+  // Microphone and camera ('media'); screens go through the picker (screen-share.ts);
+  // full screen for a screen someone shares.
   const allowed = [
     'media',
     'display-capture',
+    'fullscreen',
     'notifications',
     'clipboard-sanitized-write',
     'speaker-selection',
