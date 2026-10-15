@@ -203,7 +203,12 @@ export const GroupPayload = z.discriminatedUnion('type', [
   z.object({ type: z.literal('message'), message: ChatMessage }),
   z.object({ type: z.literal('typing'), ch: z.string().max(200) }),
   /** Direct-call signalling inside a DM session. */
-  z.object({ type: z.literal('call'), action: z.enum(['ring', 'accept', 'decline', 'end']) }),
+  z.object({
+    type: z.literal('call'),
+    action: z.enum(['ring', 'accept', 'decline', 'end']),
+    /** A ring for a video call (older apps drop it and see a call). */
+    video: z.boolean().optional(),
+  }),
   /** Looking for a member who has this file (posted in this session). */
   z.object({ type: z.literal('file_want'), file: FileId }),
 ]);

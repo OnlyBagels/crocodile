@@ -347,9 +347,10 @@ export interface ClientState {
   activeChannel: string | null;
   voiceSession: string | null;
   /** Someone is ringing us in a DM. */
-  incomingCall: { sessionId: string; from: string; at: number } | null;
+  /** `video`: the caller turned their camera on to call. */
+  incomingCall: { sessionId: string; from: string; at: number; video?: boolean } | null;
   /** We are ringing someone and they have not answered yet. */
-  outgoingCall: { sessionId: string; to: string; at: number } | null;
+  outgoingCall: { sessionId: string; to: string; at: number; video?: boolean } | null;
   /**
    * Since when the call we are in is live: connected, and in a DM with the
    * other side in it too. Null while ringing, connecting or alone.
@@ -2118,7 +2119,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         return peer ? peerIds.user(peer) : null;
       }),
     );
-    session.on('call', ({ userId, action }) => this.onCallSignal(sessionId, userId, action));
+    session.on('call', ({ userId, action, video }) =>
+      this.onCallSignal(sessionId, userId, action, video),
+    );
     session.on('file', ({ from, payload }) => this.files?.onMessage(sessionId, from, payload));
     session.on('update', () => this.files?.sessionChanged(sessionId));
     session.on('typing', ({ userId, ch }) => {
@@ -3028,18 +3031,38 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     return this.joinVoiceSession(sessionIds.voice(spaceId, channelId));
   }
 
-  /** Voice call inside a DM: joins the call and rings the other side. */
-  async callDm(userId: string) {
+  /**
+   * Call inside a DM: joins the call and rings the other side, or answers
+   * their ring. With `video`, our camera is on from the start: we see
+   * ourselves while it rings, they see us once they answer.
+   */
+  async callDm(userId: string, opts: { video?: boolean } = {}) {
     const sessionId = await this.openDm(userId);
     const answering = this.state.incomingCall?.sessionId === sessionId;
     await this.joinVoiceSession(sessionId);
+    const attempt = this.callAttempt;
+    // A missing or busy camera doesn't stop the call itself.
+    if (opts.video)
+      await this.setCamera(true).catch((err: unknown) =>
+        this.reportError(err instanceof Error ? err.message : String(err)),
+      );
+    // Hung up (or another call placed) while the camera was opening, say at
+    // its permission prompt: don't ring or answer for a call that's over.
+    if (attempt !== this.callAttempt) return;
     if (answering) {
       this.callAnswered = sessionId;
       this.store.set({ incomingCall: null });
       this.sendCallSignal(sessionId, 'accept');
       return;
     }
-    this.store.set({ outgoingCall: { sessionId, to: userId, at: Date.now() } });
+    this.store.set({
+      outgoingCall: {
+        sessionId,
+        to: userId,
+        at: Date.now(),
+        ...(opts.video ? { video: true } : {}),
+      },
+    });
     this.ringLoop(sessionId);
   }
 
@@ -3063,14 +3086,22 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         void this.leaveVoice();
         return;
       }
-      this.sendCallSignal(sessionId, 'ring');
+      this.sendCallSignal(sessionId, 'ring', out.video);
     };
     ring();
     this.ringTimer = setInterval(ring, Math.min(2500, timeout / 2));
   }
 
-  private sendCallSignal(sessionId: string, action: 'ring' | 'accept' | 'decline' | 'end') {
-    return this.sessions.get(sessionId)?.sendGroup({ type: 'call', action }) ?? false;
+  private sendCallSignal(
+    sessionId: string,
+    action: 'ring' | 'accept' | 'decline' | 'end',
+    video?: boolean,
+  ) {
+    return (
+      this.sessions
+        .get(sessionId)
+        ?.sendGroup({ type: 'call', action, ...(video ? { video: true } : {}) }) ?? false
+    );
   }
 
   declineCall() {
@@ -3084,6 +3115,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     sessionId: string,
     from: string,
     action: 'ring' | 'accept' | 'decline' | 'end',
+    video?: boolean,
   ) {
     if (from === this.userId) return;
     if (action === 'ring') {
@@ -3093,7 +3125,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       }
       const ringing = this.state.incomingCall;
       if (ringing && ringing.sessionId !== sessionId) return;
-      if (!ringing) this.store.set({ incomingCall: { sessionId, from, at: Date.now() } });
+      if (!ringing)
+        this.store.set({
+          incomingCall: { sessionId, from, at: Date.now(), ...(video ? { video: true } : {}) },
+        });
       // A hang-up can be lost (the caller's app quit, say): stop when the rings do.
       clearTimeout(this.ringingTimer);
       this.ringingTimer = setTimeout(() => {
@@ -3124,7 +3159,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async joinVoiceSession(sessionId: string) {
     const engine = this.voiceEngine;
     if (!engine) throw new Error('Voice is not available on this device');
+    // Calling back right after hanging up: let the hang-up finish first, or
+    // its last steps would end the new call (it's the same DM session).
+    await this.leaving;
     if (this.state.voiceSession && this.state.voiceSession !== sessionId) await this.leaveVoice();
+    this.callAttempt++;
     await engine.start();
     this.store.set({ voiceSession: sessionId });
     let session = this.sessions.get(sessionId);
@@ -3141,9 +3180,24 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /** Hang up. `quiet`: the other side already ended it, no need to tell them. */
+  /** A hang-up still going out; a new call waits for it. */
+  private leaving: Promise<void> | null = null;
+  /** Moves on with every call joined or left, so a step that waited knows. */
+  private callAttempt = 0;
+
   async leaveVoice(opts: { quiet?: boolean } = {}) {
+    if (this.leaving) return this.leaving;
+    const done = this.leaveVoiceNow(opts).finally(() => {
+      if (this.leaving === done) this.leaving = null;
+    });
+    this.leaving = done;
+    return done;
+  }
+
+  private async leaveVoiceNow(opts: { quiet?: boolean }) {
     const sessionId = this.state.voiceSession;
     if (!sessionId) return;
+    this.callAttempt++;
     if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
     if (sessionId.startsWith('dm:') && !opts.quiet) {
       // Tell the other side, ringing or talking. Let the hang-up go out

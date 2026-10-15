@@ -155,7 +155,7 @@ export type GroupSessionEvents = {
   /** A screen-sound slot's track: whoever's screen it carries is in `screenAudioSlots`. */
   screenAudio: { slot: number; track: MediaStreamTrack };
   typing: { userId: string; ch: string };
-  call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end' };
+  call: { userId: string; action: 'ring' | 'accept' | 'decline' | 'end'; video?: boolean };
   error: { message: string };
   /** File transfer messages from a peer allowed in the session (files.ts). */
   file: {
@@ -1242,7 +1242,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     } else if (payload.type === 'typing') {
       this.emit('typing', { userId: fromUser, ch: payload.ch });
     } else if (payload.type === 'call' && this.isDm) {
-      this.emit('call', { userId: fromUser, action: payload.action });
+      this.emit('call', {
+        userId: fromUser,
+        action: payload.action,
+        ...(payload.video ? { video: true } : {}),
+      });
     } else if (payload.type === 'file_want') {
       this.emit('file', { from, payload });
     }

@@ -324,6 +324,78 @@ describe('video calls', () => {
     expect(bob.state.sessions[sid]!.video.ready).toBe(false);
   });
 
+  it('starts a video call with the camera on, and says so to the one it rings', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    for (const c of [alice, bob]) c.voiceEngine = videoVoice();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    await alice.callDm(bob.userId, { video: true });
+    // Alice sees herself while it rings; Bob is told it's a video call.
+    expect(alice.state.camera).toBe(true);
+    expect(alice.state.outgoingCall).toMatchObject({ to: bob.userId, video: true });
+    await waitFor(() => bob.state.incomingCall, 12000, 'rings');
+    expect(bob.state.incomingCall).toMatchObject({ from: alice.userId, video: true });
+    // She sees her own camera while it rings.
+    const ringing = alice.state.outgoingCall!.sessionId;
+    await waitFor(
+      () => streamsOf(alice, ringing).some((v) => v.mine && v.kind === 'camera'),
+      10000,
+      'own camera while ringing',
+    );
+    // Bob answers with his camera on too: each gets the other's.
+    await bob.callDm(alice.userId, { video: true });
+    expect(bob.state.camera).toBe(true);
+    const sid = alice.state.voiceSession!;
+    await waitFor(
+      () =>
+        slotsOf(bob, sid).videoSlots.includes(streamIds.make(alice.peer, 'camera')) &&
+        slotsOf(alice, sid).videoSlots.includes(streamIds.make(bob.peer, 'camera')),
+      10000,
+      'both cameras',
+    );
+    // A plain call rings as one.
+    await alice.leaveVoice();
+    await waitFor(() => !bob.state.voiceSession, 6000, 'ended');
+    await alice.callDm(bob.userId);
+    await waitFor(() => bob.state.incomingCall, 12000, 'rings again');
+    expect(bob.state.incomingCall!.video).toBeUndefined();
+    expect(alice.state.camera).toBe(false);
+    // And stays a call: nothing from the last one ends it.
+    await new Promise((r) => setTimeout(r, 4000));
+    expect(alice.state.voiceSession).toBe(sid);
+    expect(alice.state.outgoingCall).not.toBeNull();
+  });
+
+  it("doesn't ring for a video call hung up while the camera was still opening", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    for (const c of [alice, bob]) c.voiceEngine = videoVoice();
+    // Alice's camera takes its time, as at a permission prompt.
+    let open!: () => void;
+    const engine = alice.voiceEngine as unknown as { startCamera: () => Promise<boolean> };
+    engine.startCamera = () => new Promise((r) => (open = () => r(false)));
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    const calling = alice.callDm(bob.userId, { video: true });
+    await waitFor(() => alice.state.voiceSession && open, 8000, 'camera opening');
+    await alice.leaveVoice();
+    open();
+    await calling;
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(alice.state.voiceSession).toBeNull();
+    expect(alice.state.outgoingCall).toBeNull();
+    expect(bob.state.incomingCall).toBeNull();
+  });
+
   it('works in a DM call too', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

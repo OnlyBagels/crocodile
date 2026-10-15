@@ -306,9 +306,14 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     this.emit('video', this.outgoing());
   }
 
-  async startCamera(deviceId?: string) {
+  /**
+   * Turns the camera on. Resolves false if it was turned off (or on again)
+   * while the camera was still opening: that late camera is closed, not shown.
+   */
+  async startCamera(deviceId?: string): Promise<boolean> {
     if (!VoiceEngine.supportsE2EE())
       throw new Error('This device cannot encrypt video end-to-end, so video is disabled.');
+    const attempt = ++this.cameraAttempt;
     let stream: MediaStream;
     try {
       stream = await this.platform.getUserMedia({
@@ -332,6 +337,10 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
               : `Could not open the camera: ${(err as Error).message}`,
       );
     }
+    if (attempt !== this.cameraAttempt) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
     this.camera?.stop();
     const track = stream.getVideoTracks()[0] ?? null;
     if (track) {
@@ -342,19 +351,27 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
     }
     this.camera = track;
     this.emitVideo();
+    return true;
   }
 
+  /** Counts camera requests, so turning it off also cancels one still opening. */
+  private cameraAttempt = 0;
+  private screenAttempt = 0;
+
   stopCamera() {
+    this.cameraAttempt++;
     if (!this.camera) return;
     this.camera.stop();
     this.camera = null;
     this.emitVideo();
   }
 
-  async startScreen(request: ScreenRequest) {
+  /** Shares a screen; resolves false if sharing was stopped while it was being picked. */
+  async startScreen(request: ScreenRequest): Promise<boolean> {
     if (!this.platform.getDisplayMedia) throw new Error('This device cannot share its screen.');
     if (!VoiceEngine.supportsE2EE())
       throw new Error('This device cannot encrypt video end-to-end, so video is disabled.');
+    const attempt = ++this.screenAttempt;
     const stream = await this.platform.getDisplayMedia(request);
     const video = stream.getVideoTracks()[0];
     if (!video) {
@@ -370,23 +387,33 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
         frameRate: { max: c.frameRate },
       })
       .catch(() => {});
+    if (attempt !== this.screenAttempt) {
+      stream.getTracks().forEach((t) => t.stop());
+      return false;
+    }
     const audio = request.audio ? (stream.getAudioTracks()[0] ?? null) : null;
     for (const t of stream.getAudioTracks()) if (t !== audio) t.stop();
-    this.stopScreen(false);
+    this.releaseScreen();
     this.screen = { video, audio, quality: request.quality };
     // Stopped from the system's own controls ("Stop sharing").
     video.addEventListener('ended', () => {
       if (this.screen?.video === video) this.stopScreen();
     });
     this.emitVideo();
+    return true;
   }
 
-  stopScreen(emit = true) {
-    if (!this.screen) return;
+  stopScreen() {
+    this.screenAttempt++;
+    if (this.releaseScreen()) this.emitVideo();
+  }
+
+  private releaseScreen() {
+    if (!this.screen) return false;
     this.screen.video.stop();
     this.screen.audio?.stop();
     this.screen = null;
-    if (emit) this.emitVideo();
+    return true;
   }
 
   frameCrypto(keyring: GroupKeyring): FrameCryptoHooks {
