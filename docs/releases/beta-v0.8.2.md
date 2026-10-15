@@ -10,6 +10,9 @@ independent security audit yet.
   with their camera on or off.
 - **Calling back right away works.** Hanging up and calling the same person
   again straight away could end the new call by itself.
+- **Video for everyone in the call.** Depending on how a connection was
+  set up, a member could be stuck on "Video is getting ready…" for the whole
+  call.
 - A video call shows as a normal call to friends still on 0.8.1 or older.
 
 ## Download

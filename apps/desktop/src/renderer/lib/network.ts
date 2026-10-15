@@ -28,5 +28,6 @@ export const ROUTE_TEXT: Record<ConnectionRoute, string> = {
   local: 'on this device',
   lan: 'same network',
   internet: 'direct',
+  direct: 'direct',
   relay: 'relayed',
 };

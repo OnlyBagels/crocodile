@@ -181,15 +181,15 @@ describe.skipIf(!haveChromium)('browser end-to-end', () => {
     expect(view!.host).toBe(alice.userId);
     expect(view!.backup).toBe(bob.userId);
     // Read from WebRTC's selected candidate pair: here everyone shares a machine.
-    // Chromium may keep a pair whose address it hides, so the route can stay
-    // unknown, but it must never be reported as across the internet or relayed.
+    // Chromium may keep a pair whose address it hides: then it's direct, or
+    // unknown for a moment, but never across the internet or relayed.
     const deadline = Date.now() + 12_000;
     let route: string | null = null;
     while (!route && Date.now() < deadline) {
       route = await carol.page.evaluate((s) => window.croc.state.sessions[s]!.route, voiceSession);
       if (!route) await new Promise((r) => setTimeout(r, 200));
     }
-    expect([null, 'local', 'lan']).toContain(route);
+    expect([null, 'local', 'lan', 'direct']).toContain(route);
 
     // Everyone's fake microphone emits a tone; listeners must decode real
     // audio, which only happens if frame decryption succeeded.

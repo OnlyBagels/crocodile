@@ -279,7 +279,13 @@ describe('network check', () => {
     expect(routeFromStats(stats('prflx', 'host', '2001:db8::7'))).toBe('internet');
     expect(routeFromStats(stats('relay', 'host'))).toBe('relay');
     expect(routeFromStats(new Map() as unknown as RTCStatsReport)).toBeNull();
-    // A peer-reflexive address the browser hides: not known yet.
-    expect(routeFromStats(stats('host', 'prflx', ''))).toBeNull();
+    // A peer-reflexive address the browser hides: still a direct path. (It
+    // stays hidden for the life of the connection, so "not known yet" kept
+    // video off for good.)
+    expect(routeFromStats(stats('host', 'prflx', ''))).toBe('direct');
+    // Unless the other end offered a server relay it might be.
+    const withRelay = stats('host', 'prflx', '') as unknown as Map<string, unknown>;
+    withRelay.set('R2', { id: 'R2', type: 'remote-candidate', candidateType: 'relay' });
+    expect(routeFromStats(withRelay as unknown as RTCStatsReport)).toBeNull();
   });
 });

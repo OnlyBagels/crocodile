@@ -154,7 +154,8 @@ export const DISCONNECTED_GRACE_MS = 8000;
  * same network, `internet` directly across networks, `relay` through a
  * coordination server's relay.
  */
-export type ConnectionRoute = 'local' | 'lan' | 'internet' | 'relay';
+/** `direct`: no relay, but the browser hides which network it crosses. */
+export type ConnectionRoute = 'local' | 'lan' | 'internet' | 'direct' | 'relay';
 
 /** The route of the candidate pair ICE selected, from `getStats()`. */
 export function routeFromStats(stats: RTCStatsReport): ConnectionRoute | null {
@@ -174,8 +175,13 @@ export function routeFromStats(stats: RTCStatsReport): ConnectionRoute | null {
   // during checks is "peer-reflexive" even between two local addresses.
   const ip = String(remote.address ?? remote.ip ?? '').toLowerCase();
   const own = String(local.address ?? local.ip ?? '').toLowerCase();
-  // Browsers hide some addresses (peer-reflexive ones): not known yet.
-  if (!ip) return null;
+  // Browsers hide an address first found during checks (peer-reflexive).
+  // Neither end is a relay candidate, so it's a direct path, unless the
+  // other end also offered a server relay that this could be.
+  if (!ip)
+    return all.some((s) => s.type === 'remote-candidate' && s.candidateType === 'relay')
+      ? null
+      : 'direct';
   if (ip.startsWith('127.') || ip === '::1') return 'local';
   // The same address at both ends: the same device, or behind the same router.
   if (ip && ip === own) return local.candidateType === 'host' ? 'local' : 'lan';
