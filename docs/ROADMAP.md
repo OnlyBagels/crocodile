@@ -67,8 +67,10 @@ report what matters most; issues and discussions are welcome.
     Microsoft Store listing (MSIX, signed by the Store, with the built-in
     updater disabled) plus winget; Apple Developer Program for Developer ID
     signing, notarization and updates that keep macOS permissions (unsigned
-    builds update in place but lose the Accessibility permission); SignPath for the
-    direct Windows download. Until then: the one-line installers.
+    builds update in place but lose the Accessibility permission); Azure
+    Artifact Signing for the direct Windows download. The release workflow is
+    ready for both; they start once the accounts exist. Until then: the
+    one-line installers.
 
 ## Paused
 
