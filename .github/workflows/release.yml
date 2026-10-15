@@ -122,15 +122,20 @@ jobs:
           # The Apple certificate is for macOS only: electron-builder would
           # otherwise try to sign the Windows build with it.
           if [ "$RUNNER_OS" != macOS ]; then unset CSC_LINK CSC_KEY_PASSWORD; fi
-          if [ "$RUNNER_OS" != Windows ] || [ -z "${AZURE_CLIENT_SECRET:-}" ]; then
-            if [ "$RUNNER_OS" = Windows ] && [ -n "${AZURE_SIGN_ENDPOINT:-}" ]; then
-              echo "::warning::AZURE_SIGN_* is set but the Azure login secrets are not: Windows build is unsigned."
+          # Windows signing needs the whole Azure login; without it, build
+          # unsigned (the config checks the AZURE_SIGN_* group is complete).
+          azure_sign="AZURE_SIGN_ENDPOINT AZURE_SIGN_ACCOUNT AZURE_SIGN_PROFILE AZURE_SIGN_PUBLISHER"
+          if [ "$RUNNER_OS" != Windows ] || [ -z "${AZURE_TENANT_ID:-}" ] ||
+            [ -z "${AZURE_CLIENT_ID:-}" ] || [ -z "${AZURE_CLIENT_SECRET:-}" ]; then
+            if [ "$RUNNER_OS" = Windows ] &&
+              [ -n "${AZURE_SIGN_ENDPOINT:-}${AZURE_SIGN_ACCOUNT:-}${AZURE_SIGN_PROFILE:-}${AZURE_SIGN_PUBLISHER:-}" ]; then
+              echo "::warning::AZURE_SIGN_* is set but not all of AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_CLIENT_SECRET are: Windows build is unsigned."
             fi
-            unset AZURE_SIGN_ENDPOINT
+            unset $azure_sign
           fi
           # Missing secrets arrive as empty strings, which electron-builder
           # would take as a certificate path. Unset them instead.
-          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID AZURE_SIGN_ENDPOINT AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
+          for v in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID $azure_sign AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
             if [ -z "${!v:-}" ]; then unset "$v"; fi
           done
           if [ -z "${CSC_LINK:-}" ]; then export CSC_IDENTITY_AUTO_DISCOVERY=false; fi

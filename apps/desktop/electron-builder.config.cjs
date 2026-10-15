@@ -8,7 +8,6 @@ const signed = !!process.env.CSC_LINK;
 /** Azure Artifact Signing for Windows; the login comes from AZURE_TENANT_ID etc. */
 function azureSigning() {
   const env = process.env;
-  if (!env.AZURE_SIGN_ENDPOINT) return undefined;
   const options = {
     endpoint: env.AZURE_SIGN_ENDPOINT,
     codeSigningAccountName: env.AZURE_SIGN_ACCOUNT,
@@ -18,6 +17,8 @@ function azureSigning() {
     publisherName: env.AZURE_SIGN_PUBLISHER,
   };
   const missing = Object.entries(options).filter(([, v]) => !v);
+  // All four, or none: a partial set is a mistake, not a choice to go unsigned.
+  if (missing.length === Object.keys(options).length) return undefined;
   if (missing.length)
     throw new Error(
       `Windows signing is half set up; missing ${missing.map(([k]) => k).join(', ')}`,
