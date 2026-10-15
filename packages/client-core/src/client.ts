@@ -3040,11 +3040,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const sessionId = await this.openDm(userId);
     const answering = this.state.incomingCall?.sessionId === sessionId;
     await this.joinVoiceSession(sessionId);
+    const attempt = this.callAttempt;
     // A missing or busy camera doesn't stop the call itself.
     if (opts.video)
       await this.setCamera(true).catch((err: unknown) =>
         this.reportError(err instanceof Error ? err.message : String(err)),
       );
+    // Hung up (or another call placed) while the camera was opening, say at
+    // its permission prompt: don't ring or answer for a call that's over.
+    if (attempt !== this.callAttempt) return;
     if (answering) {
       this.callAnswered = sessionId;
       this.store.set({ incomingCall: null });
@@ -3159,6 +3163,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // its last steps would end the new call (it's the same DM session).
     await this.leaving;
     if (this.state.voiceSession && this.state.voiceSession !== sessionId) await this.leaveVoice();
+    this.callAttempt++;
     await engine.start();
     this.store.set({ voiceSession: sessionId });
     let session = this.sessions.get(sessionId);
@@ -3177,6 +3182,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   /** Hang up. `quiet`: the other side already ended it, no need to tell them. */
   /** A hang-up still going out; a new call waits for it. */
   private leaving: Promise<void> | null = null;
+  /** Moves on with every call joined or left, so a step that waited knows. */
+  private callAttempt = 0;
 
   async leaveVoice(opts: { quiet?: boolean } = {}) {
     if (this.leaving) return this.leaving;
@@ -3190,6 +3197,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async leaveVoiceNow(opts: { quiet?: boolean }) {
     const sessionId = this.state.voiceSession;
     if (!sessionId) return;
+    this.callAttempt++;
     if (this.state.outgoingCall?.sessionId === sessionId) this.store.set({ outgoingCall: null });
     if (sessionId.startsWith('dm:') && !opts.quiet) {
       // Tell the other side, ringing or talking. Let the hang-up go out

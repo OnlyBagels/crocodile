@@ -371,6 +371,31 @@ describe('video calls', () => {
     expect(alice.state.outgoingCall).not.toBeNull();
   });
 
+  it("doesn't ring for a video call hung up while the camera was still opening", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    for (const c of [alice, bob]) c.voiceEngine = videoVoice();
+    // Alice's camera takes its time, as at a permission prompt.
+    let open!: () => void;
+    const engine = alice.voiceEngine as unknown as { startCamera: () => Promise<boolean> };
+    engine.startCamera = () => new Promise((r) => (open = () => r(false)));
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000);
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    const calling = alice.callDm(bob.userId, { video: true });
+    await waitFor(() => alice.state.voiceSession && open, 8000, 'camera opening');
+    await alice.leaveVoice();
+    open();
+    await calling;
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(alice.state.voiceSession).toBeNull();
+    expect(alice.state.outgoingCall).toBeNull();
+    expect(bob.state.incomingCall).toBeNull();
+  });
+
   it('works in a DM call too', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

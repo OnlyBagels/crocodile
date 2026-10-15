@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GroupKeyring, VoiceEngine } from '../src';
 
 describe('voice frame keys', () => {
@@ -22,5 +22,29 @@ describe('voice frame keys', () => {
     const second = gens.find((g) => g.scope !== gens[0]!.scope)!.gen;
     expect(second).toBeGreaterThan(first);
     keyring.dispose();
+  });
+});
+
+describe('camera', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('closes a camera that finishes opening after it was turned off', async () => {
+    // Frames can be encrypted here.
+    vi.stubGlobal('RTCRtpScriptTransform', class {});
+    let open!: (s: MediaStream) => void;
+    const track = { stop: vi.fn(), addEventListener: () => {}, contentHint: '' };
+    const stream = { getVideoTracks: () => [track], getTracks: () => [track] };
+    const engine = new VoiceEngine({
+      // Opening the camera waits, as it does at a permission prompt.
+      getUserMedia: () => new Promise<MediaStream>((r) => (open = r)),
+      createFrameWorker: () => ({ postMessage() {} }) as unknown as Worker,
+    });
+    const starting = engine.startCamera();
+    // The call ends before the camera is open.
+    engine.stopCamera();
+    open(stream as unknown as MediaStream);
+    expect(await starting).toBe(false);
+    expect(track.stop).toHaveBeenCalled();
+    expect(engine.outgoing().camera).toBeNull();
   });
 });
