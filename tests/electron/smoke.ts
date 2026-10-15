@@ -328,7 +328,7 @@ if (!(await a.page.getByText('Ringing…').first().isVisible()))
 await shot(a.page, '10b-ringing');
 // One place to answer: the prompt. The conversation doesn't look like a call yet.
 if (
-  (await b.page.getByRole('button', { name: 'Accept' }).count()) !== 1 ||
+  (await b.page.getByRole('button', { name: 'Accept', exact: true }).count()) !== 1 ||
   (await b.page.getByRole('button', { name: 'Start a call' }).count()) !== 0
 )
   throw new Error('the call can be answered in more than one place');
@@ -338,7 +338,7 @@ if (await b.page.getByRole('region', { name: 'Call' }).count())
 if (await a.page.getByText(/^Calling /).count())
   throw new Error('the caller sees the ringing twice');
 await shot(b.page, '10b2-incoming');
-await b.page.getByRole('button', { name: 'Accept' }).click();
+await b.page.getByRole('button', { name: 'Accept', exact: true }).click();
 await a.page.waitForFunction(() => !document.body.innerText.includes('Ringing…'), undefined, {
   timeout: 15_000,
 });
@@ -417,6 +417,21 @@ await aliceCamera.waitFor({ state: 'detached', timeout: 10_000 });
 await a.page.getByRole('button', { name: 'Leave call' }).click();
 await b.page.getByText('Call ended').waitFor({ timeout: 10_000 });
 await b.page.getByRole('button', { name: 'Leave call' }).waitFor({ state: 'detached' });
+
+// A video call: Alice's camera is on from the start; Bob answers with his.
+await a.page.getByRole('button', { name: 'Start a video call' }).click();
+await b.page.getByText('is video calling you').waitFor({ timeout: 15_000 });
+await a.page.getByRole('group', { name: 'Your camera' }).waitFor({ timeout: 15_000 });
+await shot(b.page, '10j-video-incoming');
+await b.page.getByRole('button', { name: 'Accept with video' }).click();
+await playing(a.page, /^Camera: /);
+await playing(b.page, /^Camera: /);
+await a.page.waitForTimeout(1000);
+await shot(a.page, '10k-video-call');
+await a.page.getByRole('button', { name: 'Leave call' }).click();
+await b.page
+  .getByRole('button', { name: 'Leave call' })
+  .waitFor({ state: 'detached', timeout: 10_000 });
 
 // Command palette + settings.
 // The search button shows a search icon and this system's shortcut, not the Mac ⌘ key.

@@ -828,6 +828,18 @@ describe('calls', () => {
     }
   });
 
+  it('calls back at once after hanging up, without the hang-up ending the new call', async () => {
+    const { alice, bob, sid } = await liveCall();
+    // Hang up and call straight back, while the hang-up is still going out.
+    const hangingUp = alice.leaveVoice();
+    await alice.callDm(bob.userId);
+    await hangingUp;
+    await waitFor(() => bob.state.incomingCall, 12000, 'bob rings again');
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(alice.state.voiceSession).toBe(sid);
+    expect(alice.state.outgoingCall).toMatchObject({ to: bob.userId });
+  });
+
   it('ends the call when the other side leaves it, even if the hang-up was lost', async () => {
     const { alice, bob, sid } = await liveCall();
     // Bob's app leaves the call without a word (the hang-up got lost).

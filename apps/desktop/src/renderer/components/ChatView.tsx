@@ -3,8 +3,8 @@ import {
   AtSign,
   Clock,
   Copy,
-  MailCheck,
   FolderDown,
+  MailCheck,
   MessageSquareText,
   Paperclip,
   Pencil,
@@ -15,6 +15,7 @@ import {
   Smile,
   Trash2,
   Users,
+  Video,
   X,
 } from 'lucide-react';
 import type { MessageView } from '@crocodile/client-core';
@@ -174,14 +175,26 @@ export function ChatView({
         <div className="ml-auto flex items-center gap-1">
           {/* While it rings for us, the incoming-call prompt is where to answer. */}
           {kind === 'dm' && otherUserId && !ringingIn && (
-            <IconButton
-              label="Start a call"
-              onClick={() =>
-                void client.callDm(otherUserId).catch((e) => client.reportError(e.message))
-              }
-            >
-              <Phone size={18} />
-            </IconButton>
+            <>
+              <IconButton
+                label="Start a call"
+                onClick={() =>
+                  void client.callDm(otherUserId).catch((e) => client.reportError(e.message))
+                }
+              >
+                <Phone size={18} />
+              </IconButton>
+              <IconButton
+                label="Start a video call"
+                onClick={() =>
+                  void client
+                    .callDm(otherUserId, { video: true })
+                    .catch((e) => client.reportError(e.message))
+                }
+              >
+                <Video size={18} />
+              </IconButton>
+            </>
           )}
           {kind === 'channel' && (
             <IconButton

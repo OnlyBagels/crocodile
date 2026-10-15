@@ -1,6 +1,6 @@
 import { ConnectionModal } from './modals/ConnectionModals';
 import { useEffect, useState } from 'react';
-import { Phone, PhoneOff, Server, Wifi, WifiOff } from 'lucide-react';
+import { Phone, PhoneOff, Server, Video, Wifi, WifiOff } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
 import {
   closeModal,
@@ -262,7 +262,9 @@ function CallPrompts() {
         <div className="mt-4 text-lg font-bold">
           <UserName userId={incoming.from} />
         </div>
-        <div className="text-sm text-muted">is calling you</div>
+        <div className="text-sm text-muted">
+          {incoming.video ? 'is video calling you' : 'is calling you'}
+        </div>
         <div className="mt-5 flex justify-center gap-6">
           <button
             aria-label="Decline"
@@ -282,6 +284,19 @@ function CallPrompts() {
             }}
           >
             <Phone size={22} />
+          </button>
+          <button
+            aria-label="Accept with video"
+            title="Accept with video"
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-accent text-on-accent hover:brightness-110"
+            onClick={() => {
+              navigate({ kind: 'dm', userId: incoming.from });
+              void client
+                .callDm(incoming.from, { video: true })
+                .catch((e) => client.reportError(e.message));
+            }}
+          >
+            <Video size={22} />
           </button>
         </div>
       </div>
