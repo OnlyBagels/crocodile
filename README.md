@@ -24,7 +24,7 @@ them.
   can opt in to relaying your (still encrypted) traffic through a volunteer
   server, only while a direct connection is impossible.
 - **Messages wait for offline friends.** Your device keeps them until you're
-  both online; optionally a server holds them sealed for up to a few days.
+  both online; optionally a server holds them sealed for up to a week.
 - **Files of any size, straight to your people.** Pictures, videos and other
   files go directly from one member's device to another's, encrypted, never
   through a server, and resume if the connection drops. Anyone who has a file
