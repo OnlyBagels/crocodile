@@ -31,7 +31,6 @@ export class SlotTable {
       const occupant = this.slots[i] ?? null;
       if (occupant === null) {
         victim = i;
-        victimLoud = Number.NEGATIVE_INFINITY;
         break;
       }
       const loud = lastLoud(occupant);

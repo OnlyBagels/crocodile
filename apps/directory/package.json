@@ -16,7 +16,7 @@
   "dependencies": {
     "@crocodile/crypto": "workspace:*",
     "@crocodile/protocol": "workspace:*",
-    "fastify": "^5.6.0"
+    "fastify": "^5.12.7"
   },
   "devDependencies": {
     "esbuild": "^0.28.2"

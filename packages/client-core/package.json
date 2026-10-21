@@ -12,6 +12,6 @@
   "dependencies": {
     "@crocodile/crypto": "workspace:*",
     "@crocodile/protocol": "workspace:*",
-    "zod": "^4.1.0"
+    "zod": "^4.6.7"
   }
 }

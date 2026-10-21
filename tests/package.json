@@ -12,8 +12,8 @@
     "@crocodile/relay": "workspace:*"
   },
   "devDependencies": {
-    "playwright-core": "1.63.0",
+    "playwright-core": "1.64.0",
     "esbuild": "^0.28.2",
-    "werift": "0.24.4"
+    "werift": "0.25.0"
   }
 }
