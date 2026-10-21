@@ -43,6 +43,6 @@
     "@crocodile/relay": "workspace:*",
     "esbuild": "^0.28.2",
     "postject": "1.0.0-alpha.6",
-    "werift": "0.24.4"
+    "werift": "0.25.0"
   }
 }

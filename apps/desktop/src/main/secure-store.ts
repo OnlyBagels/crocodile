@@ -35,7 +35,10 @@ export class SecureStore {
       if (!this.keychain.isEncryptionAvailable()) throw new Error('keychain unavailable');
       return this.keychain.decryptString(Buffer.from(stored.slice(4), 'base64'));
     } catch (err) {
-      throw new Error(`${KEYCHAIN_LOCKED}: can't read "${key}" from the keychain (${String(err)})`);
+      throw new Error(
+        `${KEYCHAIN_LOCKED}: can't read "${key}" from the keychain (${String(err)})`,
+        { cause: err },
+      );
     }
   }
 

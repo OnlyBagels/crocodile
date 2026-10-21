@@ -176,7 +176,7 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
             ? 'No microphone found.'
             : `Could not open the microphone: ${(err as Error).message}`;
       this.emit('error', { message });
-      throw new Error(message);
+      throw new Error(message, { cause: err });
     }
     this.stream?.getTracks().forEach((t) => t.stop());
     this.stream = stream;
@@ -335,6 +335,7 @@ export class VoiceEngine extends Emitter<VoiceEvents> {
             : name === 'NotReadableError'
               ? 'The camera is in use by another app.'
               : `Could not open the camera: ${(err as Error).message}`,
+        { cause: err },
       );
     }
     if (attempt !== this.cameraAttempt) {

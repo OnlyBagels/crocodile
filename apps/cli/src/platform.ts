@@ -47,7 +47,7 @@ export class JsonFileStore implements KeyValueStore {
         this.data = {};
         return;
       }
-      throw new Error(`Can't read ${path}: ${(err as Error).message}`);
+      throw new Error(`Can't read ${path}: ${(err as Error).message}`, { cause: err });
     }
     let data: unknown;
     try {
