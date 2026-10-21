@@ -58,6 +58,10 @@ are code-signed, browser downloads show a one-time warning; see
 
 Mobile apps are on the [roadmap](docs/ROADMAP.md).
 
+Say hi in the **Lounge**, our public space for questions, feedback and trying
+out a call: with the app installed, open `croc://join/aa3g6v2a` or paste the
+code `aa3g6v2a` under **+ Space → Join a space**.
+
 ### Command line
 
 `crocodile` sends and receives files from a terminal, for servers and
