@@ -12,7 +12,15 @@ report what matters most; issues and discussions are welcome.
 - E2E voice through the elected host's relay with speaker slots, speaking
   indicators, mute/deafen, voice activity and push-to-talk (system-wide on
   Windows, macOS and X11, including mouse side buttons), device selection.
-- DM calls with ringing.
+- DM calls with ringing, with or without video.
+- Video and screen sharing in DM calls and voice rooms: cameras, screens or
+  single windows (sharp for text or smooth for motion, with system sound on
+  Windows), full screen and pop-out viewing, all end-to-end encrypted and
+  forwarded by the room's host, never by a server.
+- Files of any size sent peer-to-peer between members, resumable, with
+  previews for pictures and videos, and passed on by anyone who has them.
+- Chat: mentions, an emoji picker, replies, edits, clickable links and invite
+  cards; space admins chosen by the owner.
 - Host election with a backup, failover on disconnect or member reports.
 - Coordination server mesh (replication, presence, routing, session
   ownership), directory with reachability checks, built-in STUN.
@@ -32,11 +40,15 @@ report what matters most; issues and discussions are welcome.
 - Friend lists hidden from servers: each list is encrypted for its owner's
   devices, and requests and answers travel as sealed notes that don't name
   their sender.
-- Main server deployment: directory, install scripts, a first coordinator
-  and a placeholder page (`deploy/main`).
+- Main server deployment: directory, install scripts and a first
+  coordinator (`deploy/main`), and the website at crocodilechat.com.
+- A mesh that scales: each record lives on a few servers chosen by
+  rendezvous hashing, and servers form a sparse, always connected overlay
+  ([MESH.md](MESH.md)).
 - Desktop app for Windows, macOS and Linux with its own design (light and
   dark themes, accents), installers, auto-update, one-line install scripts
   and an embedded coordination server.
+- `crocodile`, a command-line tool on npm for sending and receiving files.
 
 ## Next
 
@@ -46,24 +58,18 @@ report what matters most; issues and discussions are welcome.
    preference, TURN over TCP/TLS for UDP-blocked networks, pre-warming the
    backup host for sub-second failover.
 3. **MLS (RFC 9420)** for very large spaces.
-4. **Roles and permissions**: moderators with delegated signing certificates,
-   channel permissions, kicking from voice.
-5. **Rich content**: attachments sent P2P (chunked over data channels),
-   reactions, mentions, on-device search.
-6. **Screen share, then video and remote control.** Screen sharing first,
-   one sharer per voice room; then 1:1 and group video; remote control last,
-   view-only by default and only between friends who allow it each time.
+4. **Finer roles**: moderators with delegated signing certificates, channel
+   permissions, kicking from voice.
+5. **More in chat**: reactions and on-device search.
+6. **Remote control** of a shared screen, view-only by default and only
+   between friends who allow it each time.
 7. **Wayland global shortcuts** (XDG GlobalShortcuts portal) and Flathub.
 8. **Less metadata on servers**: private space memberships, and keeping the
    connected server from seeing whose presence an app follows and whom it
    befriends or messages (for example presence exchanged between friends directly).
-9. **A mesh that scales**: keep each record on a few servers chosen by
-   rendezvous hashing instead of on all of them, with a sparse, always
-   connected overlay that routes requests, instead of every server linking
-   to every other.
-10. **Server-side hardening**: abuse reporting for public directories
-    (per-IP connection limits and per-account record quotas are done).
-11. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
+9. **Server-side hardening**: abuse reporting for public directories
+   (per-IP connection limits and per-account record quotas are done).
+10. **Store and signing path** (see [DISTRIBUTION.md](DISTRIBUTION.md)):
     Microsoft Store listing (MSIX, signed by the Store, with the built-in
     updater disabled) plus winget; Apple Developer Program for Developer ID
     signing, notarization and updates that keep macOS permissions (unsigned
