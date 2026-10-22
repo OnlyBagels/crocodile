@@ -322,14 +322,31 @@ function LinkFromDevice({ go }: { go: (s: Step) => void }) {
         <div className="selectable rounded-2xl bg-accent-soft py-6 text-center font-mono text-4xl font-bold tracking-[0.25em] text-accent">
           {l.code}
         </div>
-      ) : l.step === 'claimed' ? (
+      ) : l.step === 'claimed' || l.step === 'confirmed' ? (
         <div className="text-center">
           <p className="text-sm text-muted">
-            Make sure your other device shows the same security code, then confirm it there.
+            {l.step === 'claimed'
+              ? 'Check that your other device shows exactly this security code, then confirm on both devices.'
+              : 'Now confirm on your other device too.'}
           </p>
           <div className="selectable mt-4 rounded-2xl bg-accent-soft py-6 font-mono text-4xl font-bold tracking-widest text-accent">
             {l.securityCode}
           </div>
+          {l.step === 'claimed' && (
+            <>
+              <p className="mt-3 text-xs text-faint">
+                If the codes differ, someone may be trying to intercept the link.
+              </p>
+              <div className="mt-4 flex justify-center gap-2">
+                <Button variant="ghost" onClick={() => go('returning')}>
+                  They don't match
+                </Button>
+                <Button onClick={() => void client.confirmDeviceLink()}>
+                  <Check size={16} /> They match
+                </Button>
+              </div>
+            </>
+          )}
         </div>
       ) : (
         <div className="flex flex-col items-center py-4 text-center">

@@ -571,6 +571,10 @@ await a.page.getByRole('button', { name: 'Continue' }).click();
 await a.page.getByText('They match').waitFor({ timeout: 10_000 });
 await shot(a.page, '17-link-confirm');
 await a.page.getByText('They match').click();
+// The new device takes the account only once it is confirmed there too.
+await c.page.getByRole('button', { name: 'They match' }).waitFor({ timeout: 10_000 });
+await shot(c.page, '17b-link-confirm-new-device');
+await c.page.getByRole('button', { name: 'They match' }).click();
 await c.page.getByText('The Swamp').first().waitFor({ timeout: 30_000 });
 await a.page.getByRole('button', { name: 'Done' }).click();
 await shot(c.page, '18-linked-device');

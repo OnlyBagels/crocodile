@@ -183,9 +183,16 @@ export type ServerFrame =
   ServerHello | AuthOk | RpcResponse | RpcEvent | { t: 'error'; err: RpcError };
 export type ClientFrame = ClientAuth | RpcRequest;
 
+/** 32 bytes, base64url: link keys, nonces and commitments. */
+const linkB64 = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+/** ML-KEM-768 encapsulation key, base64url (1184 bytes). */
+export const LinkKemKey = z.string().regex(/^[A-Za-z0-9_-]{1579}$/);
+
 /** Account seed sealed to a new device during linking (see link.* methods). */
 export const LinkBox = z.object({
   epk: z.string().max(64),
+  /** ML-KEM-768 ciphertext, base64url (1088 bytes). */
+  kem: z.string().regex(/^[A-Za-z0-9_-]{1451}$/),
   ct: z.string().max(4000),
   from: z.string(),
   sig: z.string(),
@@ -274,10 +281,17 @@ export const RpcParams = {
   'voice.watch': z.object({ spaceIds: z.array(userId).max(200) }),
   'signal.send': z.object({ to: PeerId, sessionId: SessionId, data: SignalData }),
   'servers.list': z.object({}),
-  /** New device: get a short code to show; the existing device enters it. */
-  'link.open': z.object({ encKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/) }),
+  /**
+   * New device: get a short code to show; the existing device enters it.
+   * `commit` binds the new device's keys to a nonce it reveals later.
+   */
+  'link.open': z.object({ encKey: linkB64, kemKey: LinkKemKey, commit: linkB64 }),
   /** Existing device: look up the new device behind a code. */
   'link.claim': z.object({ code: z.string().min(6).max(16) }),
+  /** Existing device, after link.claim: its nonce for the security code. */
+  'link.nonce': z.object({ code: z.string().min(6).max(16), nonce: linkB64 }),
+  /** New device, after link_claimed: reveal the nonce behind its commit. */
+  'link.reveal': z.object({ code: z.string().min(6).max(16), to: PeerId, nonce: linkB64 }),
   /** Existing device: deliver the sealed account seed. */
   'link.send': z.object({ code: z.string().min(6).max(16), box: LinkBox }),
   /** Opt-in relay through this coordination server (TURN), max one hour. */
@@ -321,7 +335,9 @@ export interface RpcMethods {
   'signal.send': { delivered: boolean };
   'servers.list': { servers: PublicServerInfo[] };
   'link.open': { code: string; expiresAt: number };
-  'link.claim': { peer: string; key: string; encKey: string };
+  'link.claim': { peer: string; key: string; encKey: string; kemKey: string; commit: string };
+  'link.nonce': Record<string, never>;
+  'link.reveal': Record<string, never>;
   'link.send': Record<string, never>;
   'relay.request': { grant: RelayGrant };
   'relay.release': Record<string, never>;
@@ -356,7 +372,9 @@ export interface ServerEvents {
   /** Another connection authenticated as the same device. */
   replaced: { reason: string };
   /** Linking: an existing device claimed our code (compare the security code!). */
-  link_claimed: { key: string; userId: string };
+  link_claimed: { key: string; userId: string; by: string; nonce: string };
+  /** Linking: the new device's nonce; check it against its commit. */
+  link_reveal: { nonce: string };
   /** Linking: the sealed account seed. */
   link_payload: { box: LinkBox };
   /** The relay grant ran out; the relayed connection will stop. */

@@ -130,12 +130,14 @@ export interface FedLinkQuery {
   t: 'link_query';
   qid: string;
   code: string;
+  /** The claiming device, the only one the new device may reveal its nonce to. */
+  by?: string;
 }
 
 export interface FedLinkAnswer {
   t: 'link_answer';
   qid: string;
-  found?: { peer: string; key: string; encKey: string };
+  found?: { peer: string; key: string; encKey: string; kemKey: string; commit: string };
 }
 
 /**
@@ -266,6 +268,7 @@ export const ROUTED_EVENTS = [
   'signal',
   'session_invite',
   'link_claimed',
+  'link_reveal',
   'link_payload',
   'mail',
   'relay_expired',
@@ -276,11 +279,13 @@ const id = str(200);
 const anyJson = z.unknown();
 
 const FloodBody = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('link_query'), qid: id, code: str(32) }),
+  z.object({ t: z.literal('link_query'), qid: id, code: str(32), by: PeerId.optional() }),
   z.object({
     t: z.literal('link_answer'),
     qid: id,
-    found: z.object({ peer: PeerId, key: str(64), encKey: str(64) }).optional(),
+    found: z
+      .object({ peer: PeerId, key: str(64), encKey: str(64), kemKey: str(1600), commit: str(64) })
+      .optional(),
   }),
   z.object({ t: z.literal('mail_query'), peer: PeerId, proof: MailProof.optional() }),
   z.object({

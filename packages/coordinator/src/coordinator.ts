@@ -188,10 +188,22 @@ export class Coordinator {
   /** Device-link codes opened on this server. */
   private links = new Map<
     string,
-    { peer: string; key: string; encKey: string; expiresAt: number; claimedBy?: string }
+    {
+      peer: string;
+      key: string;
+      encKey: string;
+      kemKey: string;
+      commit: string;
+      expiresAt: number;
+      claimedBy?: string;
+      revealed?: boolean;
+    }
   >();
   /** Codes this server resolved for a claiming device (code -> target peer). */
-  private claims = new Map<string, { peer: string; by: string; expiresAt: number }>();
+  private claims = new Map<
+    string,
+    { peer: string; by: string; expiresAt: number; nonceSent?: boolean }
+  >();
   private noteTimer?: ReturnType<typeof setInterval>;
 
   constructor(config: Partial<CoordinatorConfig> & Pick<CoordinatorConfig, 'name'>) {
@@ -641,7 +653,11 @@ export class Coordinator {
   // Device linking
   // -------------------------------------------------------------------------
 
-  openLink(client: ClientConnection): { code: string; expiresAt: number } {
+  openLink(
+    client: ClientConnection,
+    kemKey: string,
+    commit: string,
+  ): { code: string; expiresAt: number } {
     const now = Date.now();
     for (const [c, l] of this.links)
       if (l.expiresAt < now || l.peer === client.peer) this.links.delete(c);
@@ -651,6 +667,8 @@ export class Coordinator {
       peer: client.peer,
       key: client.publicKey,
       encKey: client.encKey,
+      kemKey,
+      commit,
       expiresAt,
     });
     return { code, expiresAt };
@@ -662,17 +680,19 @@ export class Coordinator {
     return l && l.expiresAt > Date.now() && !l.claimedBy ? l : undefined;
   }
 
+  /**
+   * The new device is told about the claim only once the existing device
+   * sends its nonce (link.nonce), which it does after it holds the new
+   * device's commit. See linkSecurityCode for why the order matters.
+   */
   async claimLink(
     client: ClientConnection,
     code: string,
-  ): Promise<{ peer: string; key: string; encKey: string }> {
-    const clean = code
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z2-7]/g, '');
-    let found: { peer: string; key: string; encKey: string } | undefined = this.findLink(clean);
-    if (found) this.links.get(clean)!.claimedBy = client.peer;
-    else found = await this.mesh.queryLink(clean);
+  ): Promise<{ peer: string; key: string; encKey: string; kemKey: string; commit: string }> {
+    const clean = cleanLinkCode(code);
+    const local = this.findLink(clean);
+    if (local) local.claimedBy = client.peer;
+    const found = local ?? (await this.mesh.queryLink(clean, client.peer));
     if (!found)
       throw new RpcFailure(
         'not_found',
@@ -683,22 +703,51 @@ export class Coordinator {
       by: client.peer,
       expiresAt: Date.now() + 10 * 60_000,
     });
-    this.deliverToPeer(found.peer, 'link_claimed', {
+    return {
+      peer: found.peer,
+      key: found.key,
+      encKey: found.encKey,
+      kemKey: found.kemKey,
+      commit: found.commit,
+    };
+  }
+
+  nonceLink(client: ClientConnection, code: string, nonce: string) {
+    const claim = this.ownClaim(client, code);
+    if (claim.nonceSent) throw new RpcFailure('conflict', 'nonce already sent');
+    const delivered = this.deliverToPeer(claim.peer, 'link_claimed', {
       key: client.publicKey,
       userId: client.userId,
+      by: client.peer,
+      nonce,
     });
-    return { peer: found.peer, key: found.key, encKey: found.encKey };
+    if (!delivered) throw new RpcFailure('unavailable', 'the new device went offline');
+    claim.nonceSent = true;
+  }
+
+  revealLink(client: ClientConnection, code: string, to: string, nonce: string) {
+    const link = this.links.get(cleanLinkCode(code));
+    if (!link || link.peer !== client.peer || link.expiresAt < Date.now() || !link.claimedBy)
+      throw new RpcFailure('not_found', 'no claimed link for this code');
+    if (link.claimedBy !== to && !link.claimedBy.startsWith('remote:'))
+      throw new RpcFailure('forbidden', 'the code was claimed by another device');
+    if (link.revealed) throw new RpcFailure('conflict', 'nonce already revealed');
+    link.revealed = true;
+    if (!this.deliverToPeer(to, 'link_reveal', { nonce }))
+      throw new RpcFailure('unavailable', 'the other device went offline');
+  }
+
+  private ownClaim(client: ClientConnection, code: string) {
+    const claim = this.claims.get(cleanLinkCode(code));
+    if (!claim || claim.by !== client.peer || claim.expiresAt < Date.now())
+      throw new RpcFailure('not_found', 'claim the code first');
+    return claim;
   }
 
   sendLink(client: ClientConnection, code: string, box: LinkBox) {
-    const clean = code
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z2-7]/g, '');
-    const claim = this.claims.get(clean);
-    if (!claim || claim.by !== client.peer || claim.expiresAt < Date.now())
-      throw new RpcFailure('not_found', 'claim the code first');
-    this.claims.delete(clean);
+    const claim = this.ownClaim(client, code);
+    if (!claim.nonceSent) throw new RpcFailure('not_found', 'send the link nonce first');
+    this.claims.delete(cleanLinkCode(code));
     if (!this.deliverToPeer(claim.peer, 'link_payload', { box }))
       throw new RpcFailure('unavailable', 'the new device went offline');
   }
@@ -789,6 +838,13 @@ export class Coordinator {
     await this.app?.close();
     this.store.close();
   }
+}
+
+function cleanLinkCode(code: string): string {
+  return code
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z2-7]/g, '');
 }
 
 function hostForUrl(host: string): string {

@@ -1,11 +1,15 @@
 import {
   createChatMessage,
   createIdentity,
+  createLinkKem,
   decodeRecoveryKey,
   encodeRecoveryKey,
   identityFromSeed,
   isSpaceMember,
   keyMatchesUserId,
+  linkCommitment,
+  linkCommitmentValid,
+  linkNonce,
   linkSecurityCode,
   openAnonymous,
   openForSelf,
@@ -28,6 +32,7 @@ import {
   userTag,
   verifyChatMessage,
   type Identity,
+  type LinkKem,
   type PrekeySecret,
 } from '@crocodile/crypto';
 import {
@@ -37,6 +42,7 @@ import {
   FileManifest,
   FileThumb,
   LIMITS,
+  LinkKemKey,
   fileMediaKind,
   NotePayload,
   fromB64u,
@@ -304,7 +310,8 @@ export interface DeviceView {
 export type LinkingState =
   | {
       role: 'new';
-      step: 'waiting' | 'claimed' | 'done' | 'error';
+      /** `confirmed`: the user said the codes match; waiting for the account. */
+      step: 'waiting' | 'claimed' | 'confirmed' | 'done' | 'error';
       code?: string;
       securityCode?: string;
       account?: string;
@@ -2501,12 +2508,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.ensureDeviceRecord();
   }
 
-  private linkTemp?: { identity: Identity; conn: CoordinatorConnection; claimedBy?: string };
+  private linkTemp?: {
+    identity: Identity;
+    kem: LinkKem;
+    conn: CoordinatorConnection;
+    claimedBy?: string;
+    /** The user confirmed the codes match on this device. */
+    confirmed?: boolean;
+    /** An account that arrived before the user confirmed, held until then. */
+    seed?: Uint8Array;
+  };
 
   /**
    * New device: get a short code to type on a device that is already signed
-   * in. Resolves when the account arrives (the user must also compare the
-   * security code shown on both screens).
+   * in. The account is taken only after the user confirms, here too, that
+   * both screens show the same security code (confirmDeviceLink).
    */
   async startDeviceLink(): Promise<void> {
     this.cancelDeviceLink();
@@ -2544,66 +2560,170 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       });
       return;
     }
-    this.linkTemp = { identity: temp, conn };
-    const { code } = await conn.request('link.open', { encKey: temp.encPublicKey });
+    const kem = createLinkKem();
+    this.linkTemp = { identity: temp, kem, conn };
+    const nonce = linkNonce();
+    const { code } = await conn.request('link.open', {
+      encKey: temp.encPublicKey,
+      kemKey: kem.publicKey,
+      commit: linkCommitment(temp.publicKey, temp.encPublicKey, kem.publicKey, nonce),
+    });
     this.store.set({ linking: { role: 'new', step: 'waiting', code: code.toUpperCase() } });
-    conn.on('link_claimed', ({ key, userId }) => {
-      if (!this.linkTemp || !keyMatchesUserId(key, userId)) return;
+    conn.on('link_claimed', ({ key, userId, by, nonce: theirNonce }) => {
+      // Only the first claim counts: once our nonce is out, a server that
+      // could make us take another nonce could choose one to match the codes.
+      if (!this.linkTemp || this.linkTemp.claimedBy || !keyMatchesUserId(key, userId)) return;
+      if (!/^[A-Za-z0-9_-]{43}$/.test(theirNonce ?? '')) return;
       this.linkTemp.claimedBy = userId;
-      this.store.set({
-        linking: {
-          role: 'new',
-          step: 'claimed',
-          code: code.toUpperCase(),
-          securityCode: linkSecurityCode(temp.publicKey, temp.encPublicKey, key),
-          account: userId,
-        },
-      });
+      const securityCode = linkSecurityCode(
+        temp.publicKey,
+        temp.encPublicKey,
+        kem.publicKey,
+        key,
+        nonce,
+        theirNonce,
+      );
+      conn
+        .request('link.reveal', { code, to: by, nonce })
+        .then(() =>
+          this.store.set({
+            linking: {
+              role: 'new',
+              step: 'claimed',
+              code: code.toUpperCase(),
+              securityCode,
+              account: userId,
+            },
+          }),
+        )
+        .catch(() => {
+          // This claim is spent (see above), so the link can't go on: a new
+          // code is the only way forward, with a fresh nonce.
+          this.closeDeviceLink();
+          this.store.set({
+            linking: {
+              role: 'new',
+              step: 'error',
+              error: 'The link was interrupted. Start again on both devices.',
+            },
+          });
+        });
     });
     conn.on('link_payload', ({ box }) => void this.onLinkPayload(box));
   }
 
   private async onLinkPayload(box: LinkBox) {
     const t = this.linkTemp;
-    if (!t?.claimedBy) return;
-    const seed = openLink(t.identity, box, t.claimedBy);
+    if (!t?.claimedBy || t.seed) return;
+    const seed = openLink(t.identity, t.kem, box, t.claimedBy);
     if (!seed) {
+      this.closeDeviceLink();
       this.store.set({
         linking: { role: 'new', step: 'error', error: 'The account could not be verified.' },
       });
       return;
     }
-    t.conn.close();
-    this.linkTemp = undefined;
+    // Signed by the claiming account and sealed to our keys, but whoever sent
+    // the claim could be the server itself: only the user, comparing codes,
+    // can tell, so hold the account until they confirm here.
+    t.seed = seed;
+    if (t.confirmed) await this.finishDeviceLink(seed);
+  }
+
+  private async finishDeviceLink(seed: Uint8Array) {
+    this.closeDeviceLink();
     this.store.set({ linking: { role: 'new', step: 'done' } });
     await this.adoptIdentity(identityFromSeed(seed));
   }
 
-  cancelDeviceLink() {
+  private closeDeviceLink() {
     this.linkTemp?.conn.close();
     this.linkTemp = undefined;
+  }
+
+  cancelDeviceLink() {
+    this.closeDeviceLink();
     this.store.set({ linking: null });
   }
 
-  private pendingLinkTarget?: { code: string; encKey: string };
+  private pendingLinkTarget?: { code: string; encKey: string; kemKey: string };
 
   /** Existing device: enter the code the new device shows. */
-  async claimDeviceLink(code: string): Promise<string> {
-    const res = await this.link!.request('link.claim', { code });
-    // The code covers the key the account will be sealed to: a server that
-    // swapped it would make the two devices show different codes.
-    const securityCode = linkSecurityCode(res.key, res.encKey, this.identity!.publicKey);
-    this.pendingLinkTarget = { code, encKey: res.encKey };
+  async claimDeviceLink(code: string, timeoutMs = 30_000): Promise<string> {
+    const link = this.link!;
+    const res = await link.request('link.claim', { code });
+    // These go into newline-separated hash inputs, so hold them to one encoding.
+    if (
+      ![res.key, res.encKey, res.commit].every((s) => /^[A-Za-z0-9_-]{43}$/.test(s ?? '')) ||
+      !LinkKemKey.safeParse(res.kemKey).success
+    )
+      throw new Error('The new device could not be verified. Start again on both devices.');
+    // Our nonce goes out only now that we hold the new device's commit, and
+    // its nonce must then match that commit. The code covers the key the
+    // account will be sealed to: a server that swapped it would make the two
+    // devices show different codes.
+    const nonce = linkNonce();
+    let stop = () => {};
+    const revealed = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(
+        () =>
+          reject(
+            new Error(
+              'The new device did not answer. Start again on both devices. If it keeps happening, someone may be interfering with the link.',
+            ),
+          ),
+        timeoutMs,
+      );
+      const off = link.once('link_reveal', ({ nonce: theirs }) => {
+        clearTimeout(timer);
+        resolve(theirs);
+      });
+      stop = () => {
+        clearTimeout(timer);
+        off();
+      };
+    });
+    // The timer can fire while link.nonce is still in flight, before anything awaits this.
+    revealed.catch(() => {});
+    let theirNonce: string;
+    try {
+      await link.request('link.nonce', { code, nonce });
+      theirNonce = await revealed;
+    } finally {
+      stop();
+    }
+    if (!linkCommitmentValid(res.key, res.encKey, res.kemKey, theirNonce, res.commit))
+      throw new Error('The new device could not be verified. Start again on both devices.');
+    const securityCode = linkSecurityCode(
+      res.key,
+      res.encKey,
+      res.kemKey,
+      this.identity!.publicKey,
+      theirNonce,
+      nonce,
+    );
+    this.pendingLinkTarget = { code, encKey: res.encKey, kemKey: res.kemKey };
     this.store.set({ linking: { role: 'existing', step: 'confirm', code, securityCode } });
     return securityCode;
   }
 
-  /** Existing device: the security codes match, send the account over. */
+  /**
+   * The user says both screens show the same security code. On the existing
+   * device this sends the account; on the new device it lets the account in.
+   */
   async confirmDeviceLink() {
-    const t = this.pendingLinkTarget;
     const linking = this.state.linking;
+    if (linking?.role === 'new') {
+      const temp = this.linkTemp;
+      if (!temp || linking.step !== 'claimed') return;
+      temp.confirmed = true;
+      this.store.set({ linking: { ...linking, step: 'confirmed' } });
+      if (temp.seed) await this.finishDeviceLink(temp.seed);
+      return;
+    }
+    const t = this.pendingLinkTarget;
     if (!t || linking?.role !== 'existing') return;
-    const box = sealLink(this.identity!, t.encKey, this.identity!.seed);
+    const box = sealLink(this.identity!, t, this.identity!.seed);
     await this.link!.request('link.send', { code: t.code, box });
     this.pendingLinkTarget = undefined;
     this.store.set({ linking: { ...linking, step: 'sent' } });

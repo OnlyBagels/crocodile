@@ -10,7 +10,15 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { Directory } from '@crocodile/directory';
-import { createChatMessage, createIdentity, signRecord } from '@crocodile/crypto';
+import {
+  createChatMessage,
+  createIdentity,
+  createLinkKem,
+  linkCommitment,
+  linkNonce,
+  sealLink,
+  signRecord,
+} from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
   recordKey,
@@ -1074,6 +1082,10 @@ describe('multiple devices', () => {
     );
     expect(shownOnNew).toBe(shownOnOld);
     await alice1.confirmDeviceLink();
+    // The account has arrived, but the new device waits for its own confirmation.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(alice2.identity).toBeNull();
+    await alice2.confirmDeviceLink();
     await waitFor(
       () => alice2.identity?.userId === alice1.userId && alice2.state.link === 'connected',
       5000,
@@ -1126,6 +1138,27 @@ describe('multiple devices', () => {
     expect(bob.isAllowedPeer(sid, `${alice1.userId}.${alice1.deviceId}`)).toBe(true);
   });
 
+  it('links when the new device confirms before the account arrives', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    await alice.claimDeviceLink(code);
+    await waitFor(() => fresh.state.linking?.step === 'claimed', 5000, 'claimed');
+    await fresh.confirmDeviceLink();
+    expect(fresh.state.linking?.step).toBe('confirmed');
+    expect(fresh.identity).toBeNull();
+    await alice.confirmDeviceLink();
+    await waitFor(() => fresh.identity?.userId === alice.userId, 5000, 'linked');
+    expect(fresh.state.linking?.step).toBe('done');
+  });
+
   it('rejects a link when the security codes are not confirmed', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -1145,7 +1178,7 @@ describe('multiple devices', () => {
     fresh.cancelDeviceLink();
   });
 
-  it('shows different security codes when the server swaps the key the account is sent to', async () => {
+  it('refuses the link when the server swaps the key the account is sent to', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
     const alice = await signUp(makeClient(net, coord), 'alice');
@@ -1157,7 +1190,8 @@ describe('multiple devices', () => {
       5000,
     );
     // A dishonest server answers the claim with its own encryption key, so the
-    // account would be sealed to the server instead of the new device.
+    // account would be sealed to the server instead of the new device. The
+    // new device's commit no longer fits the keys.
     const mallory = createIdentity();
     const link = alice.link!;
     const request = link.request.bind(link);
@@ -1166,14 +1200,164 @@ describe('multiple devices', () => {
       return method === 'link.claim' ? { ...(res as object), encKey: mallory.encPublicKey } : res;
     }) as typeof link.request;
 
+    await expect(alice.claimDeviceLink(code)).rejects.toThrow(/could not be verified/);
+    expect(alice.state.linking).toBeNull();
+    fresh.cancelDeviceLink();
+  });
+
+  it('keeps an account a server sends with its own claim out until the codes are confirmed here', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The server claims the code itself with an account it controls, plays
+    // along with the reveal, and sends that account over. Nothing here is
+    // forged cryptographically: only the person comparing codes can tell.
+    const temp = (
+      fresh as unknown as {
+        linkTemp: {
+          identity: ReturnType<typeof createIdentity>;
+          kem: ReturnType<typeof createLinkKem>;
+          conn: {
+            emit: (e: string, d: unknown) => void;
+            request: (m: string, p: unknown) => Promise<unknown>;
+          };
+        };
+      }
+    ).linkTemp;
+    temp.conn.request = async () => ({});
+    const mallory = createIdentity();
+    temp.conn.emit('link_claimed', {
+      key: mallory.publicKey,
+      userId: mallory.userId,
+      by: `${mallory.userId}.x`,
+      nonce: linkNonce(),
+    });
+    await waitFor(() => fresh.state.linking?.step === 'claimed', 5000, 'claimed');
+    const to = { encKey: temp.identity.encPublicKey, kemKey: temp.kem.publicKey };
+    temp.conn.emit('link_payload', { box: sealLink(mallory, to, mallory.seed) });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fresh.identity).toBeNull();
+    // The codes differ, so the person cancels and the account is dropped.
+    fresh.cancelDeviceLink();
+    await fresh.confirmDeviceLink();
+    expect(fresh.identity).toBeNull();
+  });
+
+  it('refuses the link when the server swaps only the ML-KEM key', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The X25519 key stays honest, so the seed would be safe today, but a
+    // recording of the box would open once X25519 falls.
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: unknown) => {
+      const res = await request(method as never, params as never);
+      return method === 'link.claim'
+        ? { ...(res as object), kemKey: createLinkKem().publicKey }
+        : res;
+    }) as typeof link.request;
+
+    await expect(alice.claimDeviceLink(code)).rejects.toThrow(/could not be verified/);
+    expect(alice.state.linking).toBeNull();
+    fresh.cancelDeviceLink();
+  });
+
+  it('a server that swaps the key and its own commit cannot make the codes match', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The strongest version of the swap: the server commits to its own key
+    // and nonce, and replaces the new device's reveal with that nonce. It has
+    // to fix both before it sees alice's nonce, and pass alice's nonce on
+    // before it sees the new device's, so there is nothing left to grind.
+    const mallory = createIdentity();
+    const malloryKem = createLinkKem();
+    const malloryNonce = linkNonce();
+    const link = alice.link!;
+    const request = link.request.bind(link);
+    link.request = (async (method: string, params: unknown) => {
+      const res = await request(method as never, params as never);
+      if (method !== 'link.claim') return res;
+      const real = res as { key: string };
+      return {
+        ...(res as object),
+        encKey: mallory.encPublicKey,
+        kemKey: malloryKem.publicKey,
+        commit: linkCommitment(real.key, mallory.encPublicKey, malloryKem.publicKey, malloryNonce),
+      };
+    }) as typeof link.request;
+    const emit = link.emit.bind(link);
+    link.emit = ((ev: string, d: unknown) =>
+      emit(
+        ev as never,
+        (ev === 'link_reveal' ? { nonce: malloryNonce } : d) as never,
+      )) as typeof link.emit;
+
     const shownOnAlice = await alice.claimDeviceLink(code);
     const shownOnNew = await waitFor(
       () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.securityCode : undefined),
       5000,
       'claimed',
     );
-    // The person comparing the screens sees a mismatch and doesn't confirm.
+    // A one in a million chance of a match per attempt, and each attempt is
+    // a link the person sees fail.
     expect(shownOnAlice).not.toBe(shownOnNew);
+    fresh.cancelDeviceLink();
+  });
+
+  it('the new device takes only the first claim', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    const shownOnAlice = await alice.claimDeviceLink(code);
+    await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.securityCode : undefined),
+      5000,
+      'claimed',
+    );
+    // A second claim, with a nonce chosen after the new device revealed its
+    // own, must not change the code it shows.
+    const conn = (
+      fresh as unknown as { linkTemp: { conn: { emit: (e: string, d: unknown) => void } } }
+    ).linkTemp.conn;
+    conn.emit('link_claimed', {
+      key: alice.identity!.publicKey,
+      userId: alice.userId,
+      by: `${alice.userId}.${alice.deviceId}`,
+      nonce: linkNonce(),
+    });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(fresh.state.linking?.role === 'new' && fresh.state.linking.securityCode).toBe(
+      shownOnAlice,
+    );
     fresh.cancelDeviceLink();
   });
 });

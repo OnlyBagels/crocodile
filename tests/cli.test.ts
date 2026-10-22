@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CrocodileClient } from '@crocodile/client-core';
 import { run, type Io } from '../apps/cli/src/cli';
+import { createCliPlatform } from '../apps/cli/src/platform';
 import { startCoordinator, waitFor } from './helpers';
 
 /**
@@ -39,6 +41,50 @@ function person(name: string, server: string, at?: { home: string; cwd: string }
   };
   const cmd = (...args: string[]) => run([...args, '--server', server], io);
   return { name, home, cwd, out, err, io, cmd, stop };
+}
+
+/** A signed-in app on another computer, the side that types the link code in. */
+async function signedInApp(name: string, server: string) {
+  const ref: { client?: CrocodileClient } = {};
+  const { platform, kv } = createCliPlatform({
+    dir: tempDir(`${name}-app`),
+    version: 'test',
+    stun: () => ref.client?.stunUrls ?? [],
+  });
+  const client = new CrocodileClient(platform, { directories: [], preferredServers: [server] });
+  ref.client = client;
+  // Saves are deferred: write before the folder is removed, as the CLI does on close.
+  stops.push(async () => {
+    await client.shutdown();
+    kv.flush();
+  });
+  await client.init();
+  await client.createAccount(name);
+  await waitFor(() => client.state.link === 'connected' && client.state.me, 15_000, 'app online');
+  return client;
+}
+
+/**
+ * Runs `crocodile link` on `newcomer` while `app` types the code in and
+ * confirms, and answers the terminal's question with `answer`.
+ */
+async function linkFromApp(
+  newcomer: ReturnType<typeof person>,
+  app: CrocodileClient,
+  answer: (shownOnApp: string, shownHere: string) => string,
+) {
+  let shownOnApp!: (code: string) => void;
+  const appCode = new Promise<string>((r) => (shownOnApp = r));
+  newcomer.io.ask = async () => answer(await appCode, newcomer.err.join('\n'));
+  const linking = newcomer.cmd('link');
+  const code = await waitFor(
+    () => newcomer.err.join('\n').match(/\b[A-Z2-7]{8}\b/)?.[0],
+    15_000,
+    'link code',
+  );
+  shownOnApp(await app.claimDeviceLink(code));
+  await app.confirmDeviceLink();
+  return linking;
 }
 
 describe('crocodile (command line)', () => {
@@ -105,6 +151,44 @@ describe('crocodile (command line)', () => {
     expect(readFileSync(again.out.at(-1)!).equals(data)).toBe(true);
     expect(await sending).toBe(0);
   }, 180_000);
+
+  it('links this computer once the security code is confirmed on both sides', async () => {
+    const coord = await startCoordinator();
+    stops.push(() => coord.stop());
+    const app = await signedInApp('erin', coord.url);
+    const laptop = person('erin-laptop', coord.url);
+    const linked = await linkFromApp(laptop, app, (onApp, here) =>
+      here.includes(onApp) ? 'yes' : 'no',
+    );
+    expect({ linked, err: laptop.err }).toMatchObject({ linked: 0 });
+    const { username, tag } = app.state.me!;
+    expect(laptop.out.at(-1)).toBe(`${username}#${tag}`);
+    expect(await laptop.cmd('whoami')).toBe(0);
+    expect(laptop.out.at(-1)).toContain(app.userId);
+  }, 90_000);
+
+  it('links nothing when the codes are not confirmed here, or there is no terminal to ask', async () => {
+    const coord = await startCoordinator();
+    stops.push(() => coord.stop());
+    const app = await signedInApp('fred', coord.url);
+    const laptop = person('fred-laptop', coord.url);
+    expect(await linkFromApp(laptop, app, () => 'no')).toBe(1);
+    expect(laptop.err.at(-1)).toMatch(/not confirmed/);
+    expect(await laptop.cmd('whoami')).not.toBe(0);
+
+    const server = person('fred-server', coord.url);
+    const linking = server.cmd('link');
+    const code = await waitFor(
+      () => server.err.join('\n').match(/\b[A-Z2-7]{8}\b/)?.[0],
+      15_000,
+      'link code',
+    );
+    await app.claimDeviceLink(code);
+    await app.confirmDeviceLink();
+    expect(await linking).toBe(1);
+    expect(server.err.at(-1)).toMatch(/needs a terminal/);
+    expect(await server.cmd('whoami')).not.toBe(0);
+  }, 90_000);
 
   it('leaves a damaged keys file alone instead of starting over', async () => {
     const coord = await startCoordinator();

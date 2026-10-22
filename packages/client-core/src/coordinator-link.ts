@@ -57,6 +57,7 @@ const FORWARDED_EVENTS: (keyof ServerEvents)[] = [
   'session_invite',
   'replaced',
   'link_claimed',
+  'link_reveal',
   'link_payload',
   'relay_expired',
   'mail',

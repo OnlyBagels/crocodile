@@ -91,6 +91,9 @@ export function LinkDeviceModal() {
           <p className="mt-3 font-semibold">
             Your account was sent to the new device, end-to-end encrypted.
           </p>
+          <p className="mt-2 text-sm text-muted">
+            Confirm the code on the new device too, if you haven't yet.
+          </p>
         </div>
       )}
       {error && <p className="mt-3 text-sm text-danger">{error}</p>}

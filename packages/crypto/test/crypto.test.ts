@@ -19,10 +19,14 @@ import {
   acceptChannel,
   answerChannel,
   createChannelKeys,
+  createLinkKem,
   createPrekey,
   encryptText,
   exportChains,
   importChain,
+  linkCommitment,
+  linkCommitmentValid,
+  linkNonce,
   linkSecurityCode,
   openAnonymous,
   openForSelf,
@@ -402,16 +406,31 @@ describe('hybrid post-quantum sealed boxes', () => {
   it('links devices: only the new device opens, and the security codes agree', () => {
     const account = createIdentity();
     const temp = createIdentity();
-    const box = sealLink(account, temp.encPublicKey, account.seed);
-    expect(openLink(temp, box, account.userId)).toEqual(account.seed);
-    expect(openLink(temp, box, createIdentity().userId)).toBeNull();
-    expect(openLink(createIdentity(), box, account.userId)).toBeNull();
-    const shown = linkSecurityCode(temp.publicKey, temp.encPublicKey, account.publicKey);
+    const kem = createLinkKem();
+    const to = { encKey: temp.encPublicKey, kemKey: kem.publicKey };
+    const box = sealLink(account, to, account.seed);
+    expect(openLink(temp, kem, box, account.userId)).toEqual(account.seed);
+    expect(openLink(temp, kem, box, createIdentity().userId)).toBeNull();
+    expect(openLink(createIdentity(), kem, box, account.userId)).toBeNull();
+    expect(openLink(temp, createLinkKem(), box, account.userId)).toBeNull();
+    const nNew = linkNonce();
+    const nOld = linkNonce();
+    const [k, e, m] = [temp.publicKey, temp.encPublicKey, kem.publicKey];
+    const commit = linkCommitment(k, e, m, nNew);
+    expect(linkCommitmentValid(k, e, m, nNew, commit)).toBe(true);
+    const shown = linkSecurityCode(k, e, m, account.publicKey, nNew, nOld);
     expect(shown).toMatch(/^\d{3} \d{3}$/);
-    // A different encryption key gives a different code (a swap shows).
-    expect(
-      linkSecurityCode(temp.publicKey, createIdentity().encPublicKey, account.publicKey),
-    ).not.toBe(shown);
+    // A different X25519 or ML-KEM key, or the nonces swapped, gives a different code.
+    const other = createIdentity().encPublicKey;
+    const otherKem = createLinkKem().publicKey;
+    expect(linkSecurityCode(k, other, m, account.publicKey, nNew, nOld)).not.toBe(shown);
+    expect(linkSecurityCode(k, e, otherKem, account.publicKey, nNew, nOld)).not.toBe(shown);
+    expect(linkSecurityCode(k, e, m, account.publicKey, nOld, nNew)).not.toBe(shown);
+    // The commit holds the new device to its keys and its nonce.
+    expect(linkCommitmentValid(k, other, m, nNew, commit)).toBe(false);
+    expect(linkCommitmentValid(k, e, otherKem, nNew, commit)).toBe(false);
+    expect(linkCommitmentValid(k, e, m, linkNonce(), commit)).toBe(false);
+    expect(linkCommitmentValid(k, e, m, 'short', commit)).toBe(false);
   });
 });
 

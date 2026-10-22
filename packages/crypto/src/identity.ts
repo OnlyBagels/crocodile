@@ -147,18 +147,83 @@ export function decodeEncKey(encPublicKey: string): Uint8Array {
   return k;
 }
 
+// ---------------------------------------------------------------------------
+// Device linking security code (commit, then reveal).
+//
+//   1. new device: picks nonce nN, sends commit = H(newKey, newEncKey, newKemKey, nN)
+//   2. existing device: receives the keys and the commit, then picks nonce nE
+//   3. new device: receives nE, then reveals nN
+//   4. existing device: checks nN against the commit
+//   both show SAS = H(newKey, newEncKey, newKemKey, accountKey, nN, nE)
+//
+// Both keys the account is sealed to go in: sealLink is hybrid, so a server
+// that swapped only the ML-KEM key would read the seed as soon as it could
+// break X25519.
+//
+// A six-digit code alone is 20 bits: a server that sees the new device's keys
+// before choosing its own can try a million key pairs until the codes match.
+// Here the server must fix its keys (by the commit) before it learns nE, and
+// must pass nE on before it learns nN, so each attempt matches with
+// probability 1e-6 and costs a visible failed link.
+// ---------------------------------------------------------------------------
+
+export function linkNonce(): string {
+  return toB64u(randomBytes(32));
+}
+
+/** The new device's binding to its keys and nonce, sent before it sees the other nonce. */
+export function linkCommitment(
+  newDeviceKey: string,
+  newDeviceEncKey: string,
+  newDeviceKemKey: string,
+  nonce: string,
+): string {
+  return toB64u(
+    sha256(
+      utf8.encode(
+        `croc/v3/link-commit\n${newDeviceKey}\n${newDeviceEncKey}\n${newDeviceKemKey}\n${nonce}`,
+      ),
+    ),
+  );
+}
+
+export function linkCommitmentValid(
+  newDeviceKey: string,
+  newDeviceEncKey: string,
+  newDeviceKemKey: string,
+  nonce: string,
+  commitment: string,
+): boolean {
+  try {
+    if (fromB64u(nonce).length !== 32) return false;
+    return bytesEqual(
+      fromB64u(linkCommitment(newDeviceKey, newDeviceEncKey, newDeviceKemKey, nonce)),
+      fromB64u(commitment),
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Six-digit code both devices show while linking. If they match, nobody
  * (including the coordination server) swapped the new device's signing key
- * or the encryption key the account is sent to.
+ * or either encryption key the account is sent to. Only meaningful when the
+ * existing device checked `newNonce` against the commitment it got before
+ * sending `existingNonce`.
  */
 export function linkSecurityCode(
   newDeviceKey: string,
   newDeviceEncKey: string,
+  newDeviceKemKey: string,
   accountKey: string,
+  newNonce: string,
+  existingNonce: string,
 ): string {
   const d = sha256(
-    utf8.encode(`croc/v2/link-sas\n${newDeviceKey}\n${newDeviceEncKey}\n${accountKey}`),
+    utf8.encode(
+      `croc/v3/link-sas\n${newDeviceKey}\n${newDeviceEncKey}\n${newDeviceKemKey}\n${accountKey}\n${newNonce}\n${existingNonce}`,
+    ),
   );
   const n = ((d[0]! << 16) | (d[1]! << 8) | d[2]!) % 1_000_000;
   const s = String(n).padStart(6, '0');

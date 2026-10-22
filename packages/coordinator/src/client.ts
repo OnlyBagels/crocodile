@@ -356,15 +356,29 @@ export class ClientConnection implements ClientHandle {
       case 'servers.list':
         return { servers: [hub.info, ...hub.mesh.knownServers()].map(toPublicServerInfo) };
       case 'link.open': {
-        const { encKey } = p as unknown as { encKey: string };
+        const { encKey, kemKey, commit } = p as unknown as {
+          encKey: string;
+          kemKey: string;
+          commit: string;
+        };
         this.encKey = encKey;
-        return hub.openLink(this);
+        return hub.openLink(this, kemKey, commit);
       }
       case 'link.claim': {
         if (!this.linkLimiter.take())
           throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
         const { code } = p as unknown as { code: string };
         return hub.claimLink(this, code);
+      }
+      case 'link.nonce': {
+        const { code, nonce } = p as unknown as { code: string; nonce: string };
+        hub.nonceLink(this, code, nonce);
+        return {};
+      }
+      case 'link.reveal': {
+        const { code, to, nonce } = p as unknown as { code: string; to: string; nonce: string };
+        hub.revealLink(this, code, to, nonce);
+        return {};
       }
       case 'link.send': {
         const { code, box } = p as unknown as { code: string; box: LinkBox };

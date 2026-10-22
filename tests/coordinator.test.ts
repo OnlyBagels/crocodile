@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createIdentity,
+  createLinkKem,
   createPrekey,
   isSpaceMember,
+  linkNonce,
   randomDeviceId,
   randomId,
   sealAnonymous,
   sealForSelf,
+  sealLink,
   sealToDevice,
   signRecord,
   spaceIdFor,
@@ -1257,5 +1260,35 @@ describe('version', () => {
   it('refuses a version longer than ServerInfo allows', async () => {
     expect((await server({ version: 'v'.repeat(32) })).info.version).toHaveLength(32);
     await expect(startCoordinator({ version: 'v'.repeat(33) })).rejects.toThrow(/version/);
+  });
+});
+
+describe('device linking', () => {
+  it('holds the link steps to their order and to the devices in them', async () => {
+    const c = await server();
+    const fresh = await user(c);
+    const encKey = fresh.identity.encPublicKey;
+    // An ML-KEM key of the wrong length never gets a code.
+    await expect(
+      fresh.conn.request('link.open', { encKey, kemKey: 'A'.repeat(1578), commit: linkNonce() }),
+    ).rejects.toThrow();
+    const kemKey = createLinkKem().publicKey;
+    const { code } = await fresh.conn.request('link.open', { encKey, kemKey, commit: linkNonce() });
+    const existing = await user(c);
+    await existing.conn.request('link.claim', { code });
+    // The account can't go out before the existing device's nonce has.
+    const box = sealLink(existing.identity, { encKey, kemKey }, new Uint8Array(32));
+    await expect(existing.conn.request('link.send', { code, box })).rejects.toThrow(/nonce/);
+    const claimed = new Promise<{ by: string }>((r) => fresh.conn.on('link_claimed', r));
+    await existing.conn.request('link.nonce', { code, nonce: linkNonce() });
+    const { by } = await claimed;
+    expect(by).toBe(existing.conn.peer);
+    // The new device's nonce goes only to the device that claimed the code.
+    const other = await user(c);
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: other.conn.peer, nonce: linkNonce() }),
+    ).rejects.toThrow(/another device/);
+    await fresh.conn.request('link.reveal', { code, to: by, nonce: linkNonce() });
+    await existing.conn.request('link.send', { code, box });
   });
 });

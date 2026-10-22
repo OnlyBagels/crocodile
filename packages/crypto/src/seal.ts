@@ -274,57 +274,82 @@ export function openForSelf(
 }
 
 // ---------------------------------------------------------------------------
-// Device linking: the account seed sealed to a new device's temporary
-// identity (X25519, ephemeral-static, signed by the account key).
+// Device linking: the account seed sealed to a new device's temporary keys,
+// hybrid like sealToDevice (X25519 ‖ ML-KEM-768 through HKDF), signed by the
+// account key. The seed is the account, so a recording of this one box must
+// not open with a future quantum computer either.
 // ---------------------------------------------------------------------------
+
+/** The new device's temporary ML-KEM-768 key for receiving the account. */
+export interface LinkKem {
+  /** Encapsulation key, base64url (1184 bytes). */
+  publicKey: string;
+  secretKey: Uint8Array;
+}
+
+export function createLinkKem(): LinkKem {
+  const kem = ml_kem768.keygen(randomBytes(64));
+  return { publicKey: toB64u(kem.publicKey), secretKey: kem.secretKey };
+}
+
+const LINK_DOMAIN = 'croc/v2/link';
+
+function linkKey(
+  ssX: Uint8Array,
+  ssKem: Uint8Array,
+  epk: Uint8Array,
+  rx: Uint8Array,
+  kem: Uint8Array,
+) {
+  const okm = hkdfSha256(concatBytes(ssX, ssKem), concatBytes(epk, rx, kem), LINK_DOMAIN, 44);
+  return { key: okm.slice(0, 32), nonce: okm.slice(32, 44) };
+}
+
+function linkSignedPart(box: Omit<LinkBox, 'sig'>, to: string, toKem: string) {
+  return { epk: box.epk, kem: box.kem, ct: box.ct, from: box.from, to, toKem };
+}
 
 export function sealLink(
   sender: Identity,
-  recipientEncKey: string,
+  recipient: { encKey: string; kemKey: string },
   plaintext: Uint8Array,
 ): LinkBox {
-  const recipient = decodeEncKey(recipientEncKey);
+  const rx = decodeEncKey(recipient.encKey);
   const eph = randomBytes(32);
   const epk = x25519.getPublicKey(eph);
-  const okm = hkdfSha256(
-    x25519.getSharedSecret(eph, recipient),
-    concatBytes(epk, recipient),
-    'croc/v1/link',
-    44,
+  const { cipherText: kem, sharedSecret: ssKem } = ml_kem768.encapsulate(
+    fromB64u(recipient.kemKey),
   );
-  const ct = aesGcmEncrypt(okm.slice(0, 32), okm.slice(32), plaintext);
+  const { key, nonce } = linkKey(x25519.getSharedSecret(eph, rx), ssKem, epk, rx, kem);
   const unsigned = {
     epk: toB64u(epk),
-    ct: toB64u(ct),
+    kem: toB64u(kem),
+    ct: toB64u(aesGcmEncrypt(key, nonce, plaintext)),
     from: sender.publicKey,
-    to: recipientEncKey,
   };
   return {
-    epk: unsigned.epk,
-    ct: unsigned.ct,
-    from: sender.publicKey,
-    sig: sign(sender, 'croc/v1/link', unsigned),
+    ...unsigned,
+    sig: sign(sender, LINK_DOMAIN, linkSignedPart(unsigned, recipient.encKey, recipient.kemKey)),
   };
 }
 
 export function openLink(
   recipient: Identity,
+  kem: LinkKem,
   box: LinkBox,
   expectedUserId: string,
 ): Uint8Array | null {
   if (!keyMatchesUserId(box.from, expectedUserId)) return null;
-  const unsigned = { epk: box.epk, ct: box.ct, from: box.from, to: recipient.encPublicKey };
-  if (!verifyPayload(box.from, 'croc/v1/link', unsigned, box.sig)) return null;
+  const signed = linkSignedPart(box, recipient.encPublicKey, kem.publicKey);
+  if (!verifyPayload(box.from, LINK_DOMAIN, signed, box.sig)) return null;
   try {
     const epk = fromB64u(box.epk);
-    const own = decodeEncKey(recipient.encPublicKey);
-    const okm = hkdfSha256(
-      x25519.getSharedSecret(recipient.encSecret, epk),
-      concatBytes(epk, own),
-      'croc/v1/link',
-      44,
-    );
-    return aesGcmDecrypt(okm.slice(0, 32), okm.slice(32), fromB64u(box.ct));
+    const kemCt = fromB64u(box.kem);
+    const ssX = x25519.getSharedSecret(recipient.encSecret, epk);
+    const ssKem = ml_kem768.decapsulate(kemCt, kem.secretKey);
+    const rx = decodeEncKey(recipient.encPublicKey);
+    const { key, nonce } = linkKey(ssX, ssKem, epk, rx, kemCt);
+    return aesGcmDecrypt(key, nonce, fromB64u(box.ct));
   } catch {
     return null;
   }

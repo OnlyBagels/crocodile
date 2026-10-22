@@ -8,7 +8,10 @@ import {
 import type { Coordinator, CoordinatorConfig } from '@crocodile/coordinator';
 import {
   createIdentity,
+  createLinkKem,
   createPrekey,
+  linkCommitment,
+  linkNonce,
   sealToDevice,
   signMailProof,
   signRecord,
@@ -595,12 +598,34 @@ describe('across servers that are not linked', () => {
     await new Promise((r) => setTimeout(r, 2000));
     const [x, y] = apart(servers);
     const fresh = await user(x);
+    const kemKey = createLinkKem().publicKey;
+    const commit = linkCommitment('k', 'e', kemKey, linkNonce());
     const { code } = await fresh.conn.request('link.open', {
       encKey: createIdentity().encPublicKey,
+      kemKey,
+      commit,
     });
     const existing = await user(y);
     const found = await existing.conn.request('link.claim', { code });
     expect(found.peer).toBe(fresh.conn.peer);
+    expect(found.kemKey).toBe(kemKey);
+    expect(found.commit).toBe(commit);
+    // The nonce and the reveal travel between the two servers too.
+    const claimed = new Promise<{ by: string; nonce: string }>((r) =>
+      fresh.conn.on('link_claimed', r),
+    );
+    const revealed = new Promise<{ nonce: string }>((r) => existing.conn.on('link_reveal', r));
+    const theirs = linkNonce();
+    await existing.conn.request('link.nonce', { code, nonce: theirs });
+    const c = await claimed;
+    expect(c).toMatchObject({ by: existing.conn.peer, nonce: theirs });
+    const mine = linkNonce();
+    await fresh.conn.request('link.reveal', { code, to: c.by, nonce: mine });
+    expect((await revealed).nonce).toBe(mine);
+    // One reveal per code.
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: c.by, nonce: linkNonce() }),
+    ).rejects.toThrow();
   });
 
   it('erases a deleted account everywhere its records live', async () => {

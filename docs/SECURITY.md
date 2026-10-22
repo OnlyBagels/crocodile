@@ -111,9 +111,18 @@ picture size.
   the hash of the encrypted blocks' SHA-256 list is in the author-signed
   manifest. Stored encrypted as received.
 - Device linking: short one-time code plus a 6-digit security code compared
-  on both screens, then a hybrid-encrypted, signed transfer. The code covers
-  the new device's signing key and the encryption key the account is sent
-  to, so a server that swaps either makes the codes differ.
+  on both screens, then a hybrid-encrypted (X25519 + ML-KEM-768), signed
+  transfer. The code covers the new device's signing key, both encryption
+  keys the account is sent to, and a nonce from each device. The new device
+  commits to its keys and nonce before the existing device sends its own
+  nonce, and reveals its nonce only after receiving that one, so a server
+  that swaps a key can't search for keys that give matching codes: each try
+  matches one time in a million and ends the link, which then has to be
+  started again on both devices with a new code. The user confirms the codes
+  match on both devices: the existing device sends the account only then,
+  and the new device holds an account that arrives early until then, so a
+  server that claims the code with an account of its own can't sign the new
+  device into it.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
   kept in the OS keychain (Electron `safeStorage`).

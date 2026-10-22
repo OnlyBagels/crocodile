@@ -1,3 +1,4 @@
+import { createInterface } from 'node:readline';
 import { run } from './cli';
 
 const tty = process.stderr.isTTY;
@@ -26,4 +27,19 @@ void run(process.argv.slice(2), {
   env: process.env,
   cwd: process.cwd(),
   interrupted,
+  ask: process.stdin.isTTY
+    ? (question) =>
+        new Promise((resolve) => {
+          const rl = createInterface({ input: process.stdin, output: process.stderr });
+          // readline takes Ctrl+C for itself; hand it on so the command stops as usual.
+          rl.on('SIGINT', () => {
+            rl.close();
+            process.emit('SIGINT');
+          });
+          rl.question(question, (answer) => {
+            rl.close();
+            resolve(answer);
+          });
+        })
+    : undefined,
 }).then((code) => process.exit(code));
