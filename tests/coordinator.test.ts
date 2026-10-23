@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createIdentity,
   createPrekey,
@@ -97,6 +97,189 @@ describe('records', () => {
       prefix: recordKey.memberPrefix(spaceId),
     });
     expect(members.records).toHaveLength(2);
+  });
+
+  it('does not let a stranger enumerate invite codes', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    const eve = await user(c); // never handed the invite code
+
+    // No prefix sweep reveals an invite. The server's undefined invite shard
+    // used to serve every invite it held for any prefix >= 3 chars.
+    for (const prefix of ['invite:', 'invite', 'inv']) {
+      const res = await eve.conn.request('records.list', { prefix, limit: 5000 });
+      expect(res.records.some((r) => r.key.startsWith('invite:'))).toBe(false);
+    }
+
+    // A subscription must not stream invites either. Subscribe to the invite
+    // and friends prefixes, then put a fresh invite and a fresh friends record;
+    // only the non-invite one should arrive.
+    await eve.conn.request('records.subscribe', { prefixes: ['invite:', 'friends:'] });
+    const code2 = randomId(6);
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(code2), {
+          spaceId,
+          code: code2,
+          expiresAt: null,
+        }),
+      }),
+    );
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'friends', recordKey.friends(alice.identity.userId), {
+          friends: [],
+          blocked: [],
+        }),
+      }),
+    );
+    const key = (e: { d: unknown }) => {
+      const d = e.d as { record?: { key?: string }; key?: string };
+      return d.record?.key ?? d.key ?? '';
+    };
+    await waitFor(
+      () => eve.events.find((e) => e.ev === 'record' && key(e).startsWith('friends:')),
+      2000,
+      'non-invite record over the subscription',
+    );
+    expect(eve.events.some((e) => e.ev === 'record' && key(e).startsWith('invite:'))).toBe(false);
+
+    // The legitimate path is untouched: with the exact code in hand, get works.
+    const got = await eve.conn.request('records.get', { keys: [recordKey.invite(code)] });
+    expect(got.records.map((r) => r.key)).toEqual([recordKey.invite(code)]);
+  });
+});
+
+describe('invites', () => {
+  const DAY = 86_400_000;
+  const membership = (u: TestUser, spaceId: string, inviteCode: string) =>
+    signRecord(u.identity, 'member', recordKey.member(spaceId, u.identity.userId), {
+      spaceId,
+      userId: u.identity.userId,
+      inviteCode,
+    });
+
+  it('keeps a never-expiring invite working after a week-long one has expired', async () => {
+    const c = await server();
+    const alice = await user(c);
+    // createSpace's invite never expires.
+    const { spaceId, code: permanent } = await createSpace(alice);
+    const weekly = randomId(6);
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(weekly), {
+          spaceId,
+          code: weekly,
+          expiresAt: Date.now() + 7 * DAY,
+        }),
+      }),
+    );
+    const bob = await user(c);
+    const carol = await user(c);
+
+    // Eight days on, as the coordinator sees it (it runs in this process).
+    const later = Date.now() + 8 * DAY;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(later);
+      const late = await bob.conn.request('records.put', {
+        record: membership(bob, spaceId, weekly),
+      });
+      expect(late.accepted).toBe(false);
+      expect(late.reason).toMatch(/expired/);
+      await joinSpace(carol, spaceId, permanent);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refuses a revoked invite to someone who has not joined yet', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const carol = await user(c);
+    const { spaceId, code } = await createSpace(alice);
+    await joinSpace(bob, spaceId, code);
+
+    const [invite] = (await alice.conn.request('records.get', { keys: [recordKey.invite(code)] }))
+      .records as SignedRecord<'invite'>[];
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(
+          alice.identity,
+          'invite',
+          recordKey.invite(code),
+          { ...invite!.body, revoked: true },
+          invite!.version + 1,
+        ),
+      }),
+    );
+    const refused = await carol.conn.request('records.put', {
+      record: membership(carol, spaceId, code),
+    });
+    expect(refused.accepted).toBe(false);
+    expect(refused.reason).toMatch(/revoked/);
+    // Bob, who joined with it before, is still a member.
+    const members = await alice.conn.request('records.list', {
+      prefix: recordKey.memberPrefix(spaceId),
+    });
+    expect(members.records.map((r) => r.key)).toContain(
+      recordKey.member(spaceId, bob.identity.userId),
+    );
+  });
+
+  it('a reset marker refuses older invites but keeps a re-stamped one', async () => {
+    const c = await server();
+    const alice = await user(c);
+    const bob = await user(c);
+    const carol = await user(c);
+    const { spaceId, code: kept } = await createSpace(alice);
+    const other = randomId(6);
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(alice.identity, 'invite', recordKey.invite(other), {
+          spaceId,
+          code: other,
+          expiresAt: null,
+        }),
+      }),
+    );
+
+    // Clear all links: bump the space marker, and re-stamp the one we keep past it.
+    const [space] = (await alice.conn.request('records.get', { keys: [recordKey.space(spaceId)] }))
+      .records as SignedRecord<'space'>[];
+    const at = Date.now();
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(
+          alice.identity,
+          'space',
+          recordKey.space(spaceId),
+          { ...space!.body, invitesResetAt: at },
+          space!.version + 1,
+        ),
+      }),
+    );
+    expectAccepted(
+      await alice.conn.request('records.put', {
+        record: signRecord(
+          alice.identity,
+          'invite',
+          recordKey.invite(kept),
+          { spaceId, code: kept, expiresAt: null },
+          at + 1,
+        ),
+      }),
+    );
+
+    const refused = await bob.conn.request('records.put', {
+      record: membership(bob, spaceId, other),
+    });
+    expect(refused.accepted).toBe(false);
+    expect(refused.reason).toMatch(/reset/);
+    // The kept link, re-stamped past the marker, still admits.
+    await joinSpace(carol, spaceId, kept);
   });
 });
 

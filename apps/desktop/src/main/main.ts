@@ -16,11 +16,13 @@ import {
 } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
 import { configureGlobalPtt, stopGlobalPtt } from './global-ptt';
-import { FileExports, FileStore, RISKY_EXTENSIONS } from './file-store';
+import { FileExports, FileStore, RISKY_EXTENSIONS, safeFileName } from './file-store';
 import { SecureStore } from './secure-store';
+import { isAllowedNavigation } from './navigation';
 import { createUpdateEngine } from './update-engines';
 import { UpdateController } from './updates';
 import type {
@@ -186,15 +188,9 @@ ipcMain.handle('files:read', (_e, id: string, index: number, length: number) =>
 ipcMain.handle('files:delete', (_e, id: string) => fileStore.delete(id));
 ipcMain.handle('files:usage', () => fileStore.usage());
 
-/** A name to offer when saving: the UI's suggestion without folders. */
-function safeName(name: unknown) {
-  const n = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
-  return n.replace(/^[.\s]+/, '').slice(0, 255) || 'file';
-}
-
 ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
   const options = {
-    defaultPath: join(app.getPath('downloads'), safeName(name)),
+    defaultPath: join(app.getPath('downloads'), safeFileName(name)),
   };
   const res = win
     ? await dialog.showSaveDialog(win, options)
@@ -203,7 +199,7 @@ ipcMain.handle('files:save-begin', async (_e, name: unknown) => {
   return exportsInProgress.begin(res.filePath, false);
 });
 ipcMain.handle('files:open-begin', async (_e, name: unknown) =>
-  exportsInProgress.begin(await exportsInProgress.tempPath(safeName(name)), true),
+  exportsInProgress.begin(await exportsInProgress.tempPath(safeFileName(name)), true),
 );
 ipcMain.handle('files:chunk', (_e, token: string, data: Uint8Array) =>
   exportsInProgress.chunk(token, data),
@@ -215,13 +211,13 @@ ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 
   if (then === 'reveal') shell.showItemInFolder(path);
   if (then === 'open') {
     // Asked here rather than in the UI, so nothing the UI does can skip it.
-    if (RISKY_EXTENSIONS.has(extname(path).slice(1).toLowerCase())) {
+    if (RISKY_EXTENSIONS.has(extname(safeFileName(path)).slice(1).toLowerCase())) {
       const options = {
         type: 'warning' as const,
         buttons: ['Cancel', 'Open anyway'],
         defaultId: 0,
         cancelId: 0,
-        message: `Open ${safeName(path)}?`,
+        message: `Open ${safeFileName(path)}?`,
         detail:
           'This kind of file can run code on your computer. Only open it if you trust ' +
           'the person who sent it and expected it.',
@@ -336,10 +332,13 @@ function createWindow() {
     });
     if (template.length) Menu.buildFromTemplate(template).popup({ window: win! });
   });
-  win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('file://') && !(isDev && url.startsWith(process.env.CROC_RENDERER_URL!)))
+  const appUrl = pathToFileURL(join(__dirname, '../renderer/index.html')).toString();
+  const guardNavigation = (e: { preventDefault(): void }, url: string) => {
+    if (!isAllowedNavigation(url, appUrl, isDev ? process.env.CROC_RENDERER_URL : undefined))
       e.preventDefault();
-  });
+  };
+  win.webContents.on('will-navigate', guardNavigation);
+  win.webContents.on('will-frame-navigate', (e) => guardNavigation(e, e.url));
   if (isDev) void win.loadURL(process.env.CROC_RENDERER_URL!);
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
 }

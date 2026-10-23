@@ -95,7 +95,12 @@ the owner's key, a counter `at`, the signature), so an admin's version can
 be checked on its own, by a server or a client that never saw the owner's.
 Each change of the list raises `at`, and a version signed under a lower `at`
 than the one held is refused. An invite works only while its maker is still
-the owner or an admin.
+the owner or an admin, until it expires (an invite may also be permanent) or
+is revoked, and until the space's `invitesResetAt` passes it: raising that
+marker refuses every invite made before it, so the owner or an admin can
+clear all links at once and re-stamp any they want to keep. Invites are
+fetched by their exact code and never listed, so a code lets in only someone
+it was given to.
 
 **Friends without telling the servers.** A friendship exists when both people
 list each other; listing someone who doesn't list you back is a request. No

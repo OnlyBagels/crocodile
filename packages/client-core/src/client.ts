@@ -413,6 +413,8 @@ const RING_SILENCE_MS = 8000;
 const HANG_UP_FLUSH_MS = 200;
 /** How long a DM call waits for the other side to come back before it ends. */
 const CALL_LOST_GRACE_MS = 20_000;
+/** How long an invite works unless the user picks otherwise. */
+const INVITE_LIFETIME_MS = 7 * 24 * 3600_000;
 
 /**
  * The whole client behind one object. UIs render `store` and call methods;
@@ -1943,29 +1945,100 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   /**
-   * An invite to share: one of ours for this space that is still valid for at
-   * least a day, or a new one. Reusing keeps the space under the server's
-   * invite quota.
+   * Reuse one of our invites to this space that matches the requested lifetime
+   * (keeping us under the server's per-space quota), or make a new one. A
+   * never-expiring request matches only a never-expiring invite; a timed one
+   * matches a timed invite that won't outlive the request and has over half
+   * its life left. Revoked invites are never reused.
    */
-  async shareInvite(spaceId: string): Promise<string> {
-    const me = this.identity!.publicKey;
-    const minExpiry = Date.now() + 24 * 3600_000;
-    const reusable = (this.records.list('invite:') as SignedRecord<'invite'>[])
-      .filter(
-        (r) =>
-          r.author === me &&
-          r.body.spaceId === spaceId &&
-          !r.body.revoked &&
-          (r.body.expiresAt === null || r.body.expiresAt > minExpiry),
+  async shareInvite(
+    spaceId: string,
+    expiresInMs: number | null = INVITE_LIFETIME_MS,
+  ): Promise<string> {
+    const now = Date.now();
+    const reusable = this.ownInvites(spaceId)
+      .filter(({ body: { expiresAt } }) =>
+        expiresInMs === null
+          ? expiresAt === null
+          : expiresAt !== null &&
+            expiresAt <= now + expiresInMs &&
+            expiresAt > now + expiresInMs / 2,
       )
       .sort((a, b) => b.version - a.version)[0];
-    return reusable ? reusable.body.code : this.createInvite(spaceId);
+    return reusable ? reusable.body.code : this.createInvite(spaceId, expiresInMs);
+  }
+
+  /**
+   * Stop every link to this space working, except any whose code is in `keep`.
+   * Bumps the space's reset marker so earlier invites no longer admit, and
+   * re-stamps the kept ones past it (same URL) — so the links to cancel never
+   * have to be found or listed, only the ones to keep. Owner or admin only.
+   */
+  async clearInviteLinks(spaceId: string, keep: string[] = []): Promise<void> {
+    const at = Date.now();
+    // Re-stamp kept links above the marker first, so they never read as invalid.
+    for (const code of keep) await this.reissueInvite(spaceId, code, at + 1);
+    await this.updateSpace(spaceId, (b) => ({ ...b, invitesResetAt: at }));
+  }
+
+  /** Revoke one invite: no new joins with it; members who joined stay. */
+  async revokeInvite(code: string): Promise<void> {
+    const invite = await this.fetchInvite(code);
+    if (!invite) throw new Error('That invite does not exist.');
+    if (invite.body.revoked) return;
+    const key = recordKey.invite(code);
+    await this.putRecord(
+      signRecord(
+        this.identity!,
+        'invite',
+        key,
+        { ...invite.body, revoked: true },
+        this.nextVersion(key),
+      ),
+    );
+  }
+
+  /** Re-sign an invite with a higher version, keeping its code and terms. */
+  private async reissueInvite(spaceId: string, code: string, version: number): Promise<void> {
+    const key = recordKey.invite(code);
+    const expiresAt = (await this.fetchInvite(code))?.body.expiresAt ?? null;
+    await this.putRecord(
+      signRecord(
+        this.identity!,
+        'invite',
+        key,
+        { spaceId, code, expiresAt },
+        Math.max(version, this.nextVersion(key)),
+      ),
+    );
+  }
+
+  private async fetchInvite(code: string): Promise<SignedRecord<'invite'> | undefined> {
+    const key = recordKey.invite(code);
+    if (!this.records.get(key)) {
+      const res = await this.link!.request('records.get', { keys: [key] });
+      this.records.ingestAll(res.records);
+    }
+    const r = this.records.get(key) as SignedRecord<'invite'> | undefined;
+    return r?.kind === 'invite' ? r : undefined;
+  }
+
+  /** Our invites to this space that still admit, as far as this device knows. */
+  private ownInvites(spaceId: string): SignedRecord<'invite'>[] {
+    const me = this.identity!.publicKey;
+    const resetAt =
+      (this.records.get(recordKey.space(spaceId))?.body as SpaceBody | undefined)?.invitesResetAt ??
+      0;
+    return (this.records.list('invite:') as SignedRecord<'invite'>[]).filter(
+      (r) =>
+        r.author === me && r.body.spaceId === spaceId && !r.body.revoked && r.version >= resetAt,
+    );
   }
 
   /** Creates an invite code others can use to join. */
   async createInvite(
     spaceId: string,
-    expiresInMs: number | null = 7 * 24 * 3600_000,
+    expiresInMs: number | null = INVITE_LIFETIME_MS,
   ): Promise<string> {
     const code = randomId(5);
     await this.putRecord(

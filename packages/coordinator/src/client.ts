@@ -274,7 +274,7 @@ export class ClientConnection implements ClientHandle {
       case 'records.list': {
         const { prefix, limit } = p as unknown as { prefix: string; limit?: number };
         const found = await hub.dist.list(prefix, limit ?? 1000);
-        return { records: found.filter((r) => this.mayRead(r)) };
+        return { records: found.filter((r) => this.mayEnumerate(r)) };
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
@@ -399,7 +399,7 @@ export class ClientConnection implements ClientHandle {
 
   /** True if this client subscribed to a prefix covering the record key. */
   wants(record: SignedRecord): boolean {
-    if (!this.mayRead(record)) return false;
+    if (!this.mayEnumerate(record)) return false;
     for (const prefix of this.subscriptions) if (record.key.startsWith(prefix)) return true;
     return false;
   }
@@ -410,6 +410,15 @@ export class ClientConnection implements ClientHandle {
    */
   mayRead(record: SignedRecord): boolean {
     return this.mayReadKey(record.key);
+  }
+
+  /**
+   * Readable by exact-key get, but not by list or subscribe: an invite code is
+   * a space's join secret, so a client may fetch one it already has but can't
+   * discover codes by sweeping a prefix.
+   */
+  mayEnumerate(record: SignedRecord): boolean {
+    return !record.key.startsWith(recordKey.invitePrefix) && this.mayRead(record);
   }
 
   mayReadKey(key: string): boolean {

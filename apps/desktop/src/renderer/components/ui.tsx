@@ -416,3 +416,34 @@ export function Select({
     </select>
   );
 }
+
+/** A row of mutually exclusive choices, the chosen one raised. */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T;
+  options: { id: T; label: ReactNode }[];
+  onChange: (v: T) => void;
+  label?: string;
+}) {
+  return (
+    <div role="group" aria-label={label} className="inline-flex rounded-full bg-field p-1">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          aria-pressed={value === o.id}
+          onClick={() => onChange(o.id)}
+          className={cx(
+            'flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition',
+            value === o.id ? 'bg-island text-text shadow' : 'text-muted hover:text-text',
+          )}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}

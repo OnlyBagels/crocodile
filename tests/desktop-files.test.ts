@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FILE_BLOCK_SIZE } from '@crocodile/protocol';
 import { newFileId } from '@crocodile/crypto';
-import { FileExports, FileStore, RISKY_EXTENSIONS } from '../apps/desktop/src/main/file-store';
+import {
+  FileExports,
+  FileStore,
+  RISKY_EXTENSIONS,
+  safeFileName,
+} from '../apps/desktop/src/main/file-store';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -86,5 +91,24 @@ describe('saving files', () => {
       expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
     for (const ext of ['pdf', 'png', 'txt', 'mp4', 'zip'])
       expect(RISKY_EXTENSIONS.has(ext)).toBe(false);
+  });
+
+  it('asks before opening the less common kinds Windows runs too', () => {
+    for (const ext of ['msc', 'pif', 'chm', 'inf', 'appref-ms', 'settingcontent-ms', 'vhdx', 'xll'])
+      expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
+  });
+
+  it('names files so the extension seen is the one the system runs', () => {
+    // Windows drops trailing dots and spaces when it creates "evil.exe.", so
+    // the warning must see "exe", not an empty extension.
+    expect(safeFileName('evil.exe.')).toBe('evil.exe');
+    expect(safeFileName('evil.exe . .')).toBe('evil.exe');
+    expect(safeFileName('report.txt:evil.exe')).toBe('report.txt_evil.exe');
+    expect(safeFileName('a‮txt.exe')).toBe('a_txt.exe');
+    expect(safeFileName('..\\..\\x/../.bashrc')).toBe('bashrc');
+    expect(safeFileName('\u0000')).toBe('_');
+    expect(safeFileName('...')).toBe('file');
+    expect(safeFileName(42)).toBe('file');
+    expect(safeFileName('x'.repeat(300))).toHaveLength(255);
   });
 });

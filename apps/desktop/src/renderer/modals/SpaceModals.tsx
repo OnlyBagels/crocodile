@@ -3,7 +3,17 @@ import { Check, Copy, Hash, Volume2 } from 'lucide-react';
 import type { ChannelKind } from '@crocodile/protocol';
 import { closeModal, getClient, navigate, openModal, useCroc } from '../croc';
 import { copyText, imageToDataUrl, initials } from '../lib/format';
-import { Avatar, Button, Input, Label, Modal, Toggle, UserName, cx } from '../components/ui';
+import {
+  Avatar,
+  Button,
+  Input,
+  Label,
+  Modal,
+  Segmented,
+  Toggle,
+  UserName,
+  cx,
+} from '../components/ui';
 
 export function AddSpaceModal() {
   const [mode, setMode] = useState<'choose' | 'create' | 'join'>('choose');
@@ -133,28 +143,70 @@ export function AddSpaceModal() {
   );
 }
 
+const DAY_MS = 86_400_000;
+type InviteLifetime = '1d' | '7d' | 'never';
+const INVITE_LIFETIMES: Record<InviteLifetime, number | null> = {
+  '1d': DAY_MS,
+  '7d': 7 * DAY_MS,
+  never: null,
+};
+
 export function InviteModal({ spaceId }: { spaceId: string }) {
   const space = useCroc((s) => s.spaces[spaceId]);
+  const [lifetime, setLifetime] = useState<InviteLifetime>('7d');
   const [code, setCode] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetting, setResetting] = useState(false);
   useEffect(() => {
+    let current = true;
+    setCode(null);
+    setCopied(false);
+    setError(null);
     getClient()
-      .shareInvite(spaceId)
-      .then(setCode, (e) => setError(e.message));
-  }, [spaceId]);
+      .shareInvite(spaceId, INVITE_LIFETIMES[lifetime])
+      .then(
+        (c) => current && setCode(c),
+        (e: Error) => current && setError(e.message),
+      );
+    return () => {
+      current = false;
+    };
+  }, [spaceId, lifetime]);
+  // Stop other links to the space; keepThis keeps the one on screen, else make a fresh one.
+  const clear = async (keepThis: boolean) => {
+    if (!code) return;
+    setResetting(true);
+    setError(null);
+    try {
+      await getClient().clearInviteLinks(spaceId, keepThis ? [code] : []);
+      if (!keepThis) setCode(await getClient().shareInvite(spaceId, INVITE_LIFETIMES[lifetime]));
+      setCopied(false);
+      setConfirmReset(false);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setResetting(false);
+    }
+  };
   const link = code ? `croc://join/${code}` : '';
+  // While the link loads, describe the lifetime that was picked.
   const expiresAt = code
     ? (getClient().records.get(`invite:${code}`)?.body as { expiresAt?: number | null } | undefined)
         ?.expiresAt
-    : undefined;
-  const days = expiresAt ? Math.max(1, Math.round((expiresAt - Date.now()) / 86_400_000)) : 7;
+    : INVITE_LIFETIMES[lifetime] === null
+      ? null
+      : undefined;
+  const days = expiresAt
+    ? Math.max(1, Math.round((expiresAt - Date.now()) / DAY_MS))
+    : (INVITE_LIFETIMES[lifetime] ?? 7 * DAY_MS) / DAY_MS;
   return (
     <Modal
       title={`Invite friends to ${space?.name ?? 'this space'}`}
       subtitle={
         expiresAt === null
-          ? 'Anyone with this link can join.'
+          ? 'Anyone with this link can join, until you reset it.'
           : `Anyone with this link can join for the next ${days === 1 ? 'day' : `${days} days`}.`
       }
       onClose={closeModal}
@@ -178,6 +230,46 @@ export function InviteModal({ spaceId }: { spaceId: string }) {
       <p className="mt-3 text-xs text-muted">
         Friends can also paste just the code: <b className="selectable text-text">{code}</b>
       </p>
+      <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <Label>Expire after</Label>
+          <Segmented
+            label="Expire after"
+            value={lifetime}
+            options={[
+              { id: '1d', label: '1 day' },
+              { id: '7d', label: '7 days' },
+              { id: 'never', label: 'Never' },
+            ]}
+            onChange={(v) => {
+              setConfirmReset(false);
+              setLifetime(v);
+            }}
+          />
+        </div>
+        <Button variant="ghost" disabled={!code || resetting} onClick={() => setConfirmReset(true)}>
+          Reset links…
+        </Button>
+      </div>
+      {confirmReset && (
+        <div className="mt-4 rounded-2xl border border-line bg-island-2 p-4">
+          <p className="text-sm text-text">
+            Stop other links to this space: anyone who hasn&apos;t joined yet will need a new one.
+            People already in the space stay. Keep this link to leave the one above working.
+          </p>
+          <div className="mt-3 flex flex-wrap justify-end gap-2">
+            <Button variant="ghost" disabled={resetting} onClick={() => setConfirmReset(false)}>
+              Cancel
+            </Button>
+            <Button variant="danger" disabled={resetting} onClick={() => void clear(false)}>
+              Reset all
+            </Button>
+            <Button disabled={resetting || !code} onClick={() => void clear(true)}>
+              {resetting ? 'Resetting…' : 'Keep this link'}
+            </Button>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }

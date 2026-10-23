@@ -75,20 +75,20 @@ picture size.
 
 ## Adversaries
 
-| Adversary                          | Can                                                                                    | Cannot                                                                                                                                                                       |
-| ---------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Network observer                   | See that you talk to certain IPs, and traffic volume.                                  | Read content or metadata (WebRTC DTLS plus E2E; encrypted server channels). Infer speech from packet sizes (constant-bitrate Opus).                                          |
-| Harvest-now, decrypt-later         | Record traffic today.                                                                  | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                     |
-| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content. |
-| Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                               |
-| Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
-| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                       |
-| Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
-| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted in a space or DM they aren't in, even by learning its id.                      |
-| Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
-| Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |
-| Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                  |
-| Stolen, unlocked device            | Everything on it. Use OS disk encryption and remove the device from another one.       |                                                                                                                                                                              |
+| Adversary                          | Can                                                                                    | Cannot                                                                                                                                                                                                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Network observer                   | See that you talk to certain IPs, and traffic volume.                                  | Read content or metadata (WebRTC DTLS plus E2E; encrypted server channels). Infer speech from packet sizes (constant-bitrate Opus).                                                                                                                                    |
+| Harvest-now, decrypt-later         | Record traffic today.                                                                  | Decrypt it with a future quantum computer: every key exchange is hybrid with ML-KEM-768.                                                                                                                                                                               |
+| Malicious coordination server      | Lie about presence, drop or delay signalling, refuse service, log metadata.            | Forge profiles, spaces, invites, memberships or devices (all signed); substitute a user's key (user ids are key hashes); MITM WebRTC (SDP is identity-signed); read content; list a space's invite codes to let a stranger in (each is served only by its exact code). |
+| Malicious mesh peer server         | Same as above.                                                                         | Same as above; clients re-verify every record.                                                                                                                                                                                                                         |
+| Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                                                                                                                    |
+| Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                                                                                                                 |
+| Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                                                                                                                        |
+| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted in a space or DM they aren't in, even by learning its id.                                                                                                                |
+| Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                                                                                                                   |
+| Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                                                                                                                         |
+| Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                                                                                                            |
+| Stolen, unlocked device            | Everything on it. Use OS disk encryption and remove the device from another one.       |                                                                                                                                                                                                                                                                        |
 
 ## Cryptography
 
@@ -116,7 +116,9 @@ picture size.
   to, so a server that swaps either makes the codes differ.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
-  kept in the OS keychain (Electron `safeStorage`).
+  kept in the OS keychain (Electron `safeStorage`). The desktop window is
+  confined to the app's own pages, so a file dropped or opened into it cannot
+  navigate the window elsewhere and read the identity seed over the IPC bridge.
 
 ## Known gaps
 
@@ -138,8 +140,10 @@ picture size.
   root, can use the account. Remove the device in the app if a machine is
   lost.
 - Files are checked for integrity, not for safety: the app never opens one by
-  itself, and warns before opening programs and scripts, but a file a member
-  sends can still be harmful.
+  itself, sanitises the names it suggests (no folders, and no reserved or
+  trailing-dot names that would hide the real extension), and warns before
+  opening programs and scripts (a wide list of executable types), but a file a
+  member sends can still be harmful.
 
 Please report vulnerabilities privately through
 [GitHub's private reporting](https://github.com/pwalda/crocodile/security/advisories/new)

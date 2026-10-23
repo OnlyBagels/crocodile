@@ -1,6 +1,7 @@
 import { userIdFromKey, validateRecord } from '@crocodile/crypto';
 import {
   FedRequestParams,
+  recordKey,
   RECORD_KIND_ORDER,
   SignedRecordEnvelope,
   type FedRequest,
@@ -491,11 +492,25 @@ export class Distribution {
       }
       case 'rec_list': {
         const { prefix, limit } = parsed.data as { prefix: string; limit?: number };
-        return { records: withinBytes(store.listPrefix(prefix, limit ?? 1000)) };
+        // Invites are join secrets: a peer fetches one by exact key (rec_get)
+        // to validate a membership, never by listing. Mirrors the client surface.
+        return {
+          records: withinBytes(
+            store
+              .listPrefix(prefix, limit ?? 1000)
+              .filter((r) => !r.key.startsWith(recordKey.invitePrefix)),
+          ),
+        };
       }
       case 'rec_term': {
         const { term, limit } = parsed.data as { term: string; limit?: number };
-        return { records: withinBytes(store.findByTerm(term, limit ?? 1000)) };
+        return {
+          records: withinBytes(
+            store
+              .findByTerm(term, limit ?? 1000)
+              .filter((r) => !r.key.startsWith(recordKey.invitePrefix)),
+          ),
+        };
       }
       case 'rec_store': {
         const { records } = parsed.data as { records: SignedRecord[] };

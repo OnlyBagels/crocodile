@@ -6,7 +6,8 @@ report what matters most; issues and discussions are welcome.
 ## Done
 
 - Identity without passwords (recovery key), profiles, friends, blocking.
-- Spaces with text channels and voice rooms, invites, bans, owner settings.
+- Spaces with text channels and voice rooms, invites (with a lifetime and a
+  bulk reset), bans, owner settings.
 - E2E group text with peer-to-peer history sync; DMs including delivery after
   the friend was offline.
 - E2E voice through the elected host's relay with speaker slots, speaking

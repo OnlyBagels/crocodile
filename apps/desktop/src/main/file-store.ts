@@ -143,6 +143,29 @@ export const RISKY_EXTENSIONS = new Set(
   (
     'exe com scr bat cmd msi msix msp ps1 psm1 vbs vbe js jse wsf wsh hta cpl lnk url reg ' +
     'jar app pkg dmg command sh bash zsh run bin appimage deb rpm py pl rb php scpt ' +
-    'docm xlsm pptm iso img html htm xhtml svg'
+    'docm xlsm pptm iso img html htm xhtml svg ' +
+    'msc pif chm hlp inf ins isp scf sct shb ws wsc gadget application appref-ms appx ' +
+    'appxbundle msixbundle settingcontent-ms library-ms search-ms searchconnector-ms diagcab ' +
+    'website mht mhtml xbap jnlp vhd vhdx dll ocx sys cpl xll xlam dotm xltm potm ppsm sldm ' +
+    'one pyw pyz desktop terminal webloc inetloc fileloc workflow action'
   ).split(' '),
 );
+
+/**
+ * A file name the UI suggests, made safe to create and to judge by its
+ * extension: no folders, no control, direction or reserved characters (":"
+ * would name an NTFS stream), no dots or spaces at the ends (Windows drops
+ * trailing ones, so "evil.exe." would look extensionless and still run).
+ */
+export function safeFileName(name: unknown): string {
+  const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
+  const clean = base
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f<>:"|?*‎‏‪-‮⁦-⁩]/g, '_')
+    .slice(0, 255);
+  let start = 0;
+  let end = clean.length;
+  while (start < end && (clean[start] === '.' || /\s/.test(clean[start]!))) start++;
+  while (end > start && (clean[end - 1] === '.' || /\s/.test(clean[end - 1]!))) end--;
+  return clean.slice(start, end) || 'file';
+}

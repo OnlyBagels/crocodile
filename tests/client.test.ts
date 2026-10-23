@@ -1189,6 +1189,90 @@ describe('client and server quotas', () => {
     expect(await alice.createInvite(spaceId)).not.toBe(first);
   });
 
+  it('hands out a never-expiring link only when one is asked for, and reuses it', async () => {
+    const coord = await server();
+    const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');
+    const spaceId = await alice.createSpace('Lounge');
+    const expiresAt = (code: string) =>
+      (alice.records.get(recordKey.invite(code))!.body as { expiresAt: number | null }).expiresAt;
+
+    const weekly = await alice.shareInvite(spaceId);
+    const permanent = await alice.shareInvite(spaceId, null);
+    expect(permanent).not.toBe(weekly);
+    expect(expiresAt(permanent)).toBeNull();
+    expect(await alice.shareInvite(spaceId, null)).toBe(permanent);
+    // A week-long request doesn't get the permanent link, nor a day-long one the week-long link.
+    expect(await alice.shareInvite(spaceId)).toBe(weekly);
+    const daily = await alice.shareInvite(spaceId, 86_400_000);
+    expect(daily).not.toBe(weekly);
+    expect(expiresAt(daily)! - Date.now()).toBeLessThanOrEqual(86_400_000);
+  });
+
+  it('clears all links: old ones are refused, a fresh one works, members stay', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const spaceId = await alice.createSpace('Lounge');
+    const old = await alice.shareInvite(spaceId, null);
+    await carol.joinWithInvite(old);
+
+    await alice.clearInviteLinks(spaceId);
+    await expect(bob.joinWithInvite(old)).rejects.toThrow(/reset/);
+    // A fresh link is a new code and works; it isn't the cleared one.
+    const fresh = await alice.shareInvite(spaceId, null);
+    expect(fresh).not.toBe(old);
+    expect(await bob.joinWithInvite(fresh)).toBe(spaceId);
+    await waitFor(
+      () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+      10_000,
+      'bob in the space',
+    );
+    // Carol joined with the old link before the reset and stays.
+    expect(alice.state.spaces[spaceId]!.members).toContain(carol.userId);
+  });
+
+  it('keeps a chosen link while clearing the rest', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const spaceId = await alice.createSpace('Lounge');
+    const keepLink = await alice.shareInvite(spaceId, null);
+    const other = await alice.createInvite(spaceId, null);
+    expect(other).not.toBe(keepLink);
+
+    await alice.clearInviteLinks(spaceId, [keepLink]);
+    // The kept link still works, same code; the other is refused.
+    expect(await bob.joinWithInvite(keepLink)).toBe(spaceId);
+    await waitFor(
+      () => alice.state.spaces[spaceId]?.members.includes(bob.userId),
+      10_000,
+      'bob in the space',
+    );
+    await expect(carol.joinWithInvite(other)).rejects.toThrow(/reset/);
+    // Sharing still returns the kept link rather than minting a new one.
+    expect(await alice.shareInvite(spaceId, null)).toBe(keepLink);
+  });
+
+  it('revokes an invite the device has not seen yet', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Lounge');
+    const code = await alice.createInvite(spaceId, null);
+    // Forget it locally, as on a device that never saw it made.
+    const key = recordKey.invite(code);
+    alice.records.forget(key, alice.records.get(key)!.version);
+    expect(alice.records.get(key)).toBeUndefined();
+
+    await alice.revokeInvite(code);
+    await expect(bob.joinWithInvite(code)).rejects.toThrow(/revoked/);
+  });
+
   it('does not keep a record the server refused', async () => {
     const coord = await server({ quotas: { spacesPerUser: 1 } });
     const alice = await signUp(makeClient(new FakeRelayNetwork(), coord), 'alice');

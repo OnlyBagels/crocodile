@@ -64,7 +64,7 @@ const HOSTING_GUIDE_URL = `${SOURCE_URL}/blob/main/docs/SELF_HOSTING.md#if-other
 import { isOperatorContact } from '@crocodile/protocol';
 import type { NetworkCheckItem } from '@crocodile/client-core';
 import { desktop } from '../platform';
-import { Avatar, Button, Input, Label, Select, Toggle, cx } from '../components/ui';
+import { Avatar, Button, Input, Label, Segmented, Select, Toggle, cx } from '../components/ui';
 import { Logo } from '../components/Logo';
 import { DebugTab } from './ConnectionModals';
 import type { CoordinatorSettings, CoordinatorStatus } from '../../main/ipc-types';
@@ -188,33 +188,6 @@ function Row({
         {hint && <div className="mt-1 text-[13px] leading-relaxed text-muted">{hint}</div>}
       </div>
       <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
-
-function Segmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: { id: T; label: ReactNode }[];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-full bg-field p-1">
-      {options.map((o) => (
-        <button
-          key={o.id}
-          onClick={() => onChange(o.id)}
-          className={cx(
-            'flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition',
-            value === o.id ? 'bg-island text-text shadow' : 'text-muted hover:text-text',
-          )}
-        >
-          {o.label}
-        </button>
-      ))}
     </div>
   );
 }

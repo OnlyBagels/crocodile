@@ -184,6 +184,8 @@ export const SpaceBody = z.object({
   bans: z.array(id).max(10_000),
   channels: z.array(Channel).max(LIMITS.channelsPerSpace),
   deleted: z.boolean().optional(),
+  /** Invites older than this (epoch ms) no longer admit; bumping it clears every link at once. */
+  invitesResetAt: z.number().int().optional(),
   /**
    * The owner's signature on `admins`, with the owner's key: lets anyone
    * check an admin's edit on its own. `at` grows each time the owner
@@ -267,6 +269,7 @@ export const recordKey = {
   friends: (userId: string) => `friends:${userId}`,
   space: (spaceId: string) => `space:${spaceId}`,
   invite: (code: string) => `invite:${code}`,
+  invitePrefix: 'invite:',
   member: (spaceId: string, userId: string) => `member:${spaceId}:${userId}`,
   memberPrefix: (spaceId: string) => `member:${spaceId}:`,
   note: (userId: string, noteId: string) => `note:${userId}:${noteId}`,
