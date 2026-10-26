@@ -461,4 +461,123 @@ describe('TURN relay', () => {
     grantEnd = Date.now() - 1;
     await waitFor(() => turn.allocationCount() === 0, 5000);
   });
+  /** CreatePermission for these peers; resolves with the error code, or 0. */
+  async function permit(c: Awaited<ReturnType<typeof turnClient>>, peers: string[]) {
+    const tx = randomBytes(12);
+    c.send(
+      0x008,
+      tx,
+      [...peers.map((p) => ({ type: 0x0012, value: xorAddress(p, 9, tx) })), ...c.auth],
+      c.key,
+    );
+    const err = (await c.answer(tx)).attrs.find((a) => a.type === 0x0009)?.value;
+    return err ? err[2]! * 100 + err[3]! : 0;
+  }
+
+  const publicPeers = (block: number, n: number) =>
+    Array.from({ length: n }, (_, i) => `8.8.${block}.${i + 1}`);
+
+  async function limitedTurn(limits: Record<string, number>) {
+    const turn = await new TurnServer({
+      port: 0,
+      host: '127.0.0.1',
+      relayIp: '127.0.0.1',
+      secret: randomBytes(32),
+      limits,
+    }).start();
+    cleanup.push(() => turn.stop());
+    return turn;
+  }
+
+  it('holds an allocation to a fixed number of permissions and channels', async () => {
+    const turn = await limitedTurn({ maxPermissions: 40, maxChannels: 3 });
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    expect(await permit(c, publicPeers(1, 20))).toBe(0);
+    expect(await permit(c, publicPeers(2, 20))).toBe(0);
+    // Full: a new address is refused, and one already held is renewed.
+    expect(await permit(c, publicPeers(3, 1))).toBe(508);
+    expect(await permit(c, publicPeers(1, 5))).toBe(0);
+
+    const bind = async (number: number, peer: string) => {
+      const tx = randomBytes(12);
+      c.send(
+        0x009,
+        tx,
+        [
+          { type: 0x000c, value: Buffer.from([number >> 8, number & 0xff, 0, 0]) },
+          { type: 0x0012, value: xorAddress(peer, 9, tx) },
+          ...c.auth,
+        ],
+        c.key,
+      );
+      const err = (await c.answer(tx)).attrs.find((a) => a.type === 0x0009)?.value;
+      return err ? err[2]! * 100 + err[3]! : 0;
+    };
+    const held = publicPeers(1, 4);
+    for (const [i, peer] of held.slice(0, 3).entries())
+      expect(await bind(0x4000 + i, peer)).toBe(0);
+    expect(await bind(0x4003, held[3]!)).toBe(508);
+    // A binding already held can be renewed.
+    expect(await bind(0x4000, held[0]!)).toBe(0);
+  });
+
+  it('forgets permissions and channels once they have expired', async () => {
+    const turn = await limitedTurn({});
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    expect(await permit(c, publicPeers(1, 10))).toBe(0);
+    type Internals = {
+      allocations: Map<
+        string,
+        {
+          permissions: Map<string, number>;
+          channels: Map<number, unknown>;
+          channelByPeer: Map<string, number>;
+          channelUntil: Map<number, number>;
+        }
+      >;
+      expire(): void;
+    };
+    const internals = turn as unknown as Internals;
+    const [a] = [...internals.allocations.values()];
+    expect(a!.permissions.size).toBe(10);
+    for (const key of a!.permissions.keys()) a!.permissions.set(key, Date.now() - 1);
+    internals.expire();
+    expect(a!.permissions.size).toBe(0);
+
+    // A channel binding goes when it has lapsed, with its entry for the peer.
+    const tx = randomBytes(12);
+    c.send(
+      0x009,
+      tx,
+      [
+        { type: 0x000c, value: Buffer.from([0x40, 0x00, 0, 0]) },
+        { type: 0x0012, value: xorAddress('8.8.1.1', 9, tx) },
+        ...c.auth,
+      ],
+      c.key,
+    );
+    await c.answer(tx);
+    expect(a!.channels.size).toBe(1);
+    for (const number of a!.channelUntil.keys()) a!.channelUntil.set(number, Date.now() - 1);
+    internals.expire();
+    expect(a!.channels.size).toBe(0);
+    expect(a!.channelByPeer.size).toBe(0);
+  });
+
+  it('answers only so many control requests a second for one allocation', async () => {
+    const turn = await limitedTurn({ controlBurst: 5, controlPerSecond: 1 });
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    const before = c.replies.length;
+    for (let i = 0; i < 40; i++) {
+      const tx = randomBytes(12);
+      c.send(0x008, tx, [{ type: 0x0012, value: xorAddress('8.8.8.8', 9, tx) }, ...c.auth], c.key);
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    const answered = c.replies.length - before;
+    expect(answered).toBeGreaterThan(0);
+    expect(answered).toBeLessThanOrEqual(7);
+  });
 });
