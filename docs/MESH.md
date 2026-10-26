@@ -105,15 +105,15 @@ by name goes to `name:<name>`.
 - **Sessions** are owned by one live server chosen by rendezvous hashing, as
   before; members' servers reach it over a direct link.
 - **Presence and voice occupancy** are flooded, with a sequence number per
-  origin server, and a server sends everything it knows when an overlay link
-  comes up, including rooms that emptied in the last hour. Each beacon carries
-  its server's latest presence sequence number: a server that has seen less
-  missed something and fetches that server's full presence directly. Servers
+  origin server. When an overlay link comes up, a server sends its own users'
+  presence, and every room it knows is occupied (and those that emptied in the
+  last hour), as they were signed. Each beacon carries its server's latest
+  presence sequence number: a server that has seen less missed something, as a
+  newcomer has, and fetches that server's full presence directly. Servers
   forget what came from a server that has stopped being live.
   Both are signed by the server they come from (like beacons), with its key in
-  the frame, and a server hands on the frames as they were signed. A frame
-  that isn't signed by the server it names is dropped, so no server can speak
-  for another. Sequence numbers are timestamps: one dated more than five
+  the frame. A frame that isn't signed by the server it names is dropped, so
+  no server can speak for another. Sequence numbers are timestamps: one dated more than five
   minutes ahead is refused, since it would outrank everything its origin says
   afterwards. Voice-room occupancy is only believed from the server that owns
   the room, and only while recent: the owner repeats it every five minutes, and

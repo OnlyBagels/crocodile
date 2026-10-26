@@ -192,15 +192,30 @@ describe('presence from other servers', () => {
     expect(online(net.victim, poisoned)).toBe(false);
   });
 
-  it('hands a new neighbour frames its origin signed, not ones it made up', async () => {
-    const net = await withAlice();
-    await barrier(net);
-    const frames = net.victim.presence.snapshot();
-    expect(frames.some((f) => f.origin === net.honest.info.id)).toBe(true);
-    for (const f of frames) {
+  it('does not bring back a user who has gone when it catches a new neighbour up', async () => {
+    const honest = await server({ name: 'honest' });
+    const alice = await connectUser(honest, createIdentity(), 'alice');
+    const bob = await connectUser(honest, createIdentity(), 'bob');
+    cleanup.push(() => alice.conn.close());
+    const [a, b] = [alice.identity.userId, bob.identity.userId];
+    const victim = await server({ name: 'victim', meshPeers: [honest.url] });
+    await waitFor(() => online(victim, a) && online(victim, b), 3000, 'both to be online');
+    bob.conn.close();
+    await waitFor(() => !online(victim, b), 3000, 'bob to go');
+
+    // What the victim would tell a server that has just linked to it.
+    const late = await server({ name: 'late' });
+    for (const f of victim.presence.snapshot()) {
       expect(keyMatchesUserId(f.key, f.origin)).toBe(true);
       expect(verifyPayload(f.key, SIG_DOMAIN.presence, presenceSigned(f), f.sig)).toBe(true);
+      late.presence.applyRemote(f);
     }
+    expect(online(late, b)).toBe(false);
+
+    // And a server that links to it for real ends up with the current picture.
+    const linked = await server({ name: 'linked', meshPeers: [victim.url] });
+    await waitFor(() => online(linked, a), 5000, 'alice to be seen');
+    expect(online(linked, b)).toBe(false);
   });
 });
 

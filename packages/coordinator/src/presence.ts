@@ -65,8 +65,6 @@ export class PresenceService {
         since: number;
         devices: string[];
         seq: number;
-        /** The signed frame this came in, which a new neighbour is given as it was. */
-        frame: FedPresence;
       }
     >
   >();
@@ -311,7 +309,6 @@ export class PresenceService {
           since: e.since,
           devices: e.devices,
           seq: frame.seq,
-          frame,
         });
       if (entries.size === 0) this.remote.delete(e.userId);
       touched.add(e.userId);
@@ -330,15 +327,14 @@ export class PresenceService {
   }
 
   /**
-   * Everything we know, for a server that just linked to us. The frames other
-   * servers signed go on as they were signed (the newest first applied wins on
-   * the receiving end), so the receiver can check them like any other.
+   * What a server that just linked to us is told: our own users, signed. What
+   * we know of other servers' users is not repeated, because we can't sign it
+   * and a signed frame we kept would bring back users who have since left. The
+   * newcomer hears every server's beacon, sees that its presence is ahead of
+   * what it has, and fetches that server's current picture itself.
    */
   snapshot(): FedPresence[] {
-    const others = new Set<FedPresence>();
-    for (const entries of this.remote.values())
-      for (const e of entries.values()) others.add(e.frame);
-    return [this.fullState(), ...[...others].sort((a, b) => a.seq - b.seq)];
+    return [this.fullState()];
   }
 
   private lastPublished = new Map<string, string>();
