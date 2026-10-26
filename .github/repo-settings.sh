@@ -86,36 +86,31 @@ EOF
   step 'Private vulnerability reporting (see .github/SECURITY.md)'
   api PUT /private-vulnerability-reporting
 
-  step 'Ruleset for main: changes go through a PR with green CI'
+  step 'Rulesets for main: green CI for everyone, a reviewed PR unless an admin merges it'
   ruleset() {
     local name=$1 body id
     body=$(cat)
     id=$(gh api "repos/$REPO/rulesets" --jq ".[] | select(.name == \"$name\") | .id" 2>/dev/null)
     if [ -n "$id" ]; then json PUT "/rulesets/$id" <<<"$body"; else json POST /rulesets <<<"$body"; fi
   }
+  # A bypass applies to every rule in its ruleset, so the review rule gets its own:
+  # the admin (the sole maintainer, who can't approve their own PRs) may merge a PR
+  # without an approval, but never skips CI, and can't push to main directly.
   ruleset main <<'EOF'
 {
   "name": "main",
   "target": "branch",
   "enforcement": "active",
   "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "bypass_actors": [],
   "rules": [
     { "type": "deletion" },
     { "type": "non_fast_forward" },
     {
-      "type": "pull_request",
-      "parameters": {
-        "required_approving_review_count": 0,
-        "dismiss_stale_reviews_on_push": true,
-        "require_code_owner_review": false,
-        "require_last_push_approval": false,
-        "required_review_thread_resolution": true
-      }
-    },
-    {
       "type": "required_status_checks",
       "parameters": {
         "strict_required_status_checks_policy": false,
+        "do_not_enforce_on_create": false,
         "required_status_checks": [
           { "context": "Typecheck, lint and tests" },
           { "context": "Electron end-to-end (packaged)" },
@@ -127,6 +122,31 @@ EOF
           { "context": "Analyze (actions)" },
           { "context": "cla" }
         ]
+      }
+    }
+  ]
+}
+EOF
+
+  ruleset 'main: reviews' <<'EOF'
+{
+  "name": "main: reviews",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["~DEFAULT_BRANCH"], "exclude": [] } },
+  "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "pull_request" }],
+  "rules": [
+    {
+      "type": "pull_request",
+      "parameters": {
+        "required_approving_review_count": 1,
+        "dismiss_stale_reviews_on_push": true,
+        "require_code_owner_review": true,
+        "require_last_push_approval": false,
+        "required_review_thread_resolution": true,
+        "require_extra_approval_for_unattributed_changes": true,
+        "required_reviewers": [],
+        "allowed_merge_methods": ["merge", "squash"]
       }
     }
   ]
