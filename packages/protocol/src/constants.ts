@@ -1,5 +1,8 @@
-/** 2: sharded records and a sparse server overlay (docs/MESH.md). */
-export const PROTOCOL_VERSION = 2;
+/**
+ * 2: sharded records and a sparse server overlay (docs/MESH.md).
+ * 3: presence and voice frames signed by the server they come from.
+ */
+export const PROTOCOL_VERSION = 3;
 export const APP_NAME = 'Crocodile';
 
 /** Number of simultaneous speaker slots a host relay forwards to each listener. */
@@ -46,6 +49,10 @@ export const SIG_DOMAIN = {
   sealed: 'croc/v1/sealed',
   anon: 'croc/v1/anon',
   beacon: 'croc/v1/beacon',
+  /** A server's news about the users connected to it. */
+  presence: 'croc/v1/presence',
+  /** A session owner's announcement of who is in a voice channel. */
+  voice: 'croc/v1/voice',
   mail: 'croc/v1/mail',
   /** A space owner's signature on its admin list. */
   spaceAdmins: 'croc/v1/space-admins',

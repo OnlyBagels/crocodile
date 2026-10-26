@@ -1,9 +1,11 @@
-import { isSpaceMember, randomId } from '@crocodile/crypto';
+import { isSpaceMember, keyMatchesUserId, randomId, sign, verifyPayload } from '@crocodile/crypto';
 import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
+  SIG_DOMAIN,
   parseSessionId,
   peerIds,
+  voiceSigned,
   type FedSessionOp,
   type FedVoice,
   type HostCaps,
@@ -35,6 +37,15 @@ const OP_TIMEOUT_MS = 8000;
 const MEMBER_RECONNECT_GRACE_MS = 10_000;
 /** A member server re-joins a session whose new owner it could not reach this soon. */
 const REJOIN_RETRY_MS = 1000;
+/**
+ * The owner repeats what it says about an occupied room this often, and a
+ * server believes an announcement for this long: an old one that someone
+ * replays does not bring a long-empty room back.
+ */
+const VOICE_REFRESH_MS = 5 * 60_000;
+const VOICE_MAX_AGE_MS = 15 * 60_000;
+/** An announcement dated further ahead than this is refused. */
+const VOICE_AHEAD_MS = 5 * 60_000;
 
 /**
  * Sessions and host election.
@@ -52,7 +63,8 @@ export class SessionService {
   private lastOwner = new Map<string, string>();
   private lastKnown = new Map<string, Hint>();
   private owned = new Map<string, OwnedSession>();
-  private occupancy = new Map<string, { occ: VoiceOccupancy; owner: string }>();
+  /** `frame` is what the owner signed, kept to hand on as it was (none if we made the entry up). */
+  private occupancy = new Map<string, { occ: VoiceOccupancy; owner: string; frame?: FedVoice }>();
   private pendingOps = new Map<
     string,
     {
@@ -63,7 +75,12 @@ export class SessionService {
     }
   >();
 
-  constructor(private readonly hub: Coordinator) {}
+  private voiceRefresh: ReturnType<typeof setInterval>;
+
+  constructor(private readonly hub: Coordinator) {
+    this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
+    this.voiceRefresh.unref?.();
+  }
 
   get selfId() {
     return this.hub.info.id;
@@ -423,7 +440,10 @@ export class SessionService {
   /** sessionId -> when its latest announcement was made (kept after it empties). */
   private voiceAt = new Map<string, number>();
   /** Rooms that emptied in the last hour, so a server that missed it hears it in a snapshot. */
-  private emptied = new Map<string, { occ: VoiceOccupancy; owner: string; at: number }>();
+  private emptied = new Map<
+    string,
+    { occ: VoiceOccupancy; owner: string; at: number; frame?: FedVoice }
+  >();
   private voiceSeq = 0;
 
   private announceVoice(state: SessionState) {
@@ -438,25 +458,56 @@ export class SessionService {
     this.voiceSeq = Math.max(Date.now(), this.voiceSeq + 1);
     const at = this.voiceSeq;
     this.voiceAt.set(state.id, at);
-    this.setOccupancy(state.id, occ, this.selfId);
-    this.hub.mesh.forward({ t: 'voice', sessionId: state.id, occ, owner: this.selfId, at });
+    const parts = { sessionId: state.id, occ, owner: this.selfId, at };
+    const frame: FedVoice = {
+      t: 'voice',
+      ...parts,
+      key: this.hub.info.key,
+      sig: sign(this.hub.identity, SIG_DOMAIN.voice, voiceSigned(parts)),
+    };
+    this.setOccupancy(state.id, occ, this.selfId, frame);
+    this.hub.mesh.forward(frame);
   }
 
-  /** An announcement from another server. Returns true if it was news. */
+  /** Say again what we have said about the rooms we own that are occupied. */
+  private refreshVoice() {
+    for (const s of this.owned.values())
+      if (s.state.members.length > 0) this.announceVoice(s.state);
+  }
+
+  /**
+   * An announcement from another server: signed by the owner of the room, which
+   * is the server we also take to own it, and recent. Returns true if it was news.
+   */
   applyRemoteVoice(frame: FedVoice): boolean {
     if (frame.owner === this.selfId || typeof frame.at !== 'number') return false;
+    const now = Date.now();
+    if (!(frame.at <= now + VOICE_AHEAD_MS) || !(frame.at >= now - VOICE_MAX_AGE_MS)) return false;
     if ((this.voiceAt.get(frame.sessionId) ?? 0) >= frame.at) return false;
+    const scope = parseSessionId(frame.sessionId);
+    if (
+      scope?.kind !== 'voice' ||
+      scope.spaceId !== frame.occ.spaceId ||
+      scope.channelId !== frame.occ.channelId ||
+      this.ownerOf(frame.sessionId) !== frame.owner
+    )
+      return false;
+    if (
+      !keyMatchesUserId(frame.key, frame.owner) ||
+      !verifyPayload(frame.key, SIG_DOMAIN.voice, voiceSigned(frame), frame.sig)
+    )
+      return false;
     this.voiceAt.set(frame.sessionId, frame.at);
-    this.setOccupancy(frame.sessionId, frame.occ, frame.owner);
+    this.setOccupancy(frame.sessionId, frame.occ, frame.owner, frame);
     return true;
   }
 
-  private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string) {
+  private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string, frame?: FedVoice) {
     if (occ.members.length === 0) {
       this.occupancy.delete(sessionId);
-      this.emptied.set(sessionId, { occ, owner, at: Date.now() });
+      this.emptied.set(sessionId, { occ, owner, at: Date.now(), frame });
     } else {
-      this.occupancy.set(sessionId, { occ, owner });
+      this.occupancy.set(sessionId, { occ, owner, frame });
       this.emptied.delete(sessionId);
     }
     if (this.voiceAt.size > 100_000) {
@@ -472,17 +523,13 @@ export class SessionService {
     return [...this.occupancy.values()].map((o) => o.occ).filter((o) => wanted.has(o.spaceId));
   }
 
-  /** Every room we know is occupied, for a server that just linked to us. */
+  /** Every room we know is occupied, as its owner announced it, for a server that just linked to us. */
   voiceFrames(): FedVoice[] {
-    const hourAgo = Date.now() - 3600_000;
-    for (const [id, e] of this.emptied) if (e.at < hourAgo) this.emptied.delete(id);
-    return [...this.occupancy, ...this.emptied].map(([sessionId, o]) => ({
-      t: 'voice',
-      sessionId,
-      occ: o.occ,
-      owner: o.owner,
-      at: this.voiceAt.get(sessionId) ?? 0,
-    }));
+    const now = Date.now();
+    for (const [id, e] of this.emptied) if (e.at < now - 3600_000) this.emptied.delete(id);
+    return [...this.occupancy.values(), ...this.emptied.values()]
+      .map((o) => o.frame)
+      .filter((f): f is FedVoice => !!f && f.at >= now - VOICE_MAX_AGE_MS);
   }
 
   // -------------------------------------------------------------------------
@@ -556,6 +603,7 @@ export class SessionService {
 
   close() {
     clearTimeout(this.rebalanceTimer);
+    clearInterval(this.voiceRefresh);
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
     for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);

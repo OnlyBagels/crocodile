@@ -110,6 +110,14 @@ by name goes to `name:<name>`.
   its server's latest presence sequence number: a server that has seen less
   missed something and fetches that server's full presence directly. Servers
   forget what came from a server that has stopped being live.
+  Both are signed by the server they come from (like beacons), with its key in
+  the frame, and a server hands on the frames as they were signed. A frame
+  that isn't signed by the server it names is dropped, so no server can speak
+  for another. Sequence numbers are timestamps: one dated more than five
+  minutes ahead is refused, since it would outrank everything its origin says
+  afterwards. Voice-room occupancy is only believed from the server that owns
+  the room, and only while recent: the owner repeats it every five minutes, and
+  a server ignores announcements older than fifteen.
 - **Account deletion.** The deletion marker reaches the owners of the user's
   shard, which erase what they hold and send the marker on to the owners of
   every space the user was a member of, which erase the memberships. They keep
@@ -122,6 +130,11 @@ by name goes to `name:<name>`.
   records and then not answer for them. It can't change or forge them (they
   are signed), and full-copy servers still hold everything, but deciding who
   may join is a separate, open question.
+- Signatures stop one server speaking for another, not a server lying about
+  its own users. A server can sign that any user is connected through it, and
+  then the events routed to that user (signalling, session invites, mail) go to
+  it. That is the same as the server dropping them. Closing it would take the
+  user's device proving which server it connected to.
 - Every server still hears every beacon and every presence change; that is
   fine for thousands of servers but not for millions of users online at once.
   Presence would then move to the owners of each user's shard.
