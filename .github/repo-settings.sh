@@ -117,6 +117,9 @@ EOF
           { "context": "Desktop build (ubuntu-latest)" },
           { "context": "Desktop build (windows-latest)" },
           { "context": "Desktop build (macos-latest)" },
+          { "context": "Command line tool (ubuntu-latest)" },
+          { "context": "Command line tool (windows-latest)" },
+          { "context": "Command line tool (macos-latest)" },
           { "context": "Server bundles" },
           { "context": "Analyze (javascript-typescript)" },
           { "context": "Analyze (actions)" },
@@ -176,6 +179,18 @@ EOF
   "conditions": { "ref_name": { "include": ["refs/tags/v*", "refs/tags/beta-v*"], "exclude": [] } },
   "bypass_actors": [],
   "rules": [{ "type": "update" }, { "type": "deletion" }]
+}
+EOF
+
+  step 'Ruleset for cla-signatures: the CLA bot adds signatures, nobody deletes or rewrites them'
+  ruleset 'cla-signatures' <<'EOF'
+{
+  "name": "cla-signatures",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": { "ref_name": { "include": ["refs/heads/cla-signatures"], "exclude": [] } },
+  "bypass_actors": [],
+  "rules": [{ "type": "deletion" }, { "type": "non_fast_forward" }]
 }
 EOF
 fi
