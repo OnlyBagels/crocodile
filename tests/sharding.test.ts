@@ -807,10 +807,13 @@ describe('frames from other servers', () => {
     expect(victim.events.map((e) => e.ev)).not.toContain('replaced');
     expect(victim.events.map((e) => e.ev)).not.toContain('session');
     expect(x!.mesh.peerIds()).toContain(y!.info.id);
-    // Events servers do route still arrive.
+    // Events servers do route still arrive, from a server the user is also connected to.
+    const other = await connectUser(y!, victim.identity, 'victim');
+    cleanup.push(() => other.conn.close());
+    await waitFor(() => x!.presence.hosts(y!.info.id, victim.identity.userId), 3000, 'presence');
     y!.mesh.sendTo(x!.info.id, {
       t: 'route',
-      to: victim.conn.peer,
+      to: victim.identity.userId,
       ev: 'relay_expired',
       d: { reason: 'grant ended' },
     } as never);
