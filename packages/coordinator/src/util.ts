@@ -112,7 +112,20 @@ export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinit
 
 /** The longest leading run of items that fits in `budget` bytes. */
 export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
-  return chunkByBytes(items, budget)[0] ?? [];
+  let size = 1;
+  let n = 0;
+  for (const item of items) {
+    size += jsonBytes(item) + 1;
+    if (n > 0 && size > budget) break;
+    n++;
+  }
+  return items.slice(0, n);
+}
+
+/** What fits in one frame, and `more` when something was left out. */
+export function cutToFrame<T>(items: T[]): { records: T[]; more?: true } {
+  const records = withinBytes(items);
+  return records.length < items.length ? { records, more: true } : { records };
 }
 
 /**

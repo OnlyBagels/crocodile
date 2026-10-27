@@ -47,7 +47,7 @@ describe('client RPC answers', () => {
     expect(first.more).toBe(true);
     expect(first.records.length).toBeGreaterThan(0);
     expect(first.records.length).toBeLessThan(keys.length);
-    expect(JSON.stringify(first.records).length).toBeLessThan(1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(first.records))).toBeLessThan(1024 * 1024);
 
     // Asking again for what is left gets there.
     const got = new Set(first.records.map((r) => r.key));
@@ -59,16 +59,18 @@ describe('client RPC answers', () => {
     expect(got.size).toBeGreaterThan(first.records.length);
   });
 
-  it('page a long list by key', async () => {
+  it('page a long list by key, past the most one request may ask for', async () => {
     const { users, reader } = await server(8);
     const seen: string[] = [];
     let after: string | undefined;
     for (let rounds = 0; rounds < 20; rounds++) {
       const res = await reader.conn.request('records.list', {
         prefix: 'profile:',
+        // Each page is cut by bytes well before this many, so the list goes on past five.
+        limit: 5,
         ...(after ? { after } : {}),
       });
-      expect(JSON.stringify(res.records).length).toBeLessThan(1024 * 1024);
+      expect(Buffer.byteLength(JSON.stringify(res.records))).toBeLessThan(1024 * 1024);
       seen.push(...res.records.map((r) => r.key));
       after = res.records.at(-1)?.key;
       if (!res.more) break;

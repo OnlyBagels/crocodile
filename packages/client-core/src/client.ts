@@ -939,11 +939,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const [mine, incoming, own] = await Promise.all([
       link.request('spaces.mine', {}),
       link.request('friends.incoming', {}),
-      link.request('records.get', { keys: [recordKey.profile(me), recordKey.friends(me)] }),
+      fetchRecords(link, [recordKey.profile(me), recordKey.friends(me)]),
     ]);
     const myDevices = await fetchList(link, recordKey.devicePrefix(me));
     this.records.ingestAll([
-      ...own.records,
+      ...own,
       ...myDevices,
       ...mine.spaces,
       ...mine.members,
@@ -2503,8 +2503,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const keys = [recordKey.device(userId, peerIds.device(peer))];
     if (scope.kind !== 'dm')
       keys.push(recordKey.member(scope.spaceId, userId), recordKey.space(scope.spaceId));
-    const res = await this.link.request('records.get', { keys });
-    this.records.ingestAll(res.records);
+    this.records.ingestAll(await fetchRecords(this.link, keys));
   }
 
   /** `peer` is `<userId>.<deviceId>`; bare user ids are accepted too. */
@@ -3505,29 +3504,25 @@ async function fetchRecords(link: CoordinatorLink, keys: string[]): Promise<Sign
   for (;;) {
     const res = await link.request('records.get', { keys: rest });
     out.push(...res.records);
-    if (!res.more || res.records.length === 0) return out;
+    if (!res.more) return out;
+    // A server that says there is more and gives none would have us ask for ever.
+    if (res.records.length === 0) throw new Error('incomplete answer');
     const got = new Set(res.records.map((r) => r.key));
     rest = rest.filter((k) => !got.has(k));
   }
 }
 
 /** The records under a prefix, going on after the last key for as long as the server says more. */
-async function fetchList(
-  link: CoordinatorLink,
-  prefix: string,
-  limit?: number,
-): Promise<SignedRecord[]> {
+async function fetchList(link: CoordinatorLink, prefix: string): Promise<SignedRecord[]> {
   const out: SignedRecord[] = [];
   let after: string | undefined;
   for (;;) {
-    const res = await link.request('records.list', {
-      prefix,
-      ...(limit ? { limit } : {}),
-      ...(after ? { after } : {}),
-    });
+    const res = await link.request('records.list', { prefix, ...(after ? { after } : {}) });
     out.push(...res.records);
+    if (!res.more) return out;
     const last = res.records.at(-1)?.key;
-    if (!res.more || last === undefined || last === after) return out;
+    if (last === undefined || (after !== undefined && last <= after))
+      throw new Error('incomplete answer');
     after = last;
   }
 }

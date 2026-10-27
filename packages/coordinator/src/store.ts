@@ -32,7 +32,8 @@ export interface Store {
   get(key: string): SignedRecord | undefined;
   /** Inserts or replaces; caller has already validated the record. */
   put(record: SignedRecord): number;
-  listPrefix(prefix: string, limit: number): SignedRecord[];
+  /** Records under a prefix in key order, those after the key `after` if one is given. */
+  listPrefix(prefix: string, limit: number, after?: string): SignedRecord[];
   since(seq: number, limit: number): StoredRecord[];
   latestSeq(): number;
   /** Records indexed under a term (see indexTerms). */
@@ -158,13 +159,14 @@ export class MemoryStore implements Store {
     return this.terms.get(term)?.size ?? 0;
   }
 
-  listPrefix(prefix: string, limit: number) {
-    const out: SignedRecord[] = [];
-    for (const [key, r] of this.records) {
-      if (key.startsWith(prefix)) out.push(r.record);
-      if (out.length >= limit) break;
-    }
-    return out;
+  listPrefix(prefix: string, limit: number, after?: string) {
+    const keys: string[] = [];
+    for (const key of this.records.keys())
+      if (key.startsWith(prefix) && (after === undefined || key > after)) keys.push(key);
+    return keys
+      .sort()
+      .slice(0, limit)
+      .map((key) => this.records.get(key)!.record);
   }
 
   since(seq: number, limit: number) {
@@ -418,12 +420,14 @@ export class SqliteStore implements Store {
     return Number(this.stmts.countTerm.get(term)?.n ?? 0);
   }
 
-  listPrefix(prefix: string, limit: number) {
+  listPrefix(prefix: string, limit: number, after?: string) {
     // Prefixes end in ':' so bumping the last char gives an exclusive upper bound.
     const upper =
       prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+    // The least key greater than `after`.
+    const lower = after !== undefined && after >= prefix ? `${after}\0` : prefix;
     return this.stmts.prefix
-      .all(prefix, upper, limit)
+      .all(lower, upper, limit)
       .map((r) => JSON.parse(r.json as string) as SignedRecord);
   }
 

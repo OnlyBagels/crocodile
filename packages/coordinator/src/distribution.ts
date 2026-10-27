@@ -19,7 +19,7 @@ import {
   type View,
 } from './placement';
 import type { PutResult } from './records';
-import { RpcFailure, withinBytes } from './util';
+import { RpcFailure, cutToFrame, withinBytes } from './util';
 
 export interface DistributionConfig {
   /** Records we no longer own go once the live set has been stable this long. */
@@ -363,7 +363,7 @@ export class Distribution {
     shard: string,
     m: 'rec_get' | 'rec_list' | 'rec_term',
     p: unknown,
-    more?: { value: boolean },
+    more?: { value: boolean; upTo?: string },
   ): Promise<SignedRecord[] | null> {
     const answers = await this.hub.mesh.gather<{ records: SignedRecord[]; more?: boolean }>(
       this.others(shard),
@@ -371,7 +371,14 @@ export class Distribution {
       p,
     );
     if (answers.length === 0) return null;
-    if (more) more.value = answers.some((a) => a.more === true);
+    if (more) {
+      more.value = answers.some((a) => a.more === true);
+      // An owner that cut its answer says nothing past the last key it gave.
+      for (const a of answers) {
+        const last = a.more ? a.records?.reduce((k, r) => (r.key > k ? r.key : k), '') : '';
+        if (last && (more.upTo === undefined || last < more.upTo)) more.upTo = last;
+      }
+    }
     // Only well-signed records count: an owner can't hand us a forged newer copy.
     const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
     const newest = new Map<string, SignedRecord>();
@@ -437,18 +444,31 @@ export class Distribution {
     return [...out.values()];
   }
 
-  async list(prefix: string, limit: number): Promise<SignedRecord[]> {
+  /**
+   * Records under a prefix in key order, at most `limit`, those after `after` if given. `more`: an
+   * owner could not give everything it has in one frame, so this is cut where its answer was.
+   */
+  async list(
+    prefix: string,
+    limit: number,
+    after?: string,
+  ): Promise<{ records: SignedRecord[]; more: boolean }> {
     const shard = shardOfPrefix(prefix);
     const store = this.hub.records.store;
     const owned = !shard || this.ownsShard(shard);
-    const local = owned ? store.listPrefix(prefix, limit) : [];
-    if (!shard || (owned && !this.catchingUp())) return local;
-    const remote = await this.fromOwners(shard, 'rec_list', { prefix, limit });
-    if (!remote) return owned ? local : store.listPrefix(prefix, limit);
-    return Distribution.merge(
+    const local = owned ? store.listPrefix(prefix, limit, after) : [];
+    if (!shard || (owned && !this.catchingUp())) return { records: local, more: false };
+    const cut: { value: boolean; upTo?: string } = { value: false };
+    const remote = await this.fromOwners(shard, 'rec_list', { prefix, limit, after }, cut);
+    if (!remote)
+      return { records: owned ? local : store.listPrefix(prefix, limit, after), more: false };
+    const merged = Distribution.merge(
       local,
       remote.filter((r) => r.key.startsWith(prefix)),
-    ).slice(0, limit);
+    )
+      .filter((r) => cut.upTo === undefined || r.key <= cut.upTo)
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return { records: merged.slice(0, limit), more: cut.value };
   }
 
   async findByTerm(term: string, limit: number): Promise<SignedRecord[]> {
@@ -485,13 +505,15 @@ export class Distribution {
       case 'rec_get': {
         const { keys } = parsed.data as { keys: string[] };
         // As many as fit in one frame; the asker comes back for the rest.
-        const found = keys.map((k) => store.get(k)).filter((r) => r !== undefined);
-        const records = withinBytes(found);
-        return records.length < found.length ? { records, more: true } : { records };
+        return cutToFrame(keys.map((k) => store.get(k)).filter((r) => r !== undefined));
       }
       case 'rec_list': {
-        const { prefix, limit } = parsed.data as { prefix: string; limit?: number };
-        return { records: withinBytes(store.listPrefix(prefix, limit ?? 1000)) };
+        const { prefix, limit, after } = parsed.data as {
+          prefix: string;
+          limit?: number;
+          after?: string;
+        };
+        return cutToFrame(store.listPrefix(prefix, limit ?? 1000, after));
       }
       case 'rec_term': {
         const { term, limit } = parsed.data as { term: string; limit?: number };
