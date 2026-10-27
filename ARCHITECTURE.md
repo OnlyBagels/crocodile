@@ -189,9 +189,11 @@ relay; if ICE found a direct path after all, it lets the grant lapse without
 touching the connection. The TURN server honours a renewed grant for
 allocations made under the old credentials, so a relayed call carries on.
 Grants are capped per server (`--relay-max-users`, 25 by default, 10 in the
-desktop app) and rate-limited per allocation; a user's newest allocation
-replaces their oldest past eight, so allocations left behind by dropped
-connections can't lock them out. The relayed packets are the
+desktop app) and rate-limited per allocation, both the relayed bytes and the
+control requests (permissions, channel bindings, refreshes), and an allocation
+holds a bounded number of permissions and channels, which lapse when not
+renewed. A user's newest allocation replaces their oldest past eight, so
+allocations left behind by dropped connections can't lock them out. The relayed packets are the
 same DTLS-SRTP-wrapped, end-to-end encrypted frames: the server sees only
 ciphertext, sizes and timing.
 
