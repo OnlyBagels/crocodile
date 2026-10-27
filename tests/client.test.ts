@@ -1593,4 +1593,58 @@ describe('message ids', () => {
     expect(await accept(session, edit!)).toBe(true);
     expect(bodies(bob, ch).sort()).toEqual(['alice, edited', 'from mallory']);
   });
+
+  it("does not take another author's message for one of its own waiting to be delivered", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const spaceId = await alice.createSpace('Swamp');
+    const ch = channelOf(alice, spaceId);
+    // Nobody else is there, so what Alice writes waits in her outbox.
+    await alice.sendMessage(ch, 'waiting');
+    const [mine] = await alice.platform.messages.page(ch, { limit: 10 });
+    const other = createIdentity();
+    const unsigned = {
+      id: mine!.id,
+      ch,
+      sid: sessionIds.space(spaceId),
+      author: other.userId,
+      key: other.publicKey,
+      ts: mine!.ts + 1,
+      body: 'not alice',
+    };
+    const theirs: ChatMessage = { ...unsigned, sig: sign(other, SIG_DOMAIN.message, unsigned) };
+    const internals = alice as unknown as {
+      withDelivery(page: ChatMessage[]): { pending?: boolean }[];
+      syncCursor(channel: string): Promise<number>;
+    };
+    expect(internals.withDelivery([mine!, theirs]).map((m) => !!m.pending)).toEqual([true, false]);
+    // Only the user's own queued message is left out of what history sync starts from.
+    await alice.platform.messages.put(theirs);
+    expect(await internals.syncCursor(ch)).toBe(theirs.ts);
+  });
+
+  it('pages back through messages that share a time and an id without losing any', async () => {
+    const store = new MemoryMessageStore();
+    const a = createIdentity();
+    const b = createIdentity();
+    const at = 1_700_000_000_000;
+    const make = (who: typeof a, ts: number, id: string, body: string): ChatMessage => {
+      const m = createChatMessage(who, { ch: 'c', body }, ts);
+      return { ...m, id };
+    };
+    // Twins at one time and id, with 3 newer messages: a page of 3 ends between them.
+    await store.put(make(a, at, 'mmmmmmmmmmmmmmmmmmmmmmmmmm', 'twin a'));
+    await store.put(make(b, at, 'mmmmmmmmmmmmmmmmmmmmmmmmmm', 'twin b'));
+    for (let i = 0; i < 3; i++)
+      await store.put(make(a, at + 1 + i, `nnnnnnnnnnnnnnnnnnnnnnnnn${i}`, `n${i}`));
+    const newest = await store.page('c', { limit: 4 });
+    expect(newest.map((m) => m.body).sort()).toEqual(['n0', 'n1', 'n2', 'twin a', 'twin b']);
+    const older = await store.page('c', {
+      before: newest[0]!.ts,
+      beforeId: newest[0]!.id,
+      limit: 4,
+    });
+    expect(older).toEqual([]);
+  });
 });

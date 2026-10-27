@@ -131,6 +131,8 @@ export class MemoryFileBlockStore implements FileBlockStore {
   }
 }
 
+const compareText = (a: string, b: string) => (a === b ? 0 : a < b ? -1 : 1);
+
 export class MemoryMessageStore implements MessageStore {
   private byChannel = new Map<string, ChatMessage[]>();
   private ids = new Set<string>();
@@ -142,7 +144,12 @@ export class MemoryMessageStore implements MessageStore {
     this.ids.add(key);
     const list = this.byChannel.get(message.ch) ?? [];
     list.push(message);
-    list.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+    list.sort(
+      (a, b) =>
+        a.ts - b.ts ||
+        (a.id === b.id ? 0 : a.id < b.id ? -1 : 1) ||
+        compareText(a.author, b.author),
+    );
     this.byChannel.set(message.ch, list);
     return true;
   }
@@ -155,7 +162,15 @@ export class MemoryMessageStore implements MessageStore {
         m.ts < before ||
         (m.ts === before && beforeId !== undefined && m.id < beforeId),
     );
-    return list.slice(-opts.limit);
+    // Don't split messages that share a time and an id (see the desktop store).
+    let start = Math.max(0, list.length - opts.limit);
+    while (
+      start > 0 &&
+      list[start - 1]!.ts === list[start]!.ts &&
+      list[start - 1]!.id === list[start]!.id
+    )
+      start--;
+    return list.slice(start);
   }
 
   async since(channel: string, after: number, limit: number) {

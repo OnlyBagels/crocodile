@@ -1013,7 +1013,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       await this.platform.messages.page(channel, { limit: 200 }),
     );
     for (let i = page.length - 1; i >= 0; i--) {
-      if (!this.outbox.has(page[i]!.id)) return page[i]!.ts;
+      const m = page[i]!;
+      if (!(m.author === this.userId && this.outbox.has(m.id))) return m.ts;
     }
     return 0;
   }
@@ -3450,12 +3451,17 @@ export function defaultDeviceName(platform: string): string {
   return os ? `${kind} · ${os}` : kind;
 }
 
-/** Applies edit/delete messages onto the originals they reference. */
 /** A message is told apart by who wrote it and its id: authors choose their own ids. */
 export const messageKey = (m: Pick<ChatMessage, 'author' | 'id'>) => `${m.author}/${m.id}`;
 
+/** Applies edit/delete messages onto the originals they reference. */
 export function foldEdits(messages: MessageView[]): MessageView[] {
-  const sorted = [...messages].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+  const sorted = [...messages].sort(
+    (a, b) =>
+      a.ts - b.ts ||
+      (a.id === b.id ? 0 : a.id < b.id ? -1 : 1) ||
+      (a.author === b.author ? 0 : a.author < b.author ? -1 : 1),
+  );
   const byId = new Map<string, MessageView>();
   const out: MessageView[] = [];
   for (const m of sorted) {
