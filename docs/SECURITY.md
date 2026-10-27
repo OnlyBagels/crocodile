@@ -84,7 +84,7 @@ picture size.
 | Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
 | Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                       |
 | Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
-| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted in a space or DM they aren't in, even by learning its id.                      |
+| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted where they aren't, even by learning its id; take another's file id.            |
 | Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
 | Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |
 | Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                  |
@@ -106,8 +106,10 @@ picture size.
   label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
   and is authenticated with the trailer.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
-- Files: a random key per file; 1 MiB blocks encrypted with AES-256-GCM
-  (index as nonce; file id, index and a last-block flag as associated data);
+- Files: a random key per file, and an id that is a hash of the author and
+  that key (a message with any other id is refused); 1 MiB blocks encrypted
+  with AES-256-GCM (index as nonce; file id, index and a last-block flag as
+  associated data);
   the hash of the encrypted blocks' SHA-256 list is in the author-signed
   manifest. Stored encrypted as received.
 - Device linking: short one-time code plus a 6-digit security code compared

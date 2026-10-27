@@ -40,8 +40,10 @@ import {
   createSenderKey,
   decodeRecoveryKey,
   encodeRecoveryKey,
+  fileIdFor,
   identityFromSeed,
   isSpaceMember,
+  newFileKey,
   openSealed,
   peekFrameKid,
   randomId,
@@ -555,6 +557,41 @@ describe('messages and signalling', () => {
     expect(verifyChatMessage({ ...msg, sid: 'space:two' })).toBe(false);
     const { sid: _, ...without } = msg;
     expect(verifyChatMessage(without)).toBe(false);
+  });
+
+  it('derives a file id from the author and the key, and from nothing else', () => {
+    const key = newFileKey();
+    const id = fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', key);
+    expect(id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', key)).toBe(id);
+    expect(fileIdFor('bbbbbbbbbbbbbbbbbbbbbbbbbb', key)).not.toBe(id);
+    expect(fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', newFileKey())).not.toBe(id);
+  });
+
+  it('only lets an author post a file under the id their own key gives it', () => {
+    const alice = createIdentity();
+    const mallory = createIdentity();
+    const manifest = (author: typeof alice, key = newFileKey()) => ({
+      id: fileIdFor(author.userId, key),
+      name: 'a.pdf',
+      size: 10,
+      type: 'application/pdf',
+      key,
+      root: newFileKey(),
+    });
+    const real = createChatMessage(alice, { ch: 'general', body: '', file: manifest(alice) });
+    expect(verifyChatMessage(real)).toBe(true);
+    // Mallory signs a message of her own that carries Alice's file id.
+    const squat = createChatMessage(mallory, {
+      ch: 'general',
+      body: '',
+      file: { ...manifest(mallory), id: real.file!.id },
+    });
+    expect(verifyChatMessage(squat)).toBe(false);
+    // Nor can she post Alice's whole manifest as hers.
+    expect(
+      verifyChatMessage(createChatMessage(mallory, { ch: 'general', body: '', file: real.file })),
+    ).toBe(false);
   });
 
   it('binds SDP to session and peers', () => {
