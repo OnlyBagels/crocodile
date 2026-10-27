@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  SecureChannel,
+  answerChannel,
   createIdentity,
   createPrekey,
   isSpaceMember,
@@ -8,6 +10,7 @@ import {
   sealAnonymous,
   sealForSelf,
   sealToDevice,
+  sign,
   signRecord,
   spaceIdFor,
   userTag,
@@ -15,6 +18,7 @@ import {
 import {
   DELETED_PROFILE_NAME,
   NOTE_TTL_MS,
+  SIG_DOMAIN,
   peerIds,
   recordKey,
   sessionIds,
@@ -154,6 +158,114 @@ describe('server hello', () => {
     expect(conn.stun).toEqual([]);
     expect(conn.operator).toBeUndefined();
     conn.close();
+  });
+});
+
+describe('client sign-in', () => {
+  /** A WebSocket that keeps what the client sends. */
+  function recording(sent: string[]) {
+    return class extends WebSocket {
+      override send(data: string) {
+        sent.push(data);
+        super.send(data);
+      }
+    };
+  }
+
+  it("keeps who the client is out of what travels in the clear, so that a plain ws:// connection doesn't show it", async () => {
+    const c = await server();
+    const identity = createIdentity();
+    const deviceId = randomDeviceId();
+    const sent: string[] = [];
+    const conn = await CoordinatorConnection.connect({
+      url: c.url,
+      identity,
+      deviceId,
+      platform: 'bot',
+      version: 'test-version-1',
+      WebSocketImpl: recording(sent),
+    });
+    expect(conn.userId).toBe(identity.userId);
+    const seen = sent.join('\n');
+    expect(sent.length).toBeGreaterThan(0);
+    for (const secret of [identity.publicKey, identity.userId, deviceId, 'bot', 'test-version-1'])
+      expect(seen).not.toContain(secret);
+    expect(Object.keys(JSON.parse(sent[0]!))).toEqual(['t', 'channel', 'sealed']);
+    conn.close();
+  });
+
+  /** Reads the hello off a raw connection and says what the server does with `answer`. */
+  async function answerWith(
+    c: Coordinator,
+    answer: (hello: {
+      challenge: string;
+      server: { id: string };
+      channel: { x25519: string; mlkem: string };
+    }) => unknown,
+  ) {
+    const ws = new WebSocket(c.url.replace(/^http/, 'ws') + '/v1/client');
+    const closed = new Promise<{ code: number; got: unknown[] }>((resolve) => {
+      const got: unknown[] = [];
+      ws.onmessage = (ev) => {
+        const frame = JSON.parse(String(ev.data));
+        got.push(frame);
+        if (frame.t === 'hello') ws.send(JSON.stringify(answer(frame)));
+      };
+      ws.onclose = (ev) => resolve({ code: ev.code, got });
+    });
+    return closed;
+  }
+
+  it('refuses the older form, with the key and device in the clear', async () => {
+    const c = await server();
+    const identity = createIdentity();
+    const result = await answerWith(c, (hello) => {
+      const res = answerChannel(hello.channel);
+      return {
+        t: 'auth',
+        key: identity.publicKey,
+        device: randomDeviceId(),
+        channel: res.answer,
+        sig: sign(identity, SIG_DOMAIN.auth, {
+          challenge: hello.challenge,
+          server: hello.server.id,
+          device: 'aaaaaaaa',
+          channel: res.answer,
+        }),
+        client: { platform: 'bot', version: 'old' },
+      };
+    });
+    expect(result.code).toBe(4002);
+    expect(result.got.some((f) => (f as { t: string }).t === 'auth_ok')).toBe(false);
+  });
+
+  it('refuses a sealed sign-in whose signature is not for this connection', async () => {
+    const c = await server();
+    const identity = createIdentity();
+    const result = await answerWith(c, (hello) => {
+      const res = answerChannel(hello.channel);
+      const device = randomDeviceId();
+      const auth = new SecureChannel(
+        res.secret,
+        `${hello.challenge}|${hello.server.id}|auth`,
+        true,
+      );
+      // Signed for another challenge: as if recorded from an earlier connection.
+      const { n, c: ct } = auth.seal({
+        key: identity.publicKey,
+        device,
+        sig: sign(identity, SIG_DOMAIN.auth, {
+          challenge: 'not-this-one',
+          server: hello.server.id,
+          device,
+          channel: res.answer,
+        }),
+        client: { platform: 'bot', version: 'test' },
+      });
+      return { t: 'auth', channel: res.answer, sealed: { n, c: ct } };
+    });
+    expect(result.code).toBe(4003);
+    expect(result.got.some((f) => (f as { t: string }).t === 'auth_ok')).toBe(false);
   });
 });
 

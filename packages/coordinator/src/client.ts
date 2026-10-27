@@ -12,6 +12,7 @@ import {
 } from '@crocodile/crypto';
 import {
   ClientAuth,
+  ClientAuthBody,
   RpcParams,
   SIG_DOMAIN,
   helloFullPayload,
@@ -162,7 +163,26 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4002, 'expected auth');
       return;
     }
-    const { key, sig, client, device, channel } = parsed.data;
+    const { channel, sealed } = parsed.data;
+    let secret: Uint8Array;
+    try {
+      secret = acceptChannel(this.channelKeys, channel);
+    } catch {
+      this.ws.close(4003, 'bad channel');
+      return;
+    }
+    // Who the client is arrives sealed under the channel it just made.
+    const inner = new SecureChannel(
+      secret,
+      `${this.challenge}|${this.hub.info.id}|auth`,
+      false,
+    ).open(sealed);
+    const body = ClientAuthBody.safeParse(inner);
+    if (!body.success) {
+      this.ws.close(4002, 'expected auth');
+      return;
+    }
+    const { key, sig, client, device } = body.data;
     const ok = verifyPayload(
       key,
       SIG_DOMAIN.auth,
@@ -172,13 +192,6 @@ export class ClientConnection implements ClientHandle {
     if (!ok) {
       this.frame({ t: 'error', err: { code: 'unauthorized', message: 'bad signature' } });
       this.ws.close(4003, 'unauthorized');
-      return;
-    }
-    let secret: Uint8Array;
-    try {
-      secret = acceptChannel(this.channelKeys, channel);
-    } catch {
-      this.ws.close(4003, 'bad channel');
       return;
     }
     this.userId = userIdFromKey(key);

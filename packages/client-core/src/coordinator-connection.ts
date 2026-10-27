@@ -9,6 +9,7 @@ import {
   OperatorInfo,
   SIG_DOMAIN,
   helloFullPayload,
+  type ClientAuthBody,
   type Platform,
   type RpcError,
   type RpcMethod,
@@ -153,9 +154,17 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             return fail(new Error('server key does not match the directory listing'));
           }
           let answer: { epk: string; kem: string };
+          let authChannel: SecureChannel;
           try {
             const res = answerChannel(frame.channel);
             answer = res.answer;
+            // Who we are goes sealed, under keys of their own (the server learns our peer id
+            // only from it, and the channel for the rest of the connection includes it).
+            authChannel = new SecureChannel(
+              res.secret,
+              `${frame.challenge}|${frame.server.id}|auth`,
+              true,
+            );
             const peer = `${opts.identity.userId}.${opts.deviceId}`;
             channel = new SecureChannel(
               res.secret,
@@ -165,21 +174,19 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
           } catch {
             return fail(new Error('server offered an invalid channel'));
           }
-          ws.send(
-            JSON.stringify({
-              t: 'auth',
-              key: opts.identity.publicKey,
+          const body: ClientAuthBody = {
+            key: opts.identity.publicKey,
+            device: opts.deviceId,
+            sig: sign(opts.identity, SIG_DOMAIN.auth, {
+              challenge: frame.challenge,
+              server: frame.server.id,
               device: opts.deviceId,
               channel: answer,
-              sig: sign(opts.identity, SIG_DOMAIN.auth, {
-                challenge: frame.challenge,
-                server: frame.server.id,
-                device: opts.deviceId,
-                channel: answer,
-              }),
-              client: { platform: opts.platform, version: opts.version },
             }),
-          );
+            client: { platform: opts.platform, version: opts.version },
+          };
+          const { n, c } = authChannel.seal(body);
+          ws.send(JSON.stringify({ t: 'auth', channel: answer, sealed: { n, c } }));
         } else if (frame.t === 'auth_ok' && hello && channel) {
           clearTimeout(timer);
           ws.onerror = null;
