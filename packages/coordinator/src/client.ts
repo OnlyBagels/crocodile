@@ -259,6 +259,9 @@ export class ClientConnection implements ClientHandle {
       case 'records.put': {
         if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const { record } = p as unknown as { record: SignedRecord };
+        // A user writes their own records. (A note is signed by a key made for it alone.)
+        if (record.kind !== 'note' && record.author !== this.publicKey)
+          throw new RpcFailure('forbidden', 'records are written by their author');
         const r = await hub.dist.putFromClient(record);
         return {
           accepted: r.accepted,

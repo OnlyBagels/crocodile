@@ -1180,6 +1180,45 @@ describe('sealed friends lists and notes', () => {
     expect(c.records.put(stale, { fresh: false, origin: 'peer' }).reason).toBe('note expired');
   });
 
+  it('lets copies of notes from other owners in past the quota, but only twice over', async () => {
+    const c = await server({ quotas: { notesPerUser: 2 } });
+    const bob = await user(c);
+    const copies = Array.from({ length: 6 }, () => noteTo(bob));
+    const results = copies.map((n) => c.records.put(n, { fresh: false, origin: 'peer' }));
+    expect(results.map((r) => r.accepted)).toEqual([true, true, true, true, false, false]);
+    expect(results[4]!.reason).toMatch(/quota reached/);
+    expect(c.store.countByTerm(`note-to:${bob.identity.userId}`)).toBe(4);
+  });
+
+  it("writes only a user's own records for them, notes apart", async () => {
+    const c = await server();
+    const alice = await user(c);
+    const mallory = await user(c);
+    // Mallory sends in a profile signed by someone else's key (here, a stranger's).
+    const stranger = createIdentity();
+    const profile = signRecord(stranger, 'profile', recordKey.profile(stranger.userId), {
+      username: 'stranger',
+      encKey: stranger.encPublicKey,
+    });
+    await expect(mallory.conn.request('records.put', { record: profile })).rejects.toThrow(
+      /written by their author/,
+    );
+    expect(c.records.get(profile.key)).toBeUndefined();
+    // A note is signed by a key of its own and may come from anyone.
+    expectAccepted(await mallory.conn.request('records.put', { record: noteTo(alice) }));
+    // And a user's own go in as before.
+    const own = signRecord(
+      mallory.identity,
+      'profile',
+      recordKey.profile(mallory.identity.userId),
+      {
+        username: 'mallory2',
+        encKey: mallory.identity.encPublicKey,
+      },
+    );
+    expectAccepted(await mallory.conn.request('records.put', { record: own }));
+  });
+
   it('erases notes to a deleted account', async () => {
     const c = await server();
     const alice = await user(c);

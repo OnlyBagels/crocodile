@@ -37,6 +37,9 @@ export interface RecordQuotas {
   notesPerUser: number;
 }
 
+/** How many times the notes quota a server will hold when copies arrive from other owners. */
+const NOTE_COPIES_MAX = 2;
+
 export const defaultRecordQuotas: RecordQuotas = {
   devicesPerUser: 100,
   spacesPerUser: 100,
@@ -179,6 +182,17 @@ export class RecordService {
     if (opts.fresh && grows) {
       const over = this.overQuota(record);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
+    }
+    // Owners each take a user's notes up to the quota on their own, so a copy from another
+    // server is let in past it, but only so far: every server stops at the same ceiling.
+    if (!opts.fresh && grows && record.kind === 'note') {
+      const to = record.key.split(':')[1];
+      if (this.store.countByTerm(`note-to:${to}`) >= this.quotas.notesPerUser * NOTE_COPIES_MAX)
+        return {
+          accepted: false,
+          current,
+          reason: 'quota reached: too many notes for this account',
+        };
     }
     const seq = this.store.put(record);
     for (const fn of this.listeners) {
