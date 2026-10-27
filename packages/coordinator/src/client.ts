@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
   acceptChannel,
+  signInChannelContext,
   createChannelKeys,
   randomId,
   SecureChannel,
@@ -174,7 +175,7 @@ export class ClientConnection implements ClientHandle {
     // Who the client is arrives sealed under the channel it just made.
     const inner = new SecureChannel(
       secret,
-      `${this.challenge}|${this.hub.info.id}|auth`,
+      signInChannelContext(this.challenge, this.hub.info.id),
       false,
     ).open(sealed);
     if (inner === undefined) {
@@ -194,11 +195,19 @@ export class ClientConnection implements ClientHandle {
       sig,
     );
     if (!ok) {
-      this.frame({ t: 'error', err: { code: 'unauthorized', message: 'bad signature' } });
+      // No frame: before the sign-in is accepted, whatever is sent is in the clear.
       this.ws.close(4003, 'unauthorized');
       return;
     }
     this.userId = userIdFromKey(key);
+    this.deviceId = device;
+    this.peer = peerIds.make(this.userId, device);
+    // From here on what the server says is sealed, an account's deletion included.
+    this.channel = new SecureChannel(
+      secret,
+      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
+      false,
+    );
     const marker = this.hub.deletionMarker(this.userId);
     if (marker) {
       // The signed marker is the proof: clients don't erase anything on a server's word alone.
@@ -209,19 +218,12 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4010, 'account deleted');
       return;
     }
-    this.deviceId = device;
-    this.peer = peerIds.make(this.userId, device);
     if (!this.hub.hasRoomFor(this.peer)) {
       this.ws.close(1013, 'server full; try another');
       return;
     }
     this.publicKey = key;
     this.platform = client.platform;
-    this.channel = new SecureChannel(
-      secret,
-      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
-      false,
-    );
     this.authed = true;
     this.connectedAt = Date.now();
     this.frame({ t: 'auth_ok', userId: this.userId, peer: this.peer });

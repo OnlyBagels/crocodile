@@ -188,7 +188,13 @@ describe('client sign-in', () => {
     expect(conn.userId).toBe(identity.userId);
     const seen = sent.join('\n');
     expect(sent.length).toBeGreaterThan(0);
-    for (const secret of [identity.publicKey, identity.userId, deviceId, 'bot', 'test-version-1'])
+    for (const secret of [
+      identity.publicKey,
+      identity.userId,
+      deviceId,
+      'test-version-1',
+      'platform',
+    ])
       expect(seen).not.toContain(secret);
     expect(Object.keys(JSON.parse(sent[0]!))).toEqual(['t', 'channel', 'sealed']);
     conn.close();
@@ -276,6 +282,47 @@ describe('client sign-in', () => {
     expect(garbage.code).toBe(4003);
   });
 
+  it('tells a deleted account so only in a sealed frame', async () => {
+    const c = await server();
+    const user = await connectUser(c, createIdentity(), 'gone');
+    const me = user.identity.userId;
+    await user.conn.request('records.put', {
+      record: signRecord(user.identity, 'profile', recordKey.profile(me), {
+        username: DELETED_PROFILE_NAME,
+        encKey: user.identity.encPublicKey,
+        deleted: true,
+      }),
+    });
+    await waitFor(() => !!c.deletionMarker(me), 3000, 'marker');
+    const received: string[] = [];
+    class Listening extends WebSocket {
+      private handler: ((ev: MessageEvent) => void) | null = null;
+      override get onmessage() {
+        return this.handler;
+      }
+      override set onmessage(fn: ((ev: MessageEvent) => void) | null) {
+        this.handler = fn;
+        super.onmessage = (ev: MessageEvent) => {
+          received.push(String(ev.data));
+          fn?.(ev);
+        };
+      }
+    }
+    await expect(
+      CoordinatorConnection.connect({
+        url: c.url,
+        identity: user.identity,
+        deviceId: randomDeviceId(),
+        platform: 'bot',
+        version: 'test',
+        WebSocketImpl: Listening,
+      }),
+    ).rejects.toThrow(/deleted/);
+    const kinds = received.map((f) => (JSON.parse(f) as { t: string }).t);
+    expect(kinds).toEqual(['hello', 'x']);
+    expect(received.join('')).not.toContain('account_deleted');
+  });
+
   it('refuses a sealed sign-in whose signature is not for this connection', async () => {
     const c = await server();
     const identity = createIdentity();
@@ -302,7 +349,8 @@ describe('client sign-in', () => {
       return { t: 'auth', channel: res.answer, sealed: { n, c: ct } };
     });
     expect(result.code).toBe(4003);
-    expect(result.got.some((f) => (f as { t: string }).t === 'auth_ok')).toBe(false);
+    // Nothing but the hello was said in the clear: no error to tell it apart from a success.
+    expect(result.got.map((f) => (f as { t: string }).t)).toEqual(['hello']);
   });
 });
 

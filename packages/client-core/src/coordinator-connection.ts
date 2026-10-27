@@ -1,6 +1,7 @@
 import {
   answerChannel,
   SecureChannel,
+  signInChannelContext,
   sign,
   verifyPayload,
   type Identity,
@@ -162,7 +163,7 @@ export class CoordinatorConnection extends Emitter<ConnectionEvents> {
             // only from it, and the channel for the rest of the connection includes it).
             authChannel = new SecureChannel(
               res.secret,
-              `${frame.challenge}|${frame.server.id}|auth`,
+              signInChannelContext(frame.challenge, frame.server.id),
               true,
             );
             const peer = `${opts.identity.userId}.${opts.deviceId}`;

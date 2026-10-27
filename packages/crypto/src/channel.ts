@@ -47,6 +47,13 @@ export function acceptChannel(keys: ChannelKeys, answer: { epk: string; kem: str
   return concatBytes(ssX, ssKem);
 }
 
+/**
+ * What the channel that carries a client's sign-in is bound to. It is apart from the channel for
+ * the rest of the connection, which also names the client (known only once the sign-in is open).
+ */
+export const signInChannelContext = (challenge: string, serverId: string) =>
+  `${challenge}|${serverId}|auth`;
+
 export class SecureChannel {
   private sendN = 0;
   private recvN = -1;
