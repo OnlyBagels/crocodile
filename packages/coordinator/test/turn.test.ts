@@ -522,6 +522,27 @@ describe('TURN relay', () => {
     expect(await bind(0x4000, held[0]!)).toBe(0);
   });
 
+  it('ignores attributes added after a request was signed', async () => {
+    const turn = await limitedTurn({});
+    const c = await turnClient(turn);
+    expect(await allocate(c)).toBe(0);
+    // A signed CreatePermission with no peer, and a peer appended to the datagram afterwards.
+    const tx = randomBytes(12);
+    const signed = encodeStun(0x008, 0, tx, c.auth, c.key);
+    const peer = xorAddress(publicPeers(1, 1)[0]!, 9, tx);
+    const appended = Buffer.alloc(4 + peer.length);
+    appended.writeUInt16BE(0x0012, 0);
+    appended.writeUInt16BE(peer.length, 2);
+    peer.copy(appended, 4);
+    const forged = Buffer.concat([signed, appended]);
+    forged.writeUInt16BE(forged.length - 20, 2);
+    c.sock.send(forged, turn.port, '127.0.0.1');
+    const err = (await c.answer(tx)).attrs.find((a) => a.type === 0x0009)?.value;
+    expect(err && err[2]! * 100 + err[3]!).toBe(400);
+    // The same peer, signed, is accepted.
+    expect(await permit(c, publicPeers(1, 1))).toBe(0);
+  });
+
   it('forgets permissions and channels once they have expired', async () => {
     const turn = await limitedTurn({});
     const c = await turnClient(turn);

@@ -124,12 +124,16 @@ export function parseStun(buf: Buffer): Msg | null {
   const method = (t & 0x000f) | ((t & 0x00e0) >> 1) | ((t & 0x3e00) >> 2);
   const cls = ((t & 0x0010) >> 4) | ((t & 0x0100) >> 7);
   const attrs: Attr[] = [];
+  let signed = false;
   let o = 20;
   while (o + 4 <= 20 + len) {
     const type = buf.readUInt16BE(o);
     const alen = buf.readUInt16BE(o + 2);
     if (o + 4 + alen > 20 + len) return null;
-    attrs.push({ type, value: buf.subarray(o + 4, o + 4 + alen) });
+    // Only what MESSAGE-INTEGRITY covers can be trusted: after it, anyone on the path can append.
+    if (!signed || type === ATTR.fingerprint)
+      attrs.push({ type, value: buf.subarray(o + 4, o + 4 + alen) });
+    if (type === ATTR.messageIntegrity) signed = true;
     o += 4 + alen + ((4 - (alen % 4)) % 4);
   }
   return { method, cls, txId: buf.subarray(8, 20), attrs, raw: buf.subarray(0, 20 + len) };
