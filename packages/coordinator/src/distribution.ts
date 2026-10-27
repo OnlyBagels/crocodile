@@ -364,7 +364,7 @@ export class Distribution {
    */
   private async fromOwners(
     shard: string,
-    m: 'rec_get' | 'rec_list' | 'rec_term',
+    m: 'rec_list' | 'rec_term',
     p: unknown,
     more?: { value: boolean; upTo?: string },
   ): Promise<SignedRecord[] | null> {
@@ -408,6 +408,7 @@ export class Distribution {
     const out = new Map<string, SignedRecord>();
     const ask = new Map<string, string[]>();
     const catchingUp = this.catchingUp();
+    const others = new Map<string, string[]>();
     for (const key of new Set(keys)) {
       const shard = shardOfKey(key);
       const owned = !shard || this.ownsShard(shard);
@@ -415,40 +416,92 @@ export class Distribution {
       if (local) out.set(key, local);
       // Not ours, or ours but missing or possibly behind: ask the other owners.
       if (shard && (!owned || !local || catchingUp)) {
-        const list = ask.get(shard) ?? [];
-        list.push(key);
-        ask.set(shard, list);
+        if (!others.has(shard)) others.set(shard, this.others(shard));
+        ask.set(key, others.get(shard)!);
       }
     }
-    await Promise.all(
-      [...ask].map(async ([shard, group]) => {
-        // At most 1000 keys a request, and an answer too large for one
-        // frame comes in parts: ask again for what it left out.
-        const found: SignedRecord[] = [];
-        for (let i = 0; i < group.length; i += 1000) {
-          let left = group.slice(i, i + 1000);
-          while (left.length) {
-            const more = { value: false };
-            const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
-            found.push(...part);
-            const got = new Set(part.map((r) => r.key));
-            const rest = left.filter((k) => !got.has(k));
-            left = more.value && rest.length < left.length ? rest : [];
+    for (const r of await this.askOwners(ask)) {
+      if (ask.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
+    }
+    // A record we wrote a moment ago may not have reached the owners yet;
+    // if they can't be reached, what we still hold is better than nothing.
+    for (const key of ask.keys()) {
+      const mine = this.lookup(key);
+      if (mine && (out.get(key)?.version ?? 0) < mine.version) out.set(key, mine);
+    }
+    return [...out.values()];
+  }
+
+  /**
+   * The newest well-signed copy of each key from its owners. Every server involved is asked once
+   * for all the keys it owns, however many shards they fall in, so a request costs as many
+   * messages as there are servers, not as many as there are keys. As with a single shard, it
+   * returns a moment after every key has an answer, without waiting for slower owners of it.
+   */
+  private async askOwners(owners: Map<string, string[]>): Promise<SignedRecord[]> {
+    const byServer = new Map<string, string[]>();
+    for (const [key, servers] of owners)
+      for (const id of servers) {
+        const list = byServer.get(id) ?? [];
+        list.push(key);
+        byServer.set(id, list);
+      }
+    if (byServer.size === 0) return [];
+    // Keys still waiting for an answer from any of their owners that has not failed or finished.
+    const waiting = new Set([...owners].filter(([, list]) => list.length > 0).map(([key]) => key));
+    const settled = new Set<string>();
+    const got: SignedRecord[] = [];
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => (release = resolve));
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
+    const check = () => {
+      if (settled.size === byServer.size) return release();
+      if (waiting.size === 0 && !grace) grace = setTimeout(release, 250);
+    };
+    const ask = async (id: string, keys: string[]) => {
+      try {
+        // At most 1000 keys a request, and an answer too large for one frame comes in
+        // parts: ask again for what it left out.
+        for (let i = 0; i < keys.length && !stopped; i += 1000) {
+          let left = keys.slice(i, i + 1000);
+          while (left.length && !stopped) {
+            const res = await this.hub.mesh.request<{ records: SignedRecord[]; more?: boolean }>(
+              id,
+              'rec_get',
+              { keys: left },
+            );
+            got.push(...(res.records ?? []));
+            const have = new Set((res.records ?? []).map((r) => r.key));
+            const rest = left.filter((k) => !have.has(k));
+            // Cut short and nothing gained: it has more but won't say, so these are not answered.
+            if (res.more && rest.length === left.length) break;
+            // Keys not given back are ones it has no record of, unless it cut its answer short.
+            for (const k of res.more ? have : left) waiting.delete(k);
+            left = res.more ? rest : [];
+            check();
           }
         }
-        const asked = new Set(group);
-        for (const r of found) {
-          if (asked.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
-        }
-        // A record we wrote a moment ago may not have reached the owners yet;
-        // if they can't be reached, what we still hold is better than nothing.
-        for (const key of group) {
-          const mine = this.lookup(key);
-          if (mine && (out.get(key)?.version ?? 0) < mine.version) out.set(key, mine);
-        }
-      }),
-    );
-    return [...out.values()];
+      } catch {
+        // an owner that does not answer is left out
+      } finally {
+        settled.add(id);
+        // What only failed or finished owners could have answered is not worth waiting for.
+        for (const k of keys) if (owners.get(k)!.every((o) => settled.has(o))) waiting.delete(k);
+        check();
+      }
+    };
+    for (const [id, keys] of byServer) void ask(id, keys);
+    await done;
+    stopped = true;
+    clearTimeout(grace);
+    // Only well-signed records count: an owner can't hand us a forged newer copy.
+    const { valid } = this.sift(got.filter((r) => owners.has(r.key)));
+    const newest = new Map<string, SignedRecord>();
+    for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
+    const found = [...newest.values()];
+    this.remember(found);
+    return found;
   }
 
   /**

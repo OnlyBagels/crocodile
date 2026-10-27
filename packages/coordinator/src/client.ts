@@ -386,7 +386,7 @@ export class ClientConnection implements ClientHandle {
       }
       case 'voice.watch': {
         const { spaceIds } = p as unknown as { spaceIds: string[] };
-        const member = await Promise.all(spaceIds.map((id) => hub.isSpaceMember(id, this.userId)));
+        const member = await hub.areSpaceMember(spaceIds, this.userId);
         if (member.includes(false)) throw new RpcFailure('forbidden', 'not a member of that space');
         this.voiceWatch = new Set(spaceIds);
         return { voice: hub.sessions.voiceSnapshot(spaceIds) };

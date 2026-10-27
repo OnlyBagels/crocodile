@@ -705,12 +705,16 @@ export class Coordinator {
 
   /** Whether a user belongs to a space, asking the space's owners if need be. */
   async isSpaceMember(spaceId: string, userId: string) {
-    const records = await this.dist.get([
-      recordKey.space(spaceId),
-      recordKey.member(spaceId, userId),
-    ]);
+    return (await this.areSpaceMember([spaceId], userId))[0]!;
+  }
+
+  /** `isSpaceMember` for several spaces at once, in one round of questions to the owners. */
+  async areSpaceMember(spaceIds: string[], userId: string) {
+    const records = await this.dist.get(
+      spaceIds.flatMap((id) => [recordKey.space(id), recordKey.member(id, userId)]),
+    );
     const byKey = new Map(records.map((r) => [r.key, r]));
-    return isSpaceMember({ get: (k) => byKey.get(k) }, spaceId, userId);
+    return spaceIds.map((id) => isSpaceMember({ get: (k) => byKey.get(k) }, id, userId));
   }
 
   async searchUsers(query: string): Promise<SignedRecord<'profile'>[]> {

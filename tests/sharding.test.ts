@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CrocodileClient,
   MemoryKeyValueStore,
@@ -696,7 +696,7 @@ describe('large records between servers', () => {
   }, 60_000);
 
   it('a replicated batch looks up what it needs in one round, not one record at a time', async () => {
-    const a = await server('A');
+    const [a] = (await network(2)) as [Coordinator, Coordinator];
     // Memberships of 40 spaces nobody here holds; every lookup takes 150 ms.
     const items = Array.from({ length: 40 }, () => {
       const id = createIdentity();
@@ -708,17 +708,74 @@ describe('large records between servers', () => {
       return { seq: 0, record };
     });
     let calls = 0;
-    a.mesh.gather = (async () => {
+    const real = a.mesh.request.bind(a.mesh);
+    const lookups = vi.spyOn(a.mesh, 'request').mockImplementation((async (
+      ...args: Parameters<typeof real>
+    ) => {
+      if (args[1] !== 'rec_get') return real(...args);
       calls++;
       await new Promise((r) => setTimeout(r, 150));
-      return [];
-    }) as typeof a.mesh.gather;
+      return { records: [] };
+    }) as typeof a.mesh.request);
+    cleanup.push(() => lookups.mockRestore());
     const started = Date.now();
     await a.dist.onReplicated(items, 'elsewhere');
     expect(calls).toBeGreaterThan(0);
     // One record after another would take 40 × 150 ms at least.
     expect(Date.now() - started).toBeLessThan(2000);
   });
+  it('gets every record an owner has, however many keys and however large', async () => {
+    const servers = await network(3);
+    // Profiles near the largest allowed: an owner fits one or two in a frame.
+    const avatar = `data:image/png;base64,${'A'.repeat(300_000)}`;
+    const records: SignedRecord[] = [];
+    for (let i = 0; i < 36; i++) {
+      const u = await user(servers[1 + (i % 2)]!, `big${i}`);
+      const profile = signRecord(u.identity, 'profile', recordKey.profile(u.identity.userId), {
+        username: `big${i}`,
+        encKey: u.identity.encPublicKey,
+        avatar,
+      });
+      await put(u, profile);
+      records.push(profile);
+    }
+    // The server holding the fewest asks for those it holds none of: all must come from the others.
+    const held = (c: Coordinator) => records.filter((r) => owners(servers, r).includes(c.info.id));
+    const reader = servers.reduce((a, b) => (held(b).length < held(a).length ? b : a));
+    const away = records.filter((r) => !owners(servers, r).includes(reader.info.id));
+    expect(away.length).toBeGreaterThan(3);
+    await waitFor(
+      () => away.every((r) => holders(servers, r.key).length >= 2),
+      30_000,
+      'profiles reach their owners',
+    );
+    const real = reader.mesh.request.bind(reader.mesh);
+    const asked = vi.spyOn(reader.mesh, 'request');
+    // Slow the second and later questions to a server, so that a lookup which stopped waiting
+    // once every server had answered something would come back short.
+    const seen = new Set<string>();
+    asked.mockImplementation(async (id, m, p, timeout) => {
+      if (m === 'rec_get' && seen.has(id)) await new Promise((r) => setTimeout(r, 400));
+      seen.add(id);
+      return real(id, m, p, timeout);
+    });
+    const got = await reader.dist.get(away.map((r) => r.key));
+    expect(got.map((r) => r.key).sort()).toEqual(away.map((r) => r.key).sort());
+    // More than one request to a server: its answers were cut to a frame, and it was asked again.
+    expect(asked.mock.calls.filter((c) => c[1] === 'rec_get').length).toBeGreaterThan(2);
+
+    // And far more keys than a request holds are asked in parts, each part within the limit.
+    asked.mockClear();
+    const absent = Array.from({ length: 2500 }, (_, i) =>
+      recordKey.profile(`${'b'.repeat(24)}${String(i).padStart(4, '0')}`),
+    );
+    expect(await reader.dist.get(absent)).toEqual([]);
+    const sizes = asked.mock.calls
+      .filter((c) => c[1] === 'rec_get')
+      .map((c) => (c[2] as { keys: string[] }).keys.length);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
+    expect(sizes.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(2500);
+  }, 120_000);
 });
 
 describe('records from other servers', () => {
@@ -869,5 +926,40 @@ describe('frames from other servers', () => {
     }
     expect(seen).toEqual([...seen].sort());
     expect(seen.sort()).toEqual(notes.map((n) => n.key).sort());
+  }, 60_000);
+  it("asks each server once however many shards a client's lookup spans", async () => {
+    const servers = await network(3);
+    const owners = await Promise.all(servers.map((c) => user(c)));
+    const more = await Promise.all(Array.from({ length: 12 }, (_, i) => user(servers[i % 3]!)));
+    const everyone = [...owners, ...more];
+    const reader = await user(servers[0]!);
+    const asked = vi.spyOn(servers[0]!.mesh, 'request');
+    const keys = everyone.map((u) => recordKey.profile(u.identity.userId));
+    const res = await reader.conn.request('records.get', { keys });
+    expect(res.records.map((r) => r.key).sort()).toEqual(keys.sort());
+    // Only the lookups for these keys: the servers ask each other about other things too.
+    const lookupsFor = (wanted: string[]) =>
+      asked.mock.calls.filter(
+        (c) =>
+          c[1] === 'rec_get' && (c[2] as { keys: string[] }).keys.some((k) => wanted.includes(k)),
+      );
+    const lookups = lookupsFor(keys);
+    // One question to each of the other two servers, not one to every owner of every user.
+    expect(lookups.length).toBeLessThanOrEqual(2);
+    expect(lookups.length).toBeGreaterThan(0);
+
+    // Following the voice in many spaces is a single round of questions too.
+    const alice = await user(servers[1]!, 'alice');
+    const spaces = [];
+    for (let i = 0; i < 8; i++) spaces.push((await createSpace(alice, `S${i}`)).spaceId);
+    const aliceAtZero = await connectUser(servers[0]!, alice.identity, 'alice');
+    cleanup.push(() => aliceAtZero.conn.close());
+    asked.mockClear();
+    await aliceAtZero.conn.request('voice.watch', { spaceIds: spaces });
+    expect(
+      lookupsFor(
+        spaces.flatMap((id) => [recordKey.space(id), recordKey.member(id, alice.identity.userId)]),
+      ).length,
+    ).toBeLessThanOrEqual(2);
   }, 60_000);
 });
