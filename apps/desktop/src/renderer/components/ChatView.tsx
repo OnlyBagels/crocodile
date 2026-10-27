@@ -407,14 +407,14 @@ function Message({
 }) {
   const client = getClient();
   const [draft, setDraft] = useState(() => plain(m.body));
-  const isEditing = editing === m.id;
+  const isEditing = editing === messageKey(m);
   const right = bubbles && mine;
   const invites = useMemo(() => inviteCodes(m.body).slice(0, 3), [m.body]);
   const mentionsMe = useMemo(() => !!me && mentionsIn(m.body).includes(me), [m.body, me]);
   const menu = useContextMenu();
   const startEdit = () => {
     setDraft(plain(m.body));
-    setEditing(m.id);
+    setEditing(messageKey(m));
   };
   const onContextMenu = (e: React.MouseEvent) => {
     if (isEditing) return;

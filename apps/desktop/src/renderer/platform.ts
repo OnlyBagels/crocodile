@@ -167,7 +167,10 @@ export const messages: MessageStore = {
       const plain = await d.get('messages', key);
       if (plain) {
         if (await isRepeat(plain)) return false;
-        key = `${message.id}:${message.author}:${message.ch}`;
+        // Starts with the id and a NUL, so it sorts next to the rows of the same id
+        // (paging relies on that), and is longer than any id (40 at most), so no
+        // author can pick an id that is already taken by this key.
+        key = `${message.id}\0${message.author}\0${message.ch}`.padEnd(41, '\0');
         if (await d.get('messages', key)) return false;
       }
       const blob = await seal(message);

@@ -110,6 +110,7 @@ import type { ConnectionRoute, LinkStats } from './relay-link';
 import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
+import { messageKey } from './message-key';
 import { StateStore } from './store';
 import type { OutgoingVideo, ScreenQuality, ScreenRequest, VoiceEngine } from './voice';
 
@@ -3450,9 +3451,6 @@ export function defaultDeviceName(platform: string): string {
           : 'Bot';
   return os ? `${kind} · ${os}` : kind;
 }
-
-/** A message is told apart by who wrote it and its id: authors choose their own ids. */
-export const messageKey = (m: Pick<ChatMessage, 'author' | 'id'>) => `${m.author}/${m.id}`;
 
 /** Applies edit/delete messages onto the originals they reference. */
 export function foldEdits(messages: MessageView[]): MessageView[] {

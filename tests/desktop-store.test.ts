@@ -146,4 +146,25 @@ describe.runIf(haveChromium)('desktop message store', () => {
     expect(result.older).toBe(0);
     expect(result.again).toEqual([false, false]);
   });
+  it('keeps twins together when another id starts with theirs', async () => {
+    const a = createIdentity();
+    const b = createIdentity();
+    const ch = 'chan-neighbours';
+    const at = 1_700_000_000_000;
+    const make = (who: typeof a, id: string, body: string): ChatMessage => ({
+      ...createChatMessage(who, { ch, body }, at),
+      id,
+    });
+    const twin = 'mmmmmmmmmmmmmmmmmmmmmmmmmm';
+    const list = [make(a, twin, 'twin a'), make(b, twin, 'twin b'), make(a, `${twin}0`, 'next')];
+    const result = await page.evaluate(
+      async ({ list, ch }) => {
+        for (const m of list) await window.store.put(m);
+        return (await window.store.page(ch, { limit: 2 })).map((m) => m.body).sort();
+      },
+      { list, ch },
+    );
+    // A page of 2 would end between the twins, so it takes both.
+    expect(result).toEqual(['next', 'twin a', 'twin b']);
+  });
 });
