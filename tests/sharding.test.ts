@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CrocodileClient,
   MemoryKeyValueStore,
@@ -696,7 +696,7 @@ describe('large records between servers', () => {
   }, 60_000);
 
   it('a replicated batch looks up what it needs in one round, not one record at a time', async () => {
-    const a = await server('A');
+    const [a] = (await network(2)) as [Coordinator, Coordinator];
     // Memberships of 40 spaces nobody here holds; every lookup takes 150 ms.
     const items = Array.from({ length: 40 }, () => {
       const id = createIdentity();
@@ -708,11 +708,11 @@ describe('large records between servers', () => {
       return { seq: 0, record };
     });
     let calls = 0;
-    a.mesh.gather = (async () => {
+    a.mesh.request = (async () => {
       calls++;
       await new Promise((r) => setTimeout(r, 150));
-      return [];
-    }) as typeof a.mesh.gather;
+      return { records: [] };
+    }) as typeof a.mesh.request;
     const started = Date.now();
     await a.dist.onReplicated(items, 'elsewhere');
     expect(calls).toBeGreaterThan(0);
@@ -869,5 +869,30 @@ describe('frames from other servers', () => {
     }
     expect(seen).toEqual([...seen].sort());
     expect(seen.sort()).toEqual(notes.map((n) => n.key).sort());
+  }, 60_000);
+  it("asks each server once however many shards a client's lookup spans", async () => {
+    const servers = await network(3);
+    const owners = await Promise.all(servers.map((c) => user(c)));
+    const more = await Promise.all(Array.from({ length: 12 }, (_, i) => user(servers[i % 3]!)));
+    const everyone = [...owners, ...more];
+    const reader = await user(servers[0]!);
+    const asked = vi.spyOn(servers[0]!.mesh, 'request');
+    const keys = everyone.map((u) => recordKey.profile(u.identity.userId));
+    const res = await reader.conn.request('records.get', { keys });
+    expect(res.records.map((r) => r.key).sort()).toEqual(keys.sort());
+    const lookups = asked.mock.calls.filter((c) => c[1] === 'rec_get');
+    // One question to each of the other two servers, not one to every owner of every user.
+    expect(lookups.length).toBeLessThanOrEqual(2);
+    expect(lookups.length).toBeGreaterThan(0);
+
+    // Following the voice in many spaces is a single round of questions too.
+    const alice = await user(servers[1]!, 'alice');
+    const spaces = [];
+    for (let i = 0; i < 8; i++) spaces.push((await createSpace(alice, `S${i}`)).spaceId);
+    const aliceAtZero = await connectUser(servers[0]!, alice.identity, 'alice');
+    cleanup.push(() => aliceAtZero.conn.close());
+    asked.mockClear();
+    await aliceAtZero.conn.request('voice.watch', { spaceIds: spaces });
+    expect(asked.mock.calls.filter((c) => c[1] === 'rec_get').length).toBeLessThanOrEqual(2);
   }, 60_000);
 });

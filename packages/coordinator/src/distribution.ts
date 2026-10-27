@@ -414,41 +414,80 @@ export class Distribution {
       const local = owned ? this.hub.records.store.get(key) : undefined;
       if (local) out.set(key, local);
       // Not ours, or ours but missing or possibly behind: ask the other owners.
-      if (shard && (!owned || !local || catchingUp)) {
-        const list = ask.get(shard) ?? [];
-        list.push(key);
-        ask.set(shard, list);
-      }
+      if (shard && (!owned || !local || catchingUp)) ask.set(key, this.others(shard));
     }
-    await Promise.all(
-      [...ask].map(async ([shard, group]) => {
-        // At most 1000 keys a request, and an answer too large for one
-        // frame comes in parts: ask again for what it left out.
-        const found: SignedRecord[] = [];
-        for (let i = 0; i < group.length; i += 1000) {
-          let left = group.slice(i, i + 1000);
+    for (const r of await this.askOwners(ask)) {
+      if (ask.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
+    }
+    // A record we wrote a moment ago may not have reached the owners yet;
+    // if they can't be reached, what we still hold is better than nothing.
+    for (const key of ask.keys()) {
+      const mine = this.lookup(key);
+      if (mine && (out.get(key)?.version ?? 0) < mine.version) out.set(key, mine);
+    }
+    return [...out.values()];
+  }
+
+  /**
+   * The newest well-signed copy of each key from its owners. Every server involved is asked once
+   * for all the keys it owns, however many shards they fall in, so a request costs as many
+   * messages as there are servers, not as many as there are keys. As with a single shard, it
+   * returns a moment after every key has an answer, without waiting for slower owners of it.
+   */
+  private async askOwners(owners: Map<string, string[]>): Promise<SignedRecord[]> {
+    const byServer = new Map<string, string[]>();
+    for (const [key, servers] of owners)
+      for (const id of servers) byServer.set(id, [...(byServer.get(id) ?? []), key]);
+    if (byServer.size === 0) return [];
+    const answered = new Set<string>();
+    const settled = new Set<string>();
+    const got: SignedRecord[] = [];
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => (release = resolve));
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    const check = () => {
+      if (settled.size === byServer.size) return release();
+      const covered = [...owners.values()].every(
+        (list) => list.some((id) => answered.has(id)) || list.every((id) => settled.has(id)),
+      );
+      if (covered && !grace) grace = setTimeout(release, 250);
+    };
+    const ask = async (id: string, keys: string[]) => {
+      try {
+        // At most 1000 keys a request, and an answer too large for one frame comes in
+        // parts: ask again for what it left out.
+        for (let i = 0; i < keys.length; i += 1000) {
+          let left = keys.slice(i, i + 1000);
           while (left.length) {
-            const more = { value: false };
-            const part = (await this.fromOwners(shard, 'rec_get', { keys: left }, more)) ?? [];
-            found.push(...part);
-            const got = new Set(part.map((r) => r.key));
-            const rest = left.filter((k) => !got.has(k));
-            left = more.value && rest.length < left.length ? rest : [];
+            const res = await this.hub.mesh.request<{ records: SignedRecord[]; more?: boolean }>(
+              id,
+              'rec_get',
+              { keys: left },
+            );
+            got.push(...(res.records ?? []));
+            answered.add(id);
+            const have = new Set((res.records ?? []).map((r) => r.key));
+            const rest = left.filter((k) => !have.has(k));
+            left = res.more && rest.length < left.length ? rest : [];
           }
         }
-        const asked = new Set(group);
-        for (const r of found) {
-          if (asked.has(r.key) && (out.get(r.key)?.version ?? 0) < r.version) out.set(r.key, r);
-        }
-        // A record we wrote a moment ago may not have reached the owners yet;
-        // if they can't be reached, what we still hold is better than nothing.
-        for (const key of group) {
-          const mine = this.lookup(key);
-          if (mine && (out.get(key)?.version ?? 0) < mine.version) out.set(key, mine);
-        }
-      }),
-    );
-    return [...out.values()];
+      } catch {
+        // an owner that does not answer is left out
+      } finally {
+        settled.add(id);
+        check();
+      }
+    };
+    for (const [id, keys] of byServer) void ask(id, keys);
+    await done;
+    clearTimeout(grace);
+    // Only well-signed records count: an owner can't hand us a forged newer copy.
+    const { valid } = this.sift(got);
+    const newest = new Map<string, SignedRecord>();
+    for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
+    const found = [...newest.values()];
+    this.remember(found);
+    return found;
   }
 
   /**

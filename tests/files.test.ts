@@ -12,7 +12,13 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { newFileKey, sign } from '@crocodile/crypto';
-import { SIG_DOMAIN, fileBlockCipherSize, sessionIds, type ChatMessage } from '@crocodile/protocol';
+import {
+  SIG_DOMAIN,
+  fileBlockCipherSize,
+  recordKey,
+  sessionIds,
+  type ChatMessage,
+} from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -134,6 +140,12 @@ async function dmPair(
   const b = makeClient(net, coord, stores.bob);
   const alice = await signUp(a.client, 'alice');
   const bob = await signUp(b.client, 'bob');
+  // Notes are sealed to a user's devices, so a friend request needs one published.
+  await waitFor(
+    () => coord.store.listPrefix(recordKey.devicePrefix(bob.userId), 1).length > 0,
+    5000,
+    'bob publishes a device',
+  );
   await befriend(alice, bob);
   const dm = await alice.openDm(bob.userId);
   await bob.openDm(alice.userId);
