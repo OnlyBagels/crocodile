@@ -254,6 +254,9 @@ export class FileTransfers {
     mine: boolean,
   ) {
     if (this.records.has(message.file.id)) return;
+    // The message was checked on its way in; this keeps the rule next to the
+    // record it protects (a file's id is its author's, see fileIdFor).
+    if (message.file.id !== fileIdFor(message.author, message.file.key)) return;
     const n = fileBlockCount(message.file.size);
     await this.save({
       manifest: message.file,

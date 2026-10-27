@@ -39,8 +39,8 @@ import {
   createIdentity,
   createSenderKey,
   decodeRecoveryKey,
-  fileIdFor,
   encodeRecoveryKey,
+  fileIdFor,
   identityFromSeed,
   isSpaceMember,
   newFileKey,
@@ -557,6 +557,15 @@ describe('messages and signalling', () => {
     expect(verifyChatMessage({ ...msg, sid: 'space:two' })).toBe(false);
     const { sid: _, ...without } = msg;
     expect(verifyChatMessage(without)).toBe(false);
+  });
+
+  it('derives a file id from the author and the key, and from nothing else', () => {
+    const key = newFileKey();
+    const id = fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', key);
+    expect(id).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', key)).toBe(id);
+    expect(fileIdFor('bbbbbbbbbbbbbbbbbbbbbbbbbb', key)).not.toBe(id);
+    expect(fileIdFor('aaaaaaaaaaaaaaaaaaaaaaaaaa', newFileKey())).not.toBe(id);
   });
 
   it('only lets an author post a file under the id their own key gives it', () => {

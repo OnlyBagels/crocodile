@@ -29,6 +29,7 @@ import { hkdfSha256, randomBytes, sha256 } from './primitives';
 const subtle = () => globalThis.crypto.subtle;
 const AAD_PREFIX = utf8.encode('croc/v1/file-block');
 
+/** A random id. Not for posting a file: its id must be `fileIdFor` (messages with another are refused). */
 export function newFileId() {
   return toB64u(randomBytes(16));
 }
