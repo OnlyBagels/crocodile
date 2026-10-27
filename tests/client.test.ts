@@ -1408,7 +1408,10 @@ describe('channel ids belong to one space', () => {
     await waitFor(() => bob.sessionOfChannel(ch), 5000, 'bob has the channel');
     // Mallory goes, so Bob is the one Carol asks.
     await mallory.shutdown();
+    // What Bob kept from A is not shown as part of the other space.
+    await bob.openChannel(ch);
     await bob.sendMessage(ch, 'said in the other space');
+    expect(bodies(bob, ch)).toEqual(['said in the other space']);
 
     // Carol comes later and asks whoever is there for the channel's history.
     // Her client would drop what isn't for her; see what is sent to her.
@@ -1448,6 +1451,30 @@ describe('channel ids belong to one space', () => {
     expect(said!.sid).toBe(sessionIds.space(spaceA));
   });
 
+  it('refuses a space message that names no session', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('A');
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    const ch = channelOf(alice, spaceA);
+    const session = sessionIds.space(spaceA);
+    const accept = (
+      bob as unknown as Record<string, (s: string, m: ChatMessage) => Promise<boolean>>
+    ).acceptMessage!.bind(bob);
+    // What older versions wrote: the channel, and no session.
+    expect(await accept(session, createChatMessage(alice.identity!, { ch, body: 'old' }))).toBe(
+      false,
+    );
+    expect(
+      await accept(session, createChatMessage(alice.identity!, { ch, sid: session, body: 'new' })),
+    ).toBe(true);
+    // The session is signed with the rest.
+    const tampered = createChatMessage(alice.identity!, { ch, sid: session, body: 'x' });
+    expect(await accept(session, { ...tampered, sid: 'space:other', body: 'x' })).toBe(false);
+  });
+
   it('gives a channel id to the space joined first', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
@@ -1472,8 +1499,15 @@ describe('channel ids belong to one space', () => {
       12000,
     );
     await mallory.sendMessage(ch, 'from the other space');
-    await new Promise((r) => setTimeout(r, 1000));
-    expect(bodies(bob, ch)).toEqual([]);
+    // Something that does belong there, to know the wait was long enough.
+    await waitFor(
+      () => alice.state.sessions[sessionIds.space(spaceA)]?.peers.includes(bob.userId),
+      12000,
+    );
+    await alice.sendMessage(ch, 'said in A');
+    await waitFor(() => bodies(bob, ch).includes('said in A'), 12000, 'a message of A');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(bodies(bob, ch)).toEqual(['said in A']);
   });
 
   it('hides the channel of a space joined later, rather than mixing the two', async () => {
@@ -1500,8 +1534,16 @@ describe('channel ids belong to one space', () => {
       12000,
     );
     await alice.sendMessage(ch, 'said in A');
-    await new Promise((r) => setTimeout(r, 1000));
-    expect(bodies(bob, ch)).toEqual([]);
-    expect(await bob.platform.messages.since(ch, 0, 10)).toEqual([]);
+    await waitFor(
+      () => mallory.state.sessions[sessionIds.space(other.spaceId)]?.peers.includes(bob.userId),
+      12000,
+    );
+    await mallory.sendMessage(ch, 'said in the other space');
+    await waitFor(() => bodies(bob, ch).includes('said in the other space'), 12000, 'its own');
+    await new Promise((r) => setTimeout(r, 300));
+    expect(bodies(bob, ch)).toEqual(['said in the other space']);
+    expect((await bob.platform.messages.since(ch, 0, 10)).map((m) => m.body)).toEqual([
+      'said in the other space',
+    ]);
   });
 });

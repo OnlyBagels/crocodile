@@ -126,9 +126,9 @@ picture size.
   ahead). Servers that already hold the removal refuse it.
 
 - Text channel ids are only unique within a space. A device gives an id to
-  the space it joined first, so a space that reuses another's channel id and
-  is joined first hides the later space's channel on that device (it can't
-  show one space's messages in the other).
+  the space it joined first (leaving and rejoining counts as joining again), so a space that reuses another's channel id and
+  is joined first hides the later space's channel on that device (messages are
+  accepted and served only in the space they were written in).
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

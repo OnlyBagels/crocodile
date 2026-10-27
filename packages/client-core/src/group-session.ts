@@ -1298,8 +1298,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const out: ChatMessage[] = [];
     for (const [ch, after] of Object.entries(since)) {
       if (!allowed.has(ch)) continue;
-      const held = await this.ctx.messages.since(ch, after, 500);
-      out.push(...held.filter((m) => messageSession(m) === this.sessionId));
+      // The store is keyed by channel id and may hold another space's messages
+      // under it: take only this session's, reading on while 500 aren't found.
+      const seen = new Set<string>();
+      let from = after;
+      for (let round = 0; round < 10; round++) {
+        const held = await this.ctx.messages.since(ch, from, 500);
+        for (const m of held)
+          if (messageSession(m) === this.sessionId && !seen.has(`${m.author}/${m.id}`)) {
+            seen.add(`${m.author}/${m.id}`);
+            out.push(m);
+          }
+        if (held.length < 500 || seen.size >= 500) break;
+        from = held[held.length - 1]!.ts;
+      }
     }
     await this.sendMessages(to, out);
   }

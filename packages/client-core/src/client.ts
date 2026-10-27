@@ -1008,11 +1008,25 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Newest message of a channel that did not come from our own offline queue. */
   private async syncCursor(channel: string): Promise<number> {
-    const page = await this.platform.messages.page(channel, { limit: 200 });
+    const page = this.ofSession(
+      channel,
+      await this.platform.messages.page(channel, { limit: 200 }),
+    );
     for (let i = page.length - 1; i >= 0; i--) {
       if (!this.outbox.has(page[i]!.id)) return page[i]!.ts;
     }
     return 0;
+  }
+
+  /**
+   * What the store holds for a channel that was written for its session. The
+   * store is keyed by channel id, so it can still hold another space's
+   * messages under an id this space now uses (after leaving that space).
+   * Messages from before they named their session are kept.
+   */
+  private ofSession(channel: string, messages: ChatMessage[]) {
+    const session = this.sessionOfChannel(channel);
+    return messages.filter((m) => !m.sid || m.sid === session);
   }
 
   private withDelivery(page: ChatMessage[]): MessageView[] {
@@ -1386,6 +1400,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         };
       }
       patch.spaces = spaces;
+      // A channel that is no longer this space's (it left, or another space
+      // has the id now) must not keep showing what was loaded for it.
+      const own = new Map<string, string>();
+      for (const sp of Object.values(spaces)) for (const c of sp.channels) own.set(c.id, sp.id);
+      const stale = Object.values(this.state.spaces)
+        .flatMap((sp) => sp.channels.filter((c) => c.kind === 'text').map((c) => [c.id, sp.id]))
+        .filter(([ch, sp]) => own.get(ch!) !== sp)
+        .map(([ch]) => ch!)
+        .filter((ch) => this.state.messages[ch]);
+      if (stale.length > 0)
+        patch.messages = Object.fromEntries(
+          Object.entries(this.state.messages).filter(([ch]) => !stale.includes(ch)),
+        );
       // Leave sessions of spaces we no longer belong to.
       for (const [sid, session] of this.sessions) {
         const scope = parseSessionId(sid);
@@ -2774,7 +2801,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async openChannel(channel: string) {
     this.store.set((s) => ({ activeChannel: channel, unread: { ...s.unread, [channel]: 0 } }));
     if (!this.state.messages[channel]) {
-      const page = await this.platform.messages.page(channel, { limit: 100 });
+      const page = this.ofSession(
+        channel,
+        await this.platform.messages.page(channel, { limit: 100 }),
+      );
       this.store.set((s) => ({
         messages: { ...s.messages, [channel]: foldEdits(this.withDelivery(page)) },
       }));
@@ -2795,11 +2825,14 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async loadOlderPage(channel: string): Promise<boolean> {
     const oldest = (this.state.messages[channel] ?? [])[0];
-    const page = await this.platform.messages.page(channel, {
-      before: oldest?.ts,
-      beforeId: oldest?.id,
-      limit: 100,
-    });
+    const page = this.ofSession(
+      channel,
+      await this.platform.messages.page(channel, {
+        before: oldest?.ts,
+        beforeId: oldest?.id,
+        limit: 100,
+      }),
+    );
     if (page.length === 0) return false;
     this.store.set((s) => {
       const shown = s.messages[channel] ?? [];
