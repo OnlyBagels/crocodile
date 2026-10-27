@@ -6,7 +6,9 @@ import { pad, unpad } from './padding';
 /**
  * Encrypted, length-padded frames over an existing WebSocket. Used between
  * clients and coordination servers and between servers in the mesh, so
- * metadata stays confidential even over plain ws:// to home-hosted servers.
+ * what is said stays confidential even over plain ws:// to home-hosted
+ * servers. A client's sign-in is sealed too; a server's own id is not (the
+ * hello, and a server's identification to another server).
  *
  * Key agreement is hybrid (X25519 + ML-KEM-768) with fresh keys per
  * connection on both sides (forward secret); the handshake messages are

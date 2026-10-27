@@ -200,7 +200,10 @@ describe('client sign-in', () => {
     conn.close();
   });
 
-  /** Reads the hello off a raw connection and says what the server does with `answer`. */
+  /**
+   * Reads the hello off a raw connection and says what the server does with the frame(s) `answer`
+   * gives back.
+   */
   async function answerWith(
     c: Coordinator,
     answer: (hello: {
@@ -210,16 +213,25 @@ describe('client sign-in', () => {
     }) => unknown,
   ) {
     const ws = new WebSocket(c.url.replace(/^http/, 'ws') + '/v1/client');
-    const closed = new Promise<{ code: number; got: unknown[] }>((resolve) => {
+    return new Promise<{ code: number; got: unknown[] }>((resolve, reject) => {
       const got: unknown[] = [];
+      const timer = setTimeout(() => {
+        ws.close();
+        reject(new Error('the server did not close the connection'));
+      }, 5000);
       ws.onmessage = (ev) => {
         const frame = JSON.parse(String(ev.data));
         got.push(frame);
-        if (frame.t === 'hello') ws.send(JSON.stringify(answer(frame)));
+        if (frame.t === 'hello') {
+          const reply = answer(frame);
+          for (const f of Array.isArray(reply) ? reply : [reply]) ws.send(JSON.stringify(f));
+        }
       };
-      ws.onclose = (ev) => resolve({ code: ev.code, got });
+      ws.onclose = (ev) => {
+        clearTimeout(timer);
+        resolve({ code: ev.code, got });
+      };
     });
-    return closed;
   }
 
   it('refuses the older form, with the key and device in the clear', async () => {
