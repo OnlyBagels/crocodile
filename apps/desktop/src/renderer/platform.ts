@@ -148,17 +148,28 @@ const decode = async (rows: StoredMessage[]) =>
 export const messages: MessageStore = {
   async put(message) {
     const d = await db();
-    if (await d.get('messages', message.id)) return false;
     const blob = await seal(message);
-    // Re-check inside the write transaction (encryption above is async).
-    const tx = d.transaction('messages', 'readwrite');
-    if (await tx.store.get(message.id)) {
-      await tx.done;
+    const row = (id: string): StoredMessage => ({ id, ch: message.ch, ts: message.ts, blob });
+    // `add` fails if the key is taken, which keeps this safe against another
+    // write landing while the held message is decrypted below.
+    const add = async (id: string) => {
+      try {
+        await d.add('messages', row(id));
+        return true;
+      } catch (e) {
+        if ((e as { name?: string }).name === 'ConstraintError') return false;
+        throw e;
+      }
+    };
+    if (await add(message.id)) return true;
+    // Authors choose their own ids: the first message under an id takes the
+    // row named by it, and one from another author or channel gets a row of
+    // its own rather than being taken for a repeat.
+    const held = await d.get('messages', message.id);
+    const heldMessage = held && (await unseal<ChatMessage>(held.blob));
+    if (!heldMessage || (heldMessage.ch === message.ch && heldMessage.author === message.author))
       return false;
-    }
-    await tx.store.put({ id: message.id, ch: message.ch, ts: message.ts, blob });
-    await tx.done;
-    return true;
+    return add(`${message.id}:${message.author}:${message.ch}`);
   },
   async page(channel, { before, beforeId, limit }) {
     const d = await db();

@@ -11,7 +11,7 @@ export interface KeyValueStore {
 
 /** Local message history. Text never lives anywhere but on peers. */
 export interface MessageStore {
-  /** Returns false if the message id was already stored. */
+  /** Returns false if that author's message with that id was already stored in the channel. */
   put(message: ChatMessage): Promise<boolean>;
   /**
    * Newest-last page of messages before a position: older than `before`, or
@@ -136,8 +136,10 @@ export class MemoryMessageStore implements MessageStore {
   private ids = new Set<string>();
 
   async put(message: ChatMessage) {
-    if (this.ids.has(message.id)) return false;
-    this.ids.add(message.id);
+    // Authors choose their ids, so one author's can't hide another's message.
+    const key = `${message.ch}\n${message.author}\n${message.id}`;
+    if (this.ids.has(key)) return false;
+    this.ids.add(key);
     const list = this.byChannel.get(message.ch) ?? [];
     list.push(message);
     list.sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));

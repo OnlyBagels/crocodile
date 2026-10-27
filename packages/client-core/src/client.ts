@@ -1031,7 +1031,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private withDelivery(page: ChatMessage[]): MessageView[] {
     return page.map((m) => {
-      const e = this.outbox.get(m.id);
+      const e = m.author === this.userId ? this.outbox.get(m.id) : undefined;
       return e ? { ...m, pending: true, mailed: !!e.mailed } : m;
     });
   }
@@ -1043,10 +1043,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const messages = { ...s.messages };
       let changed = false;
       for (const [ch, list] of Object.entries(messages)) {
-        if (!list.some((m) => done.has(m.id))) continue;
-        messages[ch] = list.map((m) =>
-          done.has(m.id) ? { ...m, pending: false, mailed: false } : m,
-        );
+        const mine = (m: MessageView) => m.author === this.userId && done.has(m.id);
+        if (!list.some(mine)) continue;
+        messages[ch] = list.map((m) => (mine(m) ? { ...m, pending: false, mailed: false } : m));
         changed = true;
       }
       return changed ? { messages } : {};
@@ -1117,7 +1116,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           return {
             messages: {
               ...s.messages,
-              [sessionId]: list.map((m) => (mailed.has(m.id) ? { ...m, mailed: true } : m)),
+              [sessionId]: list.map((m) =>
+                mailed.has(m.id) && m.author === this.userId ? { ...m, mailed: true } : m,
+              ),
             },
           };
         });
@@ -2836,8 +2837,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (page.length === 0) return false;
     this.store.set((s) => {
       const shown = s.messages[channel] ?? [];
-      const have = new Set(shown.map((m) => m.id));
-      const older = this.withDelivery(page.filter((m) => !have.has(m.id)));
+      const have = new Set(shown.map(messageKey));
+      const older = this.withDelivery(page.filter((m) => !have.has(messageKey(m))));
       return { messages: { ...s.messages, [channel]: foldEdits([...older, ...shown]) } };
     });
     return true;
@@ -3076,7 +3077,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return {
         messages: {
           ...s.messages,
-          [channel]: foldEdits([...list.filter((m) => m.id !== message.id), message]),
+          [channel]: foldEdits([
+            ...list.filter((m) => messageKey(m) !== messageKey(message)),
+            message,
+          ]),
         },
       };
     });
@@ -3447,14 +3451,17 @@ export function defaultDeviceName(platform: string): string {
 }
 
 /** Applies edit/delete messages onto the originals they reference. */
+/** A message is told apart by who wrote it and its id: authors choose their own ids. */
+export const messageKey = (m: Pick<ChatMessage, 'author' | 'id'>) => `${m.author}/${m.id}`;
+
 export function foldEdits(messages: MessageView[]): MessageView[] {
   const sorted = [...messages].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
   const byId = new Map<string, MessageView>();
   const out: MessageView[] = [];
   for (const m of sorted) {
     if (m.edits) {
-      const original = byId.get(m.edits);
-      if (original && original.author === m.author) {
+      const original = byId.get(messageKey({ author: m.author, id: m.edits }));
+      if (original) {
         const updated: MessageView = {
           ...original,
           body: m.deleted ? '' : m.body,
@@ -3462,12 +3469,12 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
           deleted: m.deleted,
         };
         if (m.deleted) delete updated.file;
-        byId.set(original.id, updated);
+        byId.set(messageKey(original), updated);
         out[out.indexOf(original)] = updated;
       }
       continue;
     }
-    byId.set(m.id, m);
+    byId.set(messageKey(m), m);
     out.push(m);
   }
   return out;

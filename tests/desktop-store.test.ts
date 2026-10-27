@@ -87,4 +87,29 @@ describe.runIf(haveChromium)('desktop message store', () => {
     );
     expect(since).toHaveLength(100);
   });
+  it('keeps messages that share an id but not an author, and still drops repeats', async () => {
+    const alice = createIdentity();
+    const mallory = createIdentity();
+    const ch = 'chan-same-id';
+    const real = createChatMessage(alice, { ch, body: 'from alice' }, 1_700_000_000_000);
+    // Authors choose their ids: hers is the same as Alice's. (The store doesn't check signatures.)
+    const squat = { ...createChatMessage(mallory, { ch, body: 'from mallory' }), id: real.id };
+    const other = { ...real, ch: 'chan-elsewhere' };
+    const result = await page.evaluate(
+      async ({ squat, real, other, ch }) => {
+        const puts = [
+          await window.store.put(squat),
+          await window.store.put(real),
+          await window.store.put(real),
+          await window.store.put(squat),
+          await window.store.put(other),
+        ];
+        const held = await window.store.page(ch, { limit: 10 });
+        return { puts, held: held.map((m) => m.body).sort() };
+      },
+      { squat, real, other, ch },
+    );
+    expect(result.puts).toEqual([true, true, false, false, true]);
+    expect(result.held).toEqual(['from alice', 'from mallory']);
+  });
 });

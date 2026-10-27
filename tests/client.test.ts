@@ -10,9 +10,10 @@ import {
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
 import { Directory } from '@crocodile/directory';
-import { createChatMessage, createIdentity, signRecord } from '@crocodile/crypto';
+import { createChatMessage, createIdentity, sign, signRecord } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
+  SIG_DOMAIN,
   recordKey,
   sessionIds,
   type ChatMessage,
@@ -1545,5 +1546,51 @@ describe('channel ids belong to one space', () => {
     expect((await bob.platform.messages.since(ch, 0, 10)).map((m) => m.body)).toEqual([
       'said in the other space',
     ]);
+  });
+});
+
+describe('message ids', () => {
+  it("keeps two authors' messages that share an id, and edits the right one", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const mallory = await signUp(makeClient(net, coord), 'mallory');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await mallory.joinWithInvite(code);
+    await bob.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const session = sessionIds.space(spaceId);
+    await alice.sendMessage(ch, 'from alice');
+    const [real] = await alice.platform.messages.page(ch, { limit: 10 });
+
+    // Mallory writes under Alice's id and Bob gets hers first.
+    const unsigned = {
+      id: real!.id,
+      ch,
+      sid: session,
+      author: mallory.userId,
+      key: mallory.identity!.publicKey,
+      ts: real!.ts,
+      body: 'from mallory',
+    };
+    const squat: ChatMessage = {
+      ...unsigned,
+      sig: sign(mallory.identity!, SIG_DOMAIN.message, unsigned),
+    };
+    const accept = (
+      bob as unknown as Record<string, (s: string, m: ChatMessage) => Promise<boolean>>
+    ).acceptMessage!.bind(bob);
+    await bob.openChannel(ch);
+    expect(await accept(session, squat)).toBe(true);
+    expect(await accept(session, real!)).toBe(true);
+    expect(bodies(bob, ch).sort()).toEqual(['from alice', 'from mallory']);
+
+    // Alice's edit changes hers, and not the one that shares its id.
+    await alice.editMessage(ch, real!.id, 'alice, edited');
+    const [, edit] = await alice.platform.messages.page(ch, { limit: 10 });
+    expect(await accept(session, edit!)).toBe(true);
+    expect(bodies(bob, ch).sort()).toEqual(['alice, edited', 'from mallory']);
   });
 });
