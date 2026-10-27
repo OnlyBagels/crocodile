@@ -19,6 +19,7 @@ import {
 import type { CoordinatorLink } from './coordinator-link';
 import { Emitter } from './emitter';
 import { GroupKeyring } from './keyring';
+import { messageKey } from './message-key';
 import type { MessageStore, PlatformAdapter, RelayHandle } from './platform';
 import {
   RelayLink,
@@ -1320,8 +1321,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       for (let round = 0; round < 10; round++) {
         const held = await this.ctx.messages.since(ch, from, 500);
         for (const m of held)
-          if (messageSession(m) === this.sessionId && !seen.has(`${m.author}/${m.id}`)) {
-            seen.add(`${m.author}/${m.id}`);
+          if (messageSession(m) === this.sessionId && !seen.has(messageKey(m))) {
+            seen.add(messageKey(m));
             out.push(m);
           }
         if (held.length < 500 || seen.size >= 500) break;

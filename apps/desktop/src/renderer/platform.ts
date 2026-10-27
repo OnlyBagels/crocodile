@@ -22,7 +22,11 @@ declare global {
 export const desktop = window.crocodile;
 
 interface StoredMessage {
+  /** Row key: the message id, or for a later message under the same id `id:author:ch`. */
   id: string;
+  /** The message's own id, and its author (rows from before these existed have neither). */
+  mid?: string;
+  author?: string;
   ch: string;
   ts: number;
   /** AES-256-GCM(iv ‖ ciphertext) of the message JSON. */
@@ -148,17 +152,44 @@ const decode = async (rows: StoredMessage[]) =>
 export const messages: MessageStore = {
   async put(message) {
     const d = await db();
-    if (await d.get('messages', message.id)) return false;
-    const blob = await seal(message);
-    // Re-check inside the write transaction (encryption above is async).
-    const tx = d.transaction('messages', 'readwrite');
-    if (await tx.store.get(message.id)) {
-      await tx.done;
-      return false;
+    // Authors choose their own ids: the first message under an id takes the
+    // row named by it, and one from another author or channel gets a row of
+    // its own rather than being taken for a repeat. Rows written before this
+    // have no author on them; those are opened to see whose they are.
+    const isRepeat = async (row: StoredMessage | undefined) => {
+      if (!row) return false;
+      if (row.author !== undefined) return row.ch === message.ch && row.author === message.author;
+      const held = await unseal<ChatMessage>(row.blob);
+      return !!held && held.ch === message.ch && held.author === message.author;
+    };
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let key = message.id;
+      const plain = await d.get('messages', key);
+      if (plain) {
+        if (await isRepeat(plain)) return false;
+        // Starts with the id and a NUL, so it sorts next to the rows of the same id
+        // (paging relies on that), and is longer than any id (40 at most), so no
+        // author can pick an id that is already taken by this key.
+        key = `${message.id}\0${message.author}\0${message.ch}`.padEnd(41, '\0');
+        if (await d.get('messages', key)) return false;
+      }
+      const blob = await seal(message);
+      try {
+        // `add` fails if another write took the key while this one sealed.
+        await d.add('messages', {
+          id: key,
+          mid: message.id,
+          author: message.author,
+          ch: message.ch,
+          ts: message.ts,
+          blob,
+        });
+        return true;
+      } catch (e) {
+        if ((e as { name?: string }).name !== 'ConstraintError') throw e;
+      }
     }
-    await tx.store.put({ id: message.id, ch: message.ch, ts: message.ts, blob });
-    await tx.done;
-    return true;
+    return false;
   },
   async page(channel, { before, beforeId, limit }) {
     const d = await db();
@@ -175,9 +206,19 @@ export const messages: MessageStore = {
       .transaction('messages')
       .store.index('byChannelTs')
       .openCursor(range, 'prev');
-    while (cursor && rows.length < limit) {
+    const messageId = (row: StoredMessage) => row.mid ?? row.id;
+    while (cursor) {
       const row = cursor.value;
-      if (!(beforeId !== undefined && row.ts === before && row.id >= beforeId)) rows.push(row);
+      // Never split messages that share a time and an id: a position is only
+      // a time and an id, so the rest would not be reached by scrolling back.
+      const last = rows.at(-1);
+      if (
+        rows.length >= limit &&
+        !(last && last.ts === row.ts && messageId(last) === messageId(row))
+      )
+        break;
+      if (!(beforeId !== undefined && row.ts === before && messageId(row) >= beforeId))
+        rows.push(row);
       cursor = await cursor.continue();
     }
     return decode(rows.reverse());
