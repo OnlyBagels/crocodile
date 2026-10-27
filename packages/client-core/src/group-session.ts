@@ -3,6 +3,7 @@ import {
   E2EEnvelope,
   GroupPayload,
   SealedPayload,
+  messageSession,
   peerIds,
   streamIds,
   utf8,
@@ -55,7 +56,10 @@ export interface SessionContext {
   /** Channels whose history belongs to the session. */
   historyChannels(sessionId: string): string[];
   /** Verify and store a chat message; resolves true if it was new. */
-  acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean>;
+  /** `history`: it came in a history reply, not live. */
+  acceptMessage(sessionId: string, message: ChatMessage, history?: boolean): Promise<boolean>;
+  /** Whether `acceptMessage` would take it (a repeat is still taken). */
+  admits(sessionId: string, message: ChatMessage, history?: boolean): boolean;
   /** This device's unacknowledged messages. */
   outbox: {
     pending(sessionId: string): ChatMessage[];
@@ -1032,6 +1036,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     await this.sendSealed(to, { type: 'history', messages: chunk, done: true });
   }
 
+  /**
+   * Hands messages to the client; returns those it took in or already had.
+   * Only those are confirmed: a sender must not take a message nobody kept
+   * for delivered.
+   */
+  private async take(messages: ChatMessage[], history: boolean) {
+    const taken: ChatMessage[] = [];
+    for (const m of messages) {
+      await this.ctx.acceptMessage(this.sessionId, m, history);
+      if (this.ctx.admits(this.sessionId, m, history)) taken.push(m);
+    }
+    return taken;
+  }
+
   /** Confirm receipt of messages authored by `from`'s user, batched. */
   private queueAck(from: string, messages: ChatMessage[]) {
     const author = peerIds.user(from);
@@ -1199,13 +1217,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         return;
       case 'history':
         if (!(await this.mayHear(from))) return;
-        for (const m of payload.messages) await this.ctx.acceptMessage(this.sessionId, m);
-        this.queueAck(from, payload.messages);
+        this.queueAck(from, await this.take(payload.messages, true));
         return;
       case 'message':
         if (!(await this.mayHear(from))) return;
-        await this.ctx.acceptMessage(this.sessionId, payload.message);
-        this.queueAck(from, [payload.message]);
+        this.queueAck(from, await this.take([payload.message], false));
         return;
       case 'ack':
         // Only another person's confirmation counts, not our own other devices.
@@ -1237,8 +1253,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const fromUser = peerIds.user(from);
     if (payload.type === 'message') {
       if (payload.message.author !== fromUser) return;
-      await this.ctx.acceptMessage(this.sessionId, payload.message);
-      if (this.shouldAckLive(from)) this.queueAck(from, [payload.message]);
+      const taken = await this.take([payload.message], false);
+      if (this.shouldAckLive(from)) this.queueAck(from, taken);
     } else if (payload.type === 'typing') {
       this.emit('typing', { userId: fromUser, ch: payload.ch });
     } else if (payload.type === 'call' && this.isDm) {
@@ -1297,7 +1313,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const out: ChatMessage[] = [];
     for (const [ch, after] of Object.entries(since)) {
       if (!allowed.has(ch)) continue;
-      out.push(...(await this.ctx.messages.since(ch, after, 500)));
+      // The store is keyed by channel id and may hold another space's messages
+      // under it: take only this session's, reading on while 500 aren't found.
+      const seen = new Set<string>();
+      let from = after;
+      for (let round = 0; round < 10; round++) {
+        const held = await this.ctx.messages.since(ch, from, 500);
+        for (const m of held)
+          if (messageSession(m) === this.sessionId && !seen.has(`${m.author}/${m.id}`)) {
+            seen.add(`${m.author}/${m.id}`);
+            out.push(m);
+          }
+        if (held.length < 500 || seen.size >= 500) break;
+        from = held[held.length - 1]!.ts;
+      }
     }
     await this.sendMessages(to, out);
   }

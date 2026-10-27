@@ -124,7 +124,18 @@ picture size.
   reaches a server can stay on that server until the owner's next change
   (versions are last-writer-wins, and a record may be dated up to 5 minutes
   ahead). Servers that already hold the removal refuse it.
-
+- Text channel ids are only unique within a space. A device gives an id to
+  the space it joined first (leaving and rejoining counts as joining again),
+  so a space that reuses another's channel id and is joined first hides the
+  later space's channel on that device (messages are accepted and served only
+  in the space they were written in).
+- Messages written before they named their space carry only a channel id.
+  They are accepted from history another member passes on, not live, and an
+  updated device does not serve them (it can't tell which space they belong
+  to). A member of two spaces can therefore still be shown such an old message
+  in the other space's channel if it reuses the id, and a member can replay
+  one into the other space's history. Updated peers don't write these, and
+  old peers' new messages are refused until they update.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

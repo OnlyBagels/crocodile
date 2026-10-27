@@ -547,6 +547,16 @@ describe('messages and signalling', () => {
     expect(verifyChatMessage({ ...msg, author: createIdentity().userId })).toBe(false);
   });
 
+  it('signs the session a message was written for', () => {
+    const alice = createIdentity();
+    const msg = createChatMessage(alice, { ch: 'general', sid: 'space:one', body: 'hi' });
+    expect(msg.sid).toBe('space:one');
+    expect(verifyChatMessage(msg)).toBe(true);
+    expect(verifyChatMessage({ ...msg, sid: 'space:two' })).toBe(false);
+    const { sid: _, ...without } = msg;
+    expect(verifyChatMessage(without)).toBe(false);
+  });
+
   it('binds SDP to session and peers', () => {
     const alice = createIdentity();
     const bob = createIdentity();
