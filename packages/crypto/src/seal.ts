@@ -27,9 +27,14 @@ import { prekeySecrets, type PrekeySecret } from './prekeys';
  * Hybrid post-quantum sealed box to one device:
  *
  *   ss = X25519(ephemeral, prekey.x25519) ‖ ML-KEM-768.encaps(prekey.mlkem)
- *   key, nonce = HKDF-SHA256(ss, salt = epk ‖ kem ‖ prekey ids)
+ *   key, nonce = HKDF-SHA256(ss, salt = epk ‖ kem ‖ recipient and prekey ids ‖
+ *                            sender key and device ‖ recipient prekey keys)
  *   ct = AES-256-GCM(key, nonce, pad(plaintext))
  *   sig = Ed25519(sender, everything above + recipient)
+ *
+ * The sender and the recipient's prekey are in the key derivation, so a box
+ * only opens as sent by the one who sealed it: whoever carries it to its
+ * recipient can't put their own signature on it and have it taken as theirs.
  *
  * Breaking it needs both X25519 and ML-KEM broken ("harvest now, decrypt
  * later" resistant); prekeys rotate weekly and their secrets are deleted, so
@@ -43,10 +48,16 @@ function boxKey(
   to: string,
   pk: number,
   info: string = SIG_DOMAIN.sealed,
+  binding = '',
 ) {
-  const salt = concatBytes(epk, kem, new TextEncoder().encode(`${to}|${pk}`));
+  const salt = concatBytes(epk, kem, new TextEncoder().encode(`${to}|${pk}${binding}`));
   const okm = hkdfSha256(concatBytes(ssX, ssKem), salt, info, 44);
   return { key: okm.slice(0, 32), nonce: okm.slice(32, 44) };
+}
+
+/** What a sealed box's key is tied to besides the encapsulation (see above). */
+function sealedBinding(from: string, fromDevice: string, prekey: PrekeyBundle) {
+  return `|${from}|${fromDevice}|${prekey.x25519}|${prekey.mlkem}`;
 }
 
 function signedPart(box: Omit<SealedBox, 'sig'>, recipientX25519: string) {
@@ -75,10 +86,19 @@ export function sealToDevice(
   const { cipherText: kem, sharedSecret: ssKem } = ml_kem768.encapsulate(
     fromB64u(recipient.prekey.mlkem),
   );
-  const { key, nonce } = boxKey(ssX, ssKem, epk, kem, recipient.peer, recipient.prekey.id);
+  const { key, nonce } = boxKey(
+    ssX,
+    ssKem,
+    epk,
+    kem,
+    recipient.peer,
+    recipient.prekey.id,
+    SIG_DOMAIN.sealed,
+    sealedBinding(sender.publicKey, senderDevice, recipient.prekey),
+  );
   const ct = aesGcmEncrypt(key, nonce, pad(plaintext));
   const unsigned = {
-    v: 2 as const,
+    v: 3 as const,
     to: recipient.peer,
     pk: recipient.prekey.id,
     epk: toB64u(epk),
@@ -118,7 +138,16 @@ export function openSealed(
     const kem = fromB64u(box.kem);
     const ssX = x25519.getSharedSecret(secrets.x25519, epk);
     const ssKem = ml_kem768.decapsulate(kem, secrets.mlkem);
-    const { key, nonce } = boxKey(ssX, ssKem, epk, kem, box.to, box.pk);
+    const { key, nonce } = boxKey(
+      ssX,
+      ssKem,
+      epk,
+      kem,
+      box.to,
+      box.pk,
+      SIG_DOMAIN.sealed,
+      sealedBinding(box.from, box.fromDevice, pk.bundle),
+    );
     const padded = aesGcmDecrypt(key, nonce, fromB64u(box.ct));
     const plaintext = padded && unpad(padded);
     if (!plaintext) return null;

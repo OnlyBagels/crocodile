@@ -4,6 +4,7 @@ import {
   DELETED_PROFILE_NAME,
   NOTE_TTL_MS,
   recordKey,
+  SIG_DOMAIN,
   type SignedRecord,
   utf8,
 } from '@crocodile/protocol';
@@ -48,12 +49,14 @@ import {
   peekFrameKid,
   randomId,
   safetyNumber,
+  sign,
   signRecord,
   signSdp,
   signSpaceAuthority,
   spaceIdFor,
   validateRecord,
   verifyChatMessage,
+  verifyPayload,
   verifySdp,
   type ValidationContext,
 } from '../src';
@@ -374,6 +377,41 @@ describe('hybrid post-quantum sealed boxes', () => {
       utf8.encode('x'.repeat(40)),
     );
     expect(small.ct.length).toBe(medium.ct.length);
+  });
+
+  it("a box carried to its recipient cannot be signed over as someone else's", () => {
+    const alice = createIdentity();
+    const mallory = createIdentity();
+    const bob = createIdentity();
+    const bobPeer = `${bob.userId}.bobdevice1`;
+    const pk = createPrekey();
+    const lookup = (id: number) => (id === pk.id ? pk : undefined);
+    const box = sealToDevice(
+      alice,
+      'alicedev1',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode("alice's sender key"),
+    );
+    // Whoever carries the box swaps in their own name and signs it themselves.
+    const unsigned = { ...box, from: mallory.publicKey, fromDevice: 'malloryd1' };
+    const { sig: _, ...rest } = unsigned;
+    const resigned = {
+      ...unsigned,
+      sig: sign(mallory, SIG_DOMAIN.sealed, { ...rest, rx: pk.bundle.x25519 }),
+    };
+    expect(
+      verifyPayload(
+        mallory.publicKey,
+        SIG_DOMAIN.sealed,
+        { ...rest, rx: pk.bundle.x25519 },
+        resigned.sig,
+      ),
+    ).toBe(true);
+    expect(openSealed({ peer: bobPeer }, lookup, resigned, userIdFromKey)).toBeNull();
+    // The one it was sealed by still opens it.
+    expect(openSealed({ peer: bobPeer }, lookup, box, userIdFromKey)?.from).toBe(
+      `${alice.userId}.alicedev1`,
+    );
   });
 
   it('rotates prekeys and forgets expired secrets', () => {

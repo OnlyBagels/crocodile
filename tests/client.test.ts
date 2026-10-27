@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CoordinatorLink,
   CrocodileClient,
+  GroupKeyring,
   MemoryKeyValueStore,
   MemoryMessageStore,
   type NetworkProbe,
@@ -16,6 +17,7 @@ import {
   SIG_DOMAIN,
   recordKey,
   sessionIds,
+  utf8,
   type ChatMessage,
   type DeviceBody,
   type SpaceBody,
@@ -1701,5 +1703,75 @@ describe('message ids', () => {
       limit: 4,
     });
     expect(older).toEqual([]);
+  });
+});
+
+describe('sender keys', () => {
+  async function connected() {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const mallory = await signUp(makeClient(net, coord, { canHost: false }), 'mallory');
+    const spaceId = await alice.createSpace('Keys');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    await mallory.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    for (const c of [alice, bob, mallory]) await c.openChannel(ch);
+    await waitFor(
+      () => bob.state.sessions[sid]?.peers.includes(mallory.userId),
+      12000,
+      'connected',
+    );
+    return { net, alice, bob, mallory, sid };
+  }
+
+  /**
+   * Mallory hands Bob a key (made by nobody in the session) and says whether he took it. A key
+   * for Bob that is fresh follows it, so that Bob has certainly dealt with the first by then.
+   */
+  async function offer(
+    c: Awaited<ReturnType<typeof connected>>,
+    fields: (bob: string) => { to: string; at: number },
+  ) {
+    const { net, bob, mallory, sid } = c;
+    const bobKeyring = () =>
+      (bob as unknown as { sessions: Map<string, { keyring: GroupKeyring }> }).sessions.get(sid)!
+        .keyring;
+    const send = async (f: { to: string; at: number }) => {
+      const chains = new GroupKeyring({ autoRatchet: false });
+      const payload = { type: 'sender_key', sessionId: sid, ...f, ...chains.exportMine() };
+      const box = await (
+        mallory as unknown as { sealTo(p: string, pt: Uint8Array): Promise<unknown> }
+      ).sealTo(bob.peer, utf8.encode(JSON.stringify(payload)));
+      net.injectDirect(sid, mallory.peer, bob.peer, { k: 'sealed', box });
+      const kid = chains.kid;
+      chains.dispose();
+      return () =>
+        bobKeyring()
+          .frameKeys()
+          .peers.some((p) => p.kid === kid);
+    };
+    const taken = await send(fields(bob.peer));
+    const control = await send({ to: bob.peer, at: Date.now() });
+    await waitFor(control, 5000, 'the control key was taken');
+    return taken();
+  }
+
+  it('takes a sender key made for this device a moment ago', async () => {
+    const c = await connected();
+    expect(await offer(c, (bob) => ({ to: bob, at: Date.now() }))).toBe(true);
+  });
+
+  it('refuses a sender key made for another device, as when one member passes on what another sent', async () => {
+    const c = await connected();
+    expect(await offer(c, () => ({ to: c.alice.peer, at: Date.now() }))).toBe(false);
+  });
+
+  it('refuses a sender key dated far from now, whichever way the clock is off', async () => {
+    const c = await connected();
+    expect(await offer(c, (bob) => ({ to: bob, at: Date.now() + 11 * 60_000 }))).toBe(false);
   });
 });

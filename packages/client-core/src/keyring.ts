@@ -30,6 +30,8 @@ export interface FrameKeys {
 }
 
 const GRACE_MS = 10_000;
+/** Superseded key ids remembered, so that a replayed old key can't come back. */
+const RETIRED_MAX = 1000;
 /** Fresh sender key (new randomness) at least this often: post-compromise healing. */
 export const SENDER_KEY_ROTATION_MS = 30 * 60_000;
 
@@ -42,6 +44,10 @@ export const SENDER_KEY_ROTATION_MS = 30 * 60_000;
 export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: ExportedChains }> {
   private mine: SenderKey;
   private peers = new Map<number, PeerKey>();
+  /** Key ids a peer has replaced with a newer one. */
+  private retired = new Set<number>();
+  /** When the newest key we took from each peer was sealed. */
+  private newest = new Map<string, number>();
   private audioTimer?: ReturnType<typeof setInterval>;
   private rotateTimer?: ReturnType<typeof setInterval>;
 
@@ -84,10 +90,16 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     this.emitChanged();
   }
 
-  addPeerKey(peer: string, chains: ExportedChains): boolean {
+  /**
+   * `at` is when the peer sealed the key. A key older than the newest we took from them, or one
+   * they have already replaced, is a replay: taking it would bring back keys that had expired.
+   */
+  addPeerKey(peer: string, chains: ExportedChains, at = Date.now()): boolean {
     const kid = chains.kid >>> 0;
+    if (this.retired.has(kid) || at < (this.newest.get(peer) ?? 0)) return false;
     const existing = this.peers.get(kid);
     if (existing && existing.peer !== peer) return false;
+    this.newest.set(peer, at);
     // Re-sent current state for a key we already track: keep our (newer) text
     // receiver, but take a newer audio position. Receivers for a new
     // connection start from it, and can only skip a few generations ahead.
@@ -100,7 +112,10 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     }
     const now = Date.now();
     for (const p of this.peers.values()) {
-      if (p.peer === peer && p.kid !== kid && p.expiresAt === null) p.expiresAt = now + GRACE_MS;
+      if (p.peer === peer && p.kid !== kid && p.expiresAt === null) {
+        p.expiresAt = now + GRACE_MS;
+        this.retire(p.kid);
+      }
     }
     this.peers.set(kid, {
       peer,
@@ -111,6 +126,11 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     });
     this.emitChanged();
     return true;
+  }
+
+  private retire(kid: number) {
+    this.retired.add(kid);
+    if (this.retired.size > RETIRED_MAX) this.retired.delete(this.retired.values().next().value!);
   }
 
   hasKeyFrom(peer: string) {

@@ -337,7 +337,8 @@ effort. Everything below is automatic.
   safe even against a future quantum computer. Sealed boxes to a device use
   its current **prekey**; prekey secrets are deleted after rotation plus a
   grace period, giving forward secrecy even for keys delivered to offline
-  devices. Every box is signed by the sender's Ed25519 key.
+  devices. Every box is signed by the sender's Ed25519 key, which (with
+  the recipient's prekey) is also part of the key derivation.
 - **Ratcheting sender keys.** Each member has a sender key per session with
   two HKDF hash chains: the text chain advances after every message
   (per-message forward secrecy); the audio chain advances every 30 s. Keys are
@@ -346,7 +347,11 @@ effort. Everything below is automatic.
   membership the client verified itself from signed records. The first key
   a member gets from someone is answered with its own key once more, so a
   key lost on the way (sent while a restarted app was still connecting)
-  doesn't leave one side unable to read the other.
+  doesn't leave one side unable to read the other. A sender key names the
+  device it is for and when it was made; a member refuses one for another
+  device, one dated far from their clock, one older than the newest from the
+  same sender and one the sender has since replaced, so a recorded old key
+  can't be played back to bring expired ones to life.
 - **Voice.** An Encoded Transform worker encrypts every Opus frame with
   AES-256-GCM before packetisation:
   `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
