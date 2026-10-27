@@ -293,18 +293,33 @@ class ReplayWindow {
  * Counters are compared as signed 32-bit distances, so a counter more than 2^31 from the newest
  * reads as the other way round; a sender counts frames, so it can't get that far in one generation.
  */
-class FrameKeys {
-  private keys = new Map<number, { mk: MessageKey; window: ReplayWindow }>();
+class GenerationKeys {
+  /** The window is made when the first frame of the generation checks out. */
+  private keys = new Map<number, { mk: MessageKey; window?: ReplayWindow }>();
   constructor(
     private readonly kid: number,
     private chain: ChainState,
     private readonly label: 'audio' | 'video',
   ) {
-    this.keys.set(chain.gen, { mk: messageKey(chain, kid, label), window: new ReplayWindow() });
+    this.keys.set(chain.gen, { mk: messageKey(chain, kid, label) });
   }
 
   get gen() {
     return this.chain.gen;
+  }
+
+  /**
+   * Moves on to a chain position we are told of, if it is ahead of ours (a sender that was quiet
+   * for long has moved far past where frames could still be followed). Counters taken in the
+   * generation just before it are kept.
+   */
+  catchUp(chain: ChainState) {
+    if (chain.gen <= this.chain.gen) return;
+    const prev = this.keys.get(this.chain.gen);
+    this.keys.clear();
+    if (chain.gen - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
+    this.chain = chain;
+    this.keys.set(chain.gen, { mk: messageKey(chain, this.kid, this.label) });
   }
 
   /** The key for a frame, or null if its generation can't be reached or its counter was taken. */
@@ -321,16 +336,16 @@ class FrameKeys {
     if (!entry) {
       if (target < chain.gen) return null;
       while (chain.gen < target) chain = ratchet(chain);
-      entry = { mk: messageKey(chain, this.kid, this.label), window: new ReplayWindow() };
+      entry = { mk: messageKey(chain, this.kid, this.label) };
     }
-    if (!entry.window.fresh(counter)) return null;
+    if (entry.window && !entry.window.fresh(counter)) return null;
     return { target, chain, entry };
   }
 
   /** The frame found by `find` decrypted: its counter is taken, and the chain may move on. */
-  take(found: NonNullable<ReturnType<FrameKeys['find']>>, counter: number) {
+  take(found: NonNullable<ReturnType<GenerationKeys['find']>>, counter: number) {
     const { target, chain, entry } = found;
-    entry.window.take(counter);
+    (entry.window ??= new ReplayWindow()).take(counter);
     if (target > this.chain.gen) {
       const prev = this.keys.get(this.chain.gen);
       this.keys.clear();
@@ -342,12 +357,17 @@ class FrameKeys {
 }
 
 export class AudioReceiver {
-  private frames: FrameKeys;
+  private frames: GenerationKeys;
   constructor(
     readonly kid: number,
     chain: ChainState,
   ) {
-    this.frames = new FrameKeys(kid, chain, 'audio');
+    this.frames = new GenerationKeys(kid, chain, 'audio');
+  }
+
+  /** Follow the sender to a chain position we are told of, if ahead of ours. */
+  catchUp(chain: ChainState) {
+    this.frames.catchUp(chain);
   }
 
   get gen() {
@@ -436,12 +456,17 @@ export class VideoSender {
 }
 
 export class VideoReceiver {
-  private frames: FrameKeys;
+  private frames: GenerationKeys;
   constructor(
     readonly kid: number,
     chain: ChainState,
   ) {
-    this.frames = new FrameKeys(kid, chain, 'video');
+    this.frames = new GenerationKeys(kid, chain, 'video');
+  }
+
+  /** Follow the sender to a chain position we are told of, if ahead of ours. */
+  catchUp(chain: ChainState) {
+    this.frames.catchUp(chain);
   }
 
   get gen() {

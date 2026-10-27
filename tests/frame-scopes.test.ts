@@ -81,6 +81,27 @@ describe('voice frame keys in the worker', () => {
     bob.dispose();
   });
 
+  it('follows a sender whose key was sent again after a long quiet, without a new connection', () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('bob', bob.frameKeys());
+    // Alice is muted for twenty minutes of her audio chain, then speaks, and her key is sent again.
+    for (let i = 0; i < 40; i++) alice.advanceAudio();
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    scopes.update('bob', bob.frameKeys());
+    scopes.update('alice', alice.frameKeys());
+    const frame = new Uint8Array(60).fill(3);
+    const heard = scopes
+      .get('bob')!
+      .receivers.get(alice.kid)!
+      .decrypt(scopes.get('alice')!.sender!.encrypt(frame));
+    expect(heard).toEqual(frame);
+    alice.dispose();
+    bob.dispose();
+  });
+
   it('forgets our key once the call has been left, or the key replaced', () => {
     vi.useFakeTimers();
     const keyring = new GroupKeyring({ autoRatchet: false });

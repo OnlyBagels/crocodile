@@ -76,9 +76,12 @@ export class FrameScopes {
     for (const p of keys.peers) {
       const kid = p.kid >>> 0;
       const chain = () => importChain({ gen: p.gen, key: p.key });
-      // Keep receivers we already have: they may have ratcheted past the given state.
+      // Keep receivers we already have: they may have ratcheted past the given state, and have
+      // the counters taken so far. If the key was sent again and is ahead of them, they follow.
       const audio = this.receivers.get(kid) ?? new AudioReceiver(kid, chain());
       const video = this.videoReceivers.get(kid) ?? new VideoReceiver(kid, chain());
+      audio.catchUp(chain());
+      video.catchUp(chain());
       this.receivers.set(kid, audio);
       this.videoReceivers.set(kid, video);
       next.set(kid, audio);
