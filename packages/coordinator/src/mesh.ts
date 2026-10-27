@@ -31,7 +31,10 @@ interface Link {
   initiator: boolean;
   url?: string;
   challenge: string;
+  /** What the peer claimed in its hello; not trusted until `authed`. */
   peer?: ServerInfo;
+  /** Who the peer proved to be. Set once, when the link authenticates. */
+  peerId?: string;
   peerProtocol?: number;
   authed: boolean;
   replaced: boolean;
@@ -508,6 +511,8 @@ export class Mesh {
 
     ws.on('pong', () => (link.alive = true));
     ws.on('message', (raw) => {
+      // A link we have started to close says nothing more.
+      if (ws.readyState !== ws.OPEN) return;
       let frame: FedFrame;
       try {
         frame = JSON.parse(raw.toString()) as FedFrame;
@@ -543,7 +548,7 @@ export class Mesh {
     ws.on('close', (code) => {
       clearTimeout(authTimer);
       this.pendingLinks.delete(link);
-      const peerId = link.peer?.id;
+      const peerId = link.peerId;
       if (peerId && this.links.get(peerId) === link) {
         this.links.delete(peerId);
         this.hub.log.info('mesh link down', { peer: peerId });
@@ -571,6 +576,14 @@ export class Mesh {
   }
 
   private onFrame(link: Link, frame: FedFrame) {
+    if (frame.t === 'fed_hello' || frame.t === 'fed_auth') {
+      // Who the peer is gets settled once. A second hello, before or after
+      // authenticating, would let it act as a server it did not prove to be.
+      if (link.authed || (frame.t === 'fed_hello' && link.peer)) {
+        link.ws.close(1008, `unexpected ${frame.t}`);
+        return;
+      }
+    }
     if (frame.t === 'fed_hello') {
       const parsed = ServerInfo.safeParse(frame.server);
       if (
@@ -649,8 +662,8 @@ export class Mesh {
       this.onAuthed(link, frame.cursor);
       return;
     }
-    if (!link.authed || !link.peer) return;
-    const peerId = link.peer.id;
+    if (!link.authed || !link.peerId) return;
+    const peerId = link.peerId;
     switch (frame.t) {
       case 'records': {
         const { items, upTo } = frame;
@@ -774,6 +787,7 @@ export class Mesh {
 
   private onAuthed(link: Link, cursor: number) {
     const peer = link.peer!;
+    link.peerId = peer.id;
     link.authed = true;
     this.pendingLinks.delete(link);
     const existing = this.links.get(peer.id);
@@ -828,7 +842,7 @@ export class Mesh {
     if (link.syncing) return;
     link.syncing = true;
     const store = this.hub.records.store;
-    const peerId = link.peer!.id;
+    const peerId = link.peerId!;
     try {
       while (link.ws.readyState === link.ws.OPEN && link.sentUpTo < store.latestSeq()) {
         const batch = store.since(link.sentUpTo, SYNC_BATCH);
