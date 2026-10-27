@@ -103,13 +103,28 @@ by name goes to `name:<name>`.
 ## Everything else
 
 - **Sessions** are owned by one live server chosen by rendezvous hashing, as
-  before; members' servers reach it over a direct link.
+  before; members' servers reach it over a direct link. The owner admits a
+  member only if the sending server has said that member's device is
+  connected to it, checks again that the member may be in the session, and
+  believes a host hint only if the host it names may be too; afterwards it
+  takes operations on that member only from the server it joined from. A client event
+  routed to us is delivered only if it comes from a server that could be
+  sending it: a signal from the server the sending device is connected to, a
+  session's state or a conversation invitation from the session's owner.
 - **Presence and voice occupancy** are flooded, with a sequence number per
-  origin server, and a server sends everything it knows when an overlay link
-  comes up, including rooms that emptied in the last hour. Each beacon carries
-  its server's latest presence sequence number: a server that has seen less
-  missed something and fetches that server's full presence directly. Servers
+  origin server. When an overlay link comes up, a server sends its own users'
+  presence, and every room it knows is occupied (and those that emptied in the
+  last hour), as they were signed. Each beacon carries its server's latest
+  presence sequence number: a server that has seen less missed something, as a
+  newcomer has, and fetches that server's full presence directly. Servers
   forget what came from a server that has stopped being live.
+  Both are signed by the server they come from (like beacons), with its key in
+  the frame. A frame that isn't signed by the server it names is dropped, so
+  no server can speak for another. Sequence numbers are timestamps: one dated more than five
+  minutes ahead is refused, since it would outrank everything its origin says
+  afterwards. Voice-room occupancy is only believed from the server that owns
+  the room, and only while recent: the owner repeats it every five minutes, and
+  a server ignores announcements older than fifteen.
 - **Account deletion.** The deletion marker reaches the owners of the user's
   shard, which erase what they hold and send the marker on to the owners of
   every space the user was a member of, which erase the memberships. They keep
@@ -122,6 +137,11 @@ by name goes to `name:<name>`.
   records and then not answer for them. It can't change or forge them (they
   are signed), and full-copy servers still hold everything, but deciding who
   may join is a separate, open question.
+- Signatures stop one server speaking for another, not a server lying about
+  its own users. A server can sign that any user is connected through it, and
+  then the events routed to that user (signalling, session invites, mail) go to
+  it. That is the same as the server dropping them. Closing it would take the
+  user's device proving which server it connected to.
 - Every server still hears every beacon and every presence change; that is
   fine for thousands of servers but not for millions of users online at once.
   Presence would then move to the owners of each user's shard.

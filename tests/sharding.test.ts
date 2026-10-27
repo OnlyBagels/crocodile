@@ -19,6 +19,7 @@ import {
 } from '@crocodile/crypto';
 import {
   DELETED_PROFILE_NAME,
+  PROTOCOL_VERSION,
   peerIds,
   recordKey,
   sessionIds,
@@ -320,7 +321,10 @@ describe('sharded records', () => {
     for (const s of spaces) await waitFor(() => archive.store.get(s.key), 5000, 'on the archive');
   });
 
-  it('refuses servers that speak the old protocol', async () => {
+  it.each([
+    ['one with no protocol field', undefined],
+    ['one before presence was signed', 2],
+  ])('refuses servers that speak the old protocol (%s)', async (_name, protocol) => {
     const a = await server('new');
     const ws = new WebSocket(a.url.replace('http', 'ws') + '/v1/federation');
     const closed = new Promise<string>((resolve) =>
@@ -329,7 +333,6 @@ describe('sharded records', () => {
     ws.addEventListener('message', (e) => {
       const hello = JSON.parse(String(e.data)) as { t: string };
       if (hello.t !== 'fed_hello') return;
-      // An old server's hello: no protocol field.
       const old = createIdentity();
       ws.send(
         JSON.stringify({
@@ -337,10 +340,11 @@ describe('sharded records', () => {
           server: { ...a.info, id: old.userId, key: old.publicKey, url: 'http://127.0.0.1:1' },
           challenge: 'c',
           channel: { x25519: '', mlkem: '' },
+          ...(protocol ? { protocol } : {}),
         }),
       );
     });
-    expect(await closed).toMatch(/protocol 2 required/);
+    expect(await closed).toBe(`protocol ${PROTOCOL_VERSION} required`);
   });
 });
 
@@ -828,10 +832,13 @@ describe('frames from other servers', () => {
     expect(victim.events.map((e) => e.ev)).not.toContain('replaced');
     expect(victim.events.map((e) => e.ev)).not.toContain('session');
     expect(x!.mesh.peerIds()).toContain(y!.info.id);
-    // Events servers do route still arrive.
+    // Events servers do route still arrive, from a server the user is also connected to.
+    const other = await connectUser(y!, victim.identity, 'victim');
+    cleanup.push(() => other.conn.close());
+    await waitFor(() => x!.presence.hosts(y!.info.id, victim.identity.userId), 3000, 'presence');
     y!.mesh.sendTo(x!.info.id, {
       t: 'route',
-      to: victim.conn.peer,
+      to: victim.identity.userId,
       ev: 'relay_expired',
       d: { reason: 'grant ended' },
     } as never);

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { LIMITS } from './constants';
 import type { SignedRecord } from './records';
 import type { ServerInfo } from './rpc';
 import { HostCaps, PeerId, SessionId, type VoiceOccupancy } from './session';
@@ -206,6 +207,10 @@ export interface FedPresence {
     /** Device ids of the user connected to the sender. */
     devices: string[];
   }[];
+  /** The origin's public key; its hash is `origin`. */
+  key: string;
+  /** The origin's signature (SIG_DOMAIN.presence over `presenceSigned`). */
+  sig: string;
 }
 
 /** Deliver a client event to a user connected to the receiving server. */
@@ -260,6 +265,20 @@ export interface FedVoice {
   owner: string;
   /** When the owner announced it; the latest per session wins. */
   at: number;
+  /** The owner's public key; its hash is `owner`. */
+  key: string;
+  /** The owner's signature (SIG_DOMAIN.voice over `voiceSigned`). */
+  sig: string;
+}
+
+/** What the origin server signs in a presence frame (SIG_DOMAIN.presence). */
+export function presenceSigned(f: Pick<FedPresence, 'origin' | 'seq' | 'full' | 'entries'>) {
+  return { origin: f.origin, seq: f.seq, full: f.full, entries: f.entries };
+}
+
+/** What the owner signs in a voice frame (SIG_DOMAIN.voice). */
+export function voiceSigned(f: Pick<FedVoice, 'sessionId' | 'occ' | 'owner' | 'at'>) {
+  return { sessionId: f.sessionId, occ: f.occ, owner: f.owner, at: f.at };
 }
 
 /** Client events another server may route to our clients (FedRoute.ev). */
@@ -302,6 +321,13 @@ const PresenceEntry = z.object({
   text: str(128).optional(),
   since: z.number(),
   devices: z.array(id).max(100),
+});
+
+const VoiceOccupancySchema = z.object({
+  spaceId: id,
+  channelId: id,
+  members: z.array(id).max(LIMITS.sessionMembersMax),
+  host: id.nullable(),
 });
 
 const SessionOpSchema = z.discriminatedUnion('op', [
@@ -388,6 +414,8 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
     seq: z.number(),
     full: z.boolean(),
     entries: z.array(PresenceEntry).max(100_000),
+    key: str(64),
+    sig: str(200),
   }),
   z.object({ t: z.literal('route'), to: str(200), ev: z.enum(ROUTED_EVENTS), d: anyJson }),
   z.object({
@@ -407,9 +435,11 @@ export const FedFrameSchema = z.discriminatedUnion('t', [
   z.object({
     t: z.literal('voice'),
     sessionId: SessionId,
-    occ: anyJson,
+    occ: VoiceOccupancySchema,
     owner: id,
     at: z.number(),
+    key: str(64),
+    sig: str(200),
   }),
   // Sent directly as well as flooded.
   ...FloodBody.options,
