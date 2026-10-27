@@ -224,7 +224,9 @@ The directory is tiny: `docker compose --profile directory up -d directory`
 (port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
 with `CROC_DIRECTORIES=https://your-directory` to make it the default.
 Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats. One address may register
+URL, and drop servers that stop sending heartbeats. A public directory refuses
+URLs whose name resolves to a private address, connects only to the address it
+checked, and does not follow redirects. One address may register
 20 times a minute, and a directory lists at most 5000 servers. Behind a
 reverse proxy, set `CROC_DIR_TRUST_PROXY=1` (and keep port 7400 off the
 internet) so the limit applies to each server's address, not the proxy's.

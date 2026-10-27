@@ -1,5 +1,8 @@
 import Fastify, { type FastifyInstance } from 'fastify';
-import type { AddressInfo } from 'node:net';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
+import { isIP, type AddressInfo } from 'node:net';
 import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { keyMatchesUserId, toPublicDirectoryEntry, verifyPayload } from '@crocodile/crypto';
@@ -27,6 +30,8 @@ export interface DirectoryConfig {
   registrationsPerMinute: number;
   /** Servers listed at most; new ones are refused past this. */
   maxEntries: number;
+  /** Resolves a host name for the reachability probe (tests replace it). */
+  resolve?: (host: string) => Promise<string[]>;
   log?: (msg: string) => void;
 }
 
@@ -103,7 +108,7 @@ export class Directory {
       return { ok: false, status: 503, error: 'the directory is full' };
     let verifiedAt = previous && previous.server.url === entry.server.url ? previous.verifiedAt : 0;
     if (this.config.verifyReachability && now - verifiedAt > REVERIFY_MS) {
-      const reachable = await probe(entry.server.url, entry.server.id);
+      const reachable = await this.probe(entry.server.url, entry.server.id);
       if (!reachable)
         return { ok: false, status: 422, error: `could not reach ${entry.server.url}/health` };
       verifiedAt = now;
@@ -185,6 +190,26 @@ export class Directory {
     renameSync(`${path}.tmp`, path);
   }
 
+  /**
+   * Whether `baseUrl`'s /health answers as `expectedId`. The name is resolved here and the
+   * connection pinned to that answer, so it cannot be pointed elsewhere between the check and the
+   * request; redirects are not followed.
+   */
+  private async probe(baseUrl: string, expectedId: string): Promise<boolean> {
+    try {
+      const url = new URL(`${baseUrl.replace(/\/$/, '')}/health`);
+      const host = url.hostname.replace(/^\[|\]$/g, '');
+      const addresses = isIP(host) ? [host] : await (this.config.resolve ?? resolveAll)(host);
+      const address = addresses[0];
+      if (!address) return false;
+      if (!this.config.allowPrivateUrls && addresses.some((a) => isPrivateHost(a))) return false;
+      const body = await get(url, address);
+      return (JSON.parse(body) as { id?: string }).id === expectedId;
+    } catch {
+      return false;
+    }
+  }
+
   async stop() {
     if (this.saveTimer) clearInterval(this.saveTimer);
     this.save();
@@ -192,17 +217,42 @@ export class Directory {
   }
 }
 
-async function probe(baseUrl: string, expectedId: string): Promise<boolean> {
-  try {
-    const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return false;
-    const body = (await res.json()) as { id?: string };
-    return body.id === expectedId;
-  } catch {
-    return false;
-  }
+const resolveAll = async (host: string) =>
+  (await dnsLookup(host, { all: true })).map((r) => r.address);
+
+/** GETs `url` from `address` (whatever its name says), answering with a short 200 body. */
+function get(url: URL, address: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = (url.protocol === 'https:' ? https : http).request(
+      url,
+      {
+        timeout: 5000,
+        lookup: (_host, options, cb) => {
+          const family = isIP(address);
+          if (options.all) cb(null, [{ address, family }]);
+          else cb(null, address, family);
+        },
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.destroy();
+          reject(new Error(`status ${res.statusCode}`));
+          return;
+        }
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk: string) => {
+          body += chunk;
+          if (body.length > 4096) req.destroy(new Error('too long'));
+        });
+        res.on('end', () => resolve(body));
+        res.on('error', reject);
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 export function isPrivateHost(hostname: string): boolean {
