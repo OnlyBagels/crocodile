@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { createServer, type RequestListener } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { Directory, isPrivateHost } from '@crocodile/directory';
 import {
   createIdentity,
@@ -79,6 +81,157 @@ describe('directory', () => {
     expect(
       await d.register({ server: { ...server, name: 'evil' }, load, signedAt, sig }),
     ).toMatchObject({ ok: false, status: 401 });
+  });
+
+  describe('reachability probe', () => {
+    /** A server that answers /health as `id`, counting what reaches it. */
+    async function health(id: string, handler?: RequestListener) {
+      const hits: string[] = [];
+      const srv = createServer((req, res) => {
+        hits.push(req.url ?? '');
+        if (handler) return handler(req, res);
+        res.setHeader('content-type', 'application/json');
+        res.end(JSON.stringify({ id }));
+      });
+      await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+      cleanup.push(() => new Promise((r) => srv.close(() => r())));
+      return { hits, port: (srv.address() as AddressInfo).port };
+    }
+    const entryAt = (url: string, id = createIdentity()) => {
+      const server = { id: id.userId, key: id.publicKey, name: 'probe', url, version: '0' };
+      const load = { users: 0, capacity: 1 };
+      const signedAt = Date.now();
+      return {
+        server,
+        load,
+        signedAt,
+        sig: sign(id, SIG_DOMAIN.directory, { server, load, signedAt }),
+      };
+    };
+    const directoryResolving = async (addresses: string[], allowPrivateUrls: boolean) => {
+      const d = await new Directory({
+        host: '127.0.0.1',
+        port: 0,
+        allowPrivateUrls,
+        resolve: async () => addresses,
+      }).start();
+      cleanup.push(() => d.stop());
+      return d;
+    };
+
+    it('does not reach a name that resolves to a private address', async () => {
+      const id = createIdentity();
+      const target = await health(id.userId);
+      const d = await directoryResolving(['127.0.0.1'], false);
+      const res = await d.register(entryAt(`http://innocent.example:${target.port}`, id));
+      expect(res).toMatchObject({
+        ok: false,
+        status: 422,
+        error: expect.stringContaining('private address'),
+      });
+      expect(target.hits).toEqual([]);
+      // One private answer among public ones is enough.
+      const mixed = await directoryResolving(['93.184.216.34', '10.0.0.1'], false);
+      expect(
+        await mixed.register(entryAt(`http://innocent.example:${target.port}`, id)),
+      ).toMatchObject({
+        ok: false,
+        status: 422,
+      });
+      expect(target.hits).toEqual([]);
+    });
+
+    it('connects to the address it checked, not to a second answer from the name', async () => {
+      const id = createIdentity();
+      const target = await health(id.userId);
+      // The name only resolves through the directory's resolver, so a probe that looked the name
+      // up again would not find this server.
+      const d = await directoryResolving(['127.0.0.1'], true);
+      expect(await d.register(entryAt(`http://pinned.example:${target.port}`, id))).toEqual({
+        ok: true,
+      });
+      expect(target.hits).toEqual(['/health']);
+    });
+
+    it('tries each address it checked until one answers', async () => {
+      const id = createIdentity();
+      const target = await health(id.userId);
+      // Nothing listens on ::1 (or there is no IPv6 at all), so the first address fails.
+      const d = await directoryResolving(['::1', '127.0.0.1'], true);
+      expect(await d.register(entryAt(`http://dual.example:${target.port}`, id))).toEqual({
+        ok: true,
+      });
+      expect(target.hits).toEqual(['/health']);
+    });
+
+    it('refuses answers that are not a short 200 for the right server', async () => {
+      const id = createIdentity();
+      const d = await directoryResolving(['127.0.0.1'], true);
+      const refused = async (
+        handler: RequestListener,
+        url = (port: number) => `http://h.example:${port}`,
+      ) => {
+        const target = await health(id.userId, handler);
+        return d.register(entryAt(url(target.port), id));
+      };
+      const unreachable = { ok: false, status: 422 };
+      expect(
+        await refused((_req, res) => {
+          res.statusCode = 503;
+          res.end(JSON.stringify({ id: id.userId }));
+        }),
+      ).toMatchObject(unreachable);
+      expect(
+        await refused((_req, res) => {
+          res.end(JSON.stringify({ id: id.userId, pad: 'x'.repeat(5000) }));
+        }),
+      ).toMatchObject(unreachable);
+      expect(
+        await refused((_req, res) => {
+          res.end(JSON.stringify({ id: createIdentity().userId }));
+        }),
+      ).toMatchObject(unreachable);
+      // A URL that carries credentials is not probed with them.
+      const target = await health(id.userId);
+      expect(
+        await d.register(entryAt(`http://user:secret@h.example:${target.port}`, id)),
+      ).toMatchObject(unreachable);
+      expect(target.hits).toEqual([]);
+    });
+
+    it('gives a slow answer five seconds in all', async () => {
+      const id = createIdentity();
+      const d = await directoryResolving(['127.0.0.1'], true);
+      let timer: ReturnType<typeof setInterval> | undefined;
+      const target = await health(id.userId, (_req, res) => {
+        res.write('{');
+        timer = setInterval(() => res.write(' '), 500);
+      });
+      cleanup.push(async () => clearInterval(timer));
+      const started = Date.now();
+      expect(await d.register(entryAt(`http://slow.example:${target.port}`, id))).toMatchObject({
+        ok: false,
+        status: 422,
+      });
+      expect(Date.now() - started).toBeLessThan(8000);
+    }, 15_000);
+
+    it('does not follow a redirect', async () => {
+      const id = createIdentity();
+      const target = await health(id.userId);
+      const redirect = await health(id.userId, (_req, res) => {
+        res.statusCode = 302;
+        res.setHeader('location', `http://127.0.0.1:${target.port}/health`);
+        res.end();
+      });
+      const d = await directoryResolving(['127.0.0.1'], true);
+      expect(await d.register(entryAt(`http://127.0.0.1:${redirect.port}`, id))).toMatchObject({
+        ok: false,
+        status: 422,
+      });
+      expect(redirect.hits).toEqual(['/health']);
+      expect(target.hits).toEqual([]);
+    });
   });
 
   it('refuses private URLs on a public directory', () => {
