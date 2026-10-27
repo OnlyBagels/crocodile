@@ -178,6 +178,13 @@ export class Mesh {
     if (added) this.scheduleMaintain();
   }
 
+  /** A server not heard from in long: stop dialling it, unless it is linked or one we were told of. */
+  forgetKnown(id: string) {
+    const url = this.known.get(id)?.url;
+    if (this.links.has(id) || (url && this.staticUrls.includes(url))) return;
+    this.known.delete(id);
+  }
+
   // -------------------------------------------------------------------------
   // Overlay
   // -------------------------------------------------------------------------

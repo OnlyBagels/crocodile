@@ -144,11 +144,16 @@ by name goes to `name:<name>`.
   keys until one lands, so it is not used until servers have to be admitted). What is
   limited is the cost: a link may introduce 1000 servers we do not know at
   once and then 5 a second (a link that drops and returns keeps what it
-  spent), at most 5000 servers are admitted to the live set (a flood of made-up
+  spent; links are remembered in order of use, so a flood of new
+  identities pushes out idle ones first, though enough of them still can),
+  at most 5000 servers are admitted to the live set (a flood of made-up
   ones can fill it and keep real newcomers out, which is why admission control
-  is still needed), the ring is built only when the live set really changes
-  and someone looks, and servers not heard from for ten times the live window
-  are forgotten. Admitting only servers the
+  is still needed; room is made only by a beacon that checks out, from a link
+  that may introduce, and only by dropping a server that is not live), the ring
+  is built only when the live set really changes and someone looks (under a
+  steady trickle of new servers that is still once per look), and servers not
+  heard from for ten times the live window are forgotten, with the address we
+  would dial. Admitting only servers the
   directory has vetted, or that have proved they can be reached, is still to
   do.
 - Signatures stop one server speaking for another, not a server lying about

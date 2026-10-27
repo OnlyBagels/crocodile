@@ -159,9 +159,10 @@ export class Membership {
     if (frame.seq < now - this.timing.liveMs) return false;
     const known = this.beacons.get(id);
     if (known && known.frame.seq >= frame.seq) return false;
-    // Before checking a signature, see whether we would take the server at all. (One we are
-    // linked to is the peer itself, and always has a place.)
-    if (!known && !this.linked.has(id) && !this.mayIntroduce(from)) return false;
+    // Before checking a signature, see whether this link may still introduce servers. (One we
+    // are linked to is the peer itself, and always has a place.)
+    const introduced = !known && !this.linked.has(id);
+    if (introduced && !this.mayIntroduce(from)) return false;
     if (
       !verifyPayload(
         key,
@@ -171,6 +172,8 @@ export class Membership {
       )
     )
       return false;
+    // Only a beacon that checks out, from a link that may, pushes another server out.
+    if (introduced && this.beacons.size >= MAX_TRACKED_SERVERS && !this.makeRoom()) return false;
     const moved = !this.liveSet.has(id) || known?.frame.full !== frame.full;
     this.beacons.set(id, { frame: { ...frame, server: parsed.data }, at: now });
     this.hub.mesh.addKnown([parsed.data]);
@@ -182,26 +185,44 @@ export class Membership {
 
   /** Whether the link `from` may tell us of one more server we do not know. */
   private mayIntroduce(from?: string): boolean {
-    if (this.beacons.size >= MAX_TRACKED_SERVERS && !this.makeRoom()) return false;
     if (from === undefined) return true;
     let limiter = this.introductions.get(from);
-    if (!limiter) {
+    if (limiter) {
+      // Most recently used last, so that the ones dropped are the idle ones.
+      this.introductions.delete(from);
+    } else {
       // A link that drops and comes back keeps what it has spent.
       if (this.introductions.size >= MAX_LIMITERS)
         this.introductions.delete(this.introductions.keys().next().value!);
       limiter = new RateLimiter(NEW_SERVERS_PER_SECOND, NEW_SERVERS_BURST);
-      this.introductions.set(from, limiter);
     }
+    this.introductions.set(from, limiter);
     return limiter.take();
   }
 
-  /** Drops the longest-silent server that is no longer live, if there is one. */
+  /**
+   * Drops the server whose last beacon is oldest, if one is neither live nor a beacon that would
+   * still be taken as news when passed on again (which is why a broken link's is kept a while).
+   */
   private makeRoom(): boolean {
+    const stale = Date.now() - this.timing.liveMs;
     let oldest: string | undefined;
     for (const [id, b] of this.beacons)
-      if (!this.liveSet.has(id) && (oldest === undefined || b.at < this.beacons.get(oldest)!.at))
+      if (
+        !this.liveSet.has(id) &&
+        !this.linked.has(id) &&
+        b.frame.seq < stale &&
+        (oldest === undefined || b.frame.seq < this.beacons.get(oldest)!.frame.seq)
+      )
         oldest = id;
-    return oldest !== undefined && this.beacons.delete(oldest);
+    if (oldest === undefined) return false;
+    this.forget(oldest);
+    return true;
+  }
+
+  private forget(id: string) {
+    this.beacons.delete(id);
+    this.hub.mesh.forgetKnown(id);
   }
 
   linkUp(id: string) {
@@ -244,7 +265,7 @@ export class Membership {
         // Long enough that its beacon could no longer be replayed as fresh.
         now - Math.max(b.at, b.frame.seq) > this.timing.liveMs * FORGET_AFTER_LIVE
       )
-        this.beacons.delete(id);
+        this.forget(id);
     }
     const up = [...next].filter((id) => !this.liveSet.has(id));
     const down = [...this.liveSet].filter((id) => !next.has(id));
