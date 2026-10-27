@@ -119,8 +119,10 @@ main server puts the TCP side behind a reverse proxy on 443.
   (`--capacity`), and times out connections that don't authenticate. Each
   account can make it store at most 100 devices, 100 spaces and 500
   memberships, each space at most 1000 invites, and each account receives at
-  most 200 unread friend notes, so one account cannot
-  fill your disk (records replicated from other servers are not counted). The
+  most 200 unread friend notes (a server stops at twice that when other
+  owners copy notes to it), and a connection can only write its own
+  account's records. One account therefore cannot fill your disk, though
+  many accounts can: see [Known gaps](SECURITY.md#known-gaps). The
   built-in relay refuses to send traffic to your own machine or your private
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
   ULA and similar), so relay users cannot reach your router or other home
