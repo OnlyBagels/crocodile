@@ -113,6 +113,46 @@ describe('voice frame keys in the worker', () => {
     for (const k of [alice, bob, carol, other]) k.dispose();
   });
 
+  it("keeps a connection's receivers for the wait from when it ended, not from when its keys were last posted", () => {
+    vi.useFakeTimers();
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('bob-1', bob.frameKeys());
+    const kept = scopes.get('bob-1')!.receivers.get(alice.kid)!;
+    vi.advanceTimersByTime(40_000);
+    scopes.drop('bob-1');
+    vi.advanceTimersByTime(10_000);
+    scopes.update('bob-2', bob.frameKeys());
+    expect(scopes.get('bob-2')!.receivers.get(alice.kid)).toBe(kept);
+    alice.dispose();
+    bob.dispose();
+  });
+
+  it("doesn't let another session's key with the same id take over a listener's receiver", () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const mallory = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    scopes.update('alice', alice.frameKeys());
+    scopes.update('session-a', bob.frameKeys());
+    // In another session on the same worker, someone gives their key the id of Alice's, further on.
+    const theirs = mallory.frameKeys().mine!;
+    scopes.update('session-b', {
+      mine: null,
+      peers: [{ kid: alice.kid, peer: 'mallory.d1', gen: 20, key: theirs.key }],
+    });
+    const frame = new Uint8Array(60).fill(5);
+    const heard = scopes
+      .get('session-a')!
+      .receivers.get(alice.kid)!
+      .decrypt(scopes.get('alice')!.sender!.encrypt(frame));
+    expect(heard).toEqual(frame);
+    for (const k of [alice, bob, mallory]) k.dispose();
+  });
+
   it('follows a sender whose key was sent again after a long quiet, without a new connection', () => {
     const alice = new GroupKeyring({ autoRatchet: false });
     const bob = new GroupKeyring({ autoRatchet: false });

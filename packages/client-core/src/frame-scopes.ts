@@ -20,6 +20,16 @@ export interface FrameScope {
   receivers: Map<number, AudioReceiver>;
   video: VideoSender | null;
   videoReceivers: Map<number, VideoReceiver>;
+  /** Keys (in `FrameScopes.heard`) of the senders this connection listens to. */
+  holds: Set<string>;
+}
+
+/** What is kept of one sender key of someone else. */
+interface Heard {
+  audio: AudioReceiver;
+  video: VideoReceiver;
+  /** When a connection last had the key. */
+  lastUsed: number;
 }
 
 /**
@@ -32,18 +42,16 @@ export interface FrameScope {
  * A connection that begins after the last one ended gets a new sender, on a
  * chain that voice.ts has moved on first, so its key and counter are new.
  *
- * Receivers are shared, one per sender key of someone else, with the
- * counters they have taken: a host that cuts a listener's connection
- * can't have a recorded frame taken again.
+ * Receivers are shared, one per sender key of someone else (by sender and key
+ * id: ids are public, and sessions share the worker), with the counters they
+ * have taken: a host that cuts a listener's connection can't have a frame the
+ * listener took taken again.
  */
 export class FrameScopes {
   readonly scopes = new Map<string, FrameScope>();
   private senders = new Map<number, AudioSender>();
   private videoSenders = new Map<number, VideoSender>();
-  private receivers = new Map<number, AudioReceiver>();
-  private videoReceivers = new Map<number, VideoReceiver>();
-  /** When a receiver's key was last in a connection's key list. */
-  private lastUsed = new Map<number, number>();
+  private heard = new Map<string, Heard>();
   private idleTimer?: ReturnType<typeof setTimeout>;
 
   get(id: string): FrameScope | undefined {
@@ -56,7 +64,13 @@ export class FrameScopes {
     if (!s)
       this.scopes.set(
         id,
-        (s = { sender: null, receivers: new Map(), video: null, videoReceivers: new Map() }),
+        (s = {
+          sender: null,
+          receivers: new Map(),
+          video: null,
+          videoReceivers: new Map(),
+          holds: new Set(),
+        }),
       );
     if (keys.mine) {
       const chain = () => importChain({ gen: keys.mine!.gen, key: keys.mine!.key });
@@ -73,54 +87,77 @@ export class FrameScopes {
       } else video.update(chain());
       s.video = video;
     }
-    const next = new Map<number, AudioReceiver>();
-    const nextVideo = new Map<number, VideoReceiver>();
+    s.receivers = new Map();
+    s.videoReceivers = new Map();
+    s.holds = new Set();
+    const now = Date.now();
     for (const p of keys.peers) {
       const kid = p.kid >>> 0;
+      const key = `${p.peer}|${kid}`;
       const chain = () => importChain({ gen: p.gen, key: p.key });
       // Keep receivers we already have: they may have ratcheted past the given state, and have
       // the counters taken so far. If the key was sent again and is ahead of them, they follow.
-      let audio = this.receivers.get(kid);
-      if (!audio) this.receivers.set(kid, (audio = new AudioReceiver(kid, chain())));
-      else if (p.gen > audio.gen) audio.catchUp(chain());
-      let video = this.videoReceivers.get(kid);
-      if (!video) this.videoReceivers.set(kid, (video = new VideoReceiver(kid, chain())));
-      else if (p.gen > video.gen) video.catchUp(chain());
-      next.set(kid, audio);
-      nextVideo.set(kid, video);
+      let h = this.heard.get(key);
+      if (!h)
+        this.heard.set(
+          key,
+          (h = {
+            audio: new AudioReceiver(kid, chain()),
+            video: new VideoReceiver(kid, chain()),
+            lastUsed: now,
+          }),
+        );
+      else if (p.gen > h.audio.gen) {
+        h.audio.catchUp(chain());
+        h.video.catchUp(chain());
+      }
+      h.lastUsed = now;
+      s.receivers.set(kid, h.audio);
+      s.videoReceivers.set(kid, h.video);
+      s.holds.add(key);
     }
-    s.receivers = next;
-    s.videoReceivers = nextVideo;
     this.prune();
   }
 
   /**
-   * Receivers are forgotten once their key has been out of every connection's list for a while:
-   * replaced keys, and a call that was left.
+   * Receivers are forgotten once no connection has had their key for a while: replaced keys,
+   * and a call that was left.
    */
   private prune() {
     const now = Date.now();
-    const used = new Set([...this.scopes.values()].flatMap((sc) => [...sc.receivers.keys()]));
-    for (const kid of used) this.lastUsed.set(kid, now);
-    for (const [kid, at] of this.lastUsed) {
-      if (used.has(kid) || now - at <= KEEP_IDLE_MS) continue;
-      this.lastUsed.delete(kid);
-      this.receivers.delete(kid);
-      this.videoReceivers.delete(kid);
+    const held = new Set([...this.scopes.values()].flatMap((sc) => [...sc.holds]));
+    for (const [key, h] of this.heard) {
+      if (held.has(key)) h.lastUsed = now;
+      else if (now - h.lastUsed > KEEP_IDLE_MS) this.heard.delete(key);
     }
   }
 
   drop(id: string) {
+    const gone = this.scopes.get(id);
     this.scopes.delete(id);
+    // What it was listening to is kept from now on, whenever its keys were last posted.
+    const now = Date.now();
+    for (const key of gone?.holds ?? []) {
+      const h = this.heard.get(key);
+      if (h) h.lastUsed = now;
+    }
     // Forget senders no scope uses any more (their keys have been replaced).
-    const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
+    const inUse = new Set([...this.scopes.values()].flatMap((sc) => [sc.sender, sc.video]));
     for (const [kid, sender] of this.senders) if (!inUse.has(sender)) this.senders.delete(kid);
     for (const [kid, sender] of this.videoSenders)
       if (!inUse.has(sender)) this.videoSenders.delete(kid);
-    // The receivers wait for a reconnect, but not long.
     this.prune();
+    this.armIdleTimer();
+  }
+
+  /** Looks again after the wait, until nothing is left. */
+  private armIdleTimer() {
     clearTimeout(this.idleTimer);
-    this.idleTimer = setTimeout(() => this.prune(), KEEP_IDLE_MS + 1000);
+    if (this.heard.size === 0) return;
+    this.idleTimer = setTimeout(() => {
+      this.prune();
+      this.armIdleTimer();
+    }, KEEP_IDLE_MS + 1000);
     (this.idleTimer as { unref?: () => void }).unref?.();
   }
 }

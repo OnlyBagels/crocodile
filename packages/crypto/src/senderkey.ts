@@ -311,11 +311,18 @@ class GenerationKeys {
    */
   catchUp(chain: ChainState) {
     if (chain.gen <= this.chain.gen) return;
-    const prev = this.keys.get(this.chain.gen);
-    this.keys.clear();
-    if (chain.gen - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
-    this.chain = chain;
+    this.moveOn(chain);
     this.keys.set(chain.gen, { mk: messageKey(chain, this.kid, this.label) });
+  }
+
+  /** Follow the chain to a later position, keeping the generation before it if it is the last. */
+  private moveOn(chain: ChainState) {
+    const prev = this.keys.get(this.chain.gen);
+    const adjacent = chain.gen - this.chain.gen === 1;
+    const was = this.chain.gen;
+    this.keys.clear();
+    if (adjacent && prev) this.keys.set(was, prev);
+    this.chain = chain;
   }
 
   /** The key for a frame, or null if its generation can't be reached or its counter was taken. */
@@ -342,12 +349,7 @@ class GenerationKeys {
   take(found: NonNullable<ReturnType<GenerationKeys['find']>>, counter: number) {
     const { target, chain, entry } = found;
     (entry.window ??= new ReplayWindow()).take(counter);
-    if (target > this.chain.gen) {
-      const prev = this.keys.get(this.chain.gen);
-      this.keys.clear();
-      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
-      this.chain = chain;
-    }
+    if (target > this.chain.gen) this.moveOn(chain);
     this.keys.set(target, entry);
   }
 }
