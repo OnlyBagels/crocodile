@@ -1,6 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FrameScopes, GroupKeyring, vp8ClearBytes } from '@crocodile/client-core';
 import { AudioReceiver, importChain } from '@crocodile/crypto';
+
+afterEach(() => vi.useRealTimers());
 
 const counterOf = (f: Uint8Array) =>
   new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
@@ -33,24 +35,38 @@ describe('voice frame keys in the worker', () => {
   });
 
   it('continues the counter after every connection was lost, since listeners refuse counters they have passed', () => {
+    vi.useFakeTimers();
     const keyring = new GroupKeyring({ autoRatchet: false });
     const scopes = new FrameScopes();
     const frame = new Uint8Array(60);
     scopes.update('conn-1', keyring.frameKeys());
-    const before = [1, 2].map(() => counterOf(scopes.get('conn-1')!.sender!.encrypt(frame)));
+    const last = counterOf(scopes.get('conn-1')!.sender!.encrypt(frame));
     const video = scopes.get('conn-1')!.video!;
-    const cam = video.encrypt(frame, vp8ClearBytes(true));
     // The connection drops and the next one is made only afterwards.
     scopes.drop('conn-1');
+    vi.advanceTimersByTime(10_000);
     scopes.update('conn-2', keyring.frameKeys());
-    expect(counterOf(scopes.get('conn-2')!.sender!.encrypt(frame))).toBe((before[1]! + 1) >>> 0);
+    expect(counterOf(scopes.get('conn-2')!.sender!.encrypt(frame))).toBe((last + 1) >>> 0);
     expect(scopes.get('conn-2')!.video).toBe(video);
-    expect(cam.length).toBeGreaterThan(0);
-    // Once our key is replaced, the old sender goes.
+    keyring.dispose();
+  });
+
+  it('forgets our key once the call has been left, or the key replaced', () => {
+    vi.useFakeTimers();
+    const keyring = new GroupKeyring({ autoRatchet: false });
+    const scopes = new FrameScopes();
+    const senders = () => (scopes as unknown as { senders: Map<number, unknown> }).senders;
+    scopes.update('conn-1', keyring.frameKeys());
+    scopes.drop('conn-1');
+    expect(senders().size).toBe(1);
+    vi.advanceTimersByTime(60_000);
+    expect(senders().size).toBe(0);
+    // A replaced key's sender goes with the connection that used it.
+    scopes.update('conn-2', keyring.frameKeys());
     keyring.rotate();
-    scopes.drop('conn-2');
     scopes.update('conn-3', keyring.frameKeys());
-    expect(scopes.get('conn-3')!.video).not.toBe(video);
+    scopes.drop('conn-2');
+    expect([...senders().keys()]).toEqual([keyring.kid]);
     keyring.dispose();
   });
 

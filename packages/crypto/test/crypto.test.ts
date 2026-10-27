@@ -543,8 +543,8 @@ describe('ratcheting sender keys', () => {
       const sk = createSenderKey();
       const tx = make(sk);
       const rx = tx.receiver();
-      const frames = Array.from({ length: 300 }, () => tx.encrypt(frame));
-      expect(rx.decrypt(frames[299]!)).toEqual(frame);
+      const frames = Array.from({ length: 1100 }, () => tx.encrypt(frame));
+      expect(rx.decrypt(frames[1099]!)).toEqual(frame);
       expect(rx.decrypt(frames[0]!)).toBeNull();
       expect(rx.decrypt(frames[100]!)).toEqual(frame);
       expect(rx.decrypt(frames[100]!)).toBeNull();

@@ -36,8 +36,11 @@ const TAG_BYTES = 16;
 const MAX_TEXT_SKIP = 2000;
 const MAX_SKIPPED_KEYS = 256;
 const MAX_AUDIO_SKIP = 16;
-/** Frames a receiver remembers having taken, counting back from the newest. */
-const REPLAY_WINDOW = 256;
+/**
+ * Frames a receiver remembers having taken, counting back from the newest. The counter is shared
+ * by every stream of a sender (the camera and the screen, say), so this is some seconds of video.
+ */
+const REPLAY_WINDOW = 1024;
 
 export interface ChainState {
   gen: number;
@@ -194,8 +197,10 @@ function randomCounter(): number {
  * Encrypts outgoing voice frames with the audio chain's current message key.
  * The AES-GCM nonce is the key's salt XOR a per-frame counter, so a counter
  * must never repeat under one key: callers never build two senders for one
- * chain state (the app moves its audio chain on for each new connection).
- * The counter also starts at a random point, as a second line of defence.
+ * chain state, and keep the one they have across connections (listeners that stay refuse a
+ * counter they have already passed, as replayed, so a sender that started over would be
+ * unheard until the chain moves on). The counter starts at a random point, as a second line of
+ * defence.
  */
 export class AudioSender {
   private mk: MessageKey;
@@ -281,13 +286,13 @@ class ReplayWindow {
 }
 
 export class AudioReceiver {
-  private keys = new Map<number, MessageKey>();
-  private windows = new Map<number, ReplayWindow>();
+  /** Message key and taken counters, for the current generation and the one before it. */
+  private keys = new Map<number, { mk: MessageKey; window: ReplayWindow }>();
   constructor(
     readonly kid: number,
     private chain: ChainState,
   ) {
-    this.keys.set(chain.gen, messageKey(chain, kid, 'audio'));
+    this.keys.set(chain.gen, { mk: messageKey(chain, kid, 'audio'), window: new ReplayWindow() });
   }
 
   get gen() {
@@ -310,15 +315,16 @@ export class AudioReceiver {
     else if (((current16 - gen16) & 0xffff) <= 1)
       target = this.chain.gen - ((current16 - gen16) & 0xffff);
     else return null;
-    let mk = this.keys.get(target);
+    let entry = this.keys.get(target);
+    let mk = entry?.mk;
     let chain = this.chain;
     if (!mk && target > chain.gen) {
       while (chain.gen < target) chain = ratchet(chain);
       mk = messageKey(chain, this.kid, 'audio');
     }
     if (!mk) return null;
-    const window = this.windows.get(target) ?? new ReplayWindow();
-    if (!window.fresh(counter)) return null;
+    entry ??= { mk, window: new ReplayWindow() };
+    if (!entry.window.fresh(counter)) return null;
     const plain = aesGcmDecrypt(
       mk.key,
       frameNonce(mk.salt, counter),
@@ -326,21 +332,15 @@ export class AudioReceiver {
       trailer,
     );
     if (!plain) return null;
-    window.take(counter);
+    entry.window.take(counter);
     if (target > this.chain.gen) {
       // Keep only the previous generation for frames reordered across the boundary.
       const prev = this.keys.get(this.chain.gen);
-      const prevWindow = this.windows.get(this.chain.gen);
       this.keys.clear();
-      this.windows.clear();
-      if (target - this.chain.gen === 1 && prev) {
-        this.keys.set(this.chain.gen, prev);
-        if (prevWindow) this.windows.set(this.chain.gen, prevWindow);
-      }
+      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
       this.chain = chain;
-      this.keys.set(target, mk);
     }
-    this.windows.set(target, window);
+    this.keys.set(target, entry);
     return plain;
   }
 }
@@ -405,13 +405,13 @@ export class VideoSender {
 }
 
 export class VideoReceiver {
-  private keys = new Map<number, MessageKey>();
-  private windows = new Map<number, ReplayWindow>();
+  /** Message key and taken counters, for the current generation and the one before it. */
+  private keys = new Map<number, { mk: MessageKey; window: ReplayWindow }>();
   constructor(
     readonly kid: number,
     private chain: ChainState,
   ) {
-    this.keys.set(chain.gen, messageKey(chain, kid, 'video'));
+    this.keys.set(chain.gen, { mk: messageKey(chain, kid, 'video'), window: new ReplayWindow() });
   }
 
   get gen() {
@@ -438,15 +438,16 @@ export class VideoReceiver {
     else if (((current16 - gen16) & 0xffff) <= 1)
       target = this.chain.gen - ((current16 - gen16) & 0xffff);
     else return null;
-    let mk = this.keys.get(target);
+    let entry = this.keys.get(target);
+    let mk = entry?.mk;
     let chain = this.chain;
     if (!mk && target > chain.gen) {
       while (chain.gen < target) chain = ratchet(chain);
       mk = messageKey(chain, this.kid, 'video');
     }
     if (!mk) return null;
-    const window = this.windows.get(target) ?? new ReplayWindow();
-    if (!window.fresh(counter)) return null;
+    entry ??= { mk, window: new ReplayWindow() };
+    if (!entry.window.fresh(counter)) return null;
     const head = data.subarray(0, n);
     const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
     aad.set(head, 0);
@@ -458,20 +459,14 @@ export class VideoReceiver {
       aad,
     );
     if (!body) return null;
-    window.take(counter);
+    entry.window.take(counter);
     if (target > this.chain.gen) {
       const prev = this.keys.get(this.chain.gen);
-      const prevWindow = this.windows.get(this.chain.gen);
       this.keys.clear();
-      this.windows.clear();
-      if (target - this.chain.gen === 1 && prev) {
-        this.keys.set(this.chain.gen, prev);
-        if (prevWindow) this.windows.set(this.chain.gen, prevWindow);
-      }
+      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
       this.chain = chain;
-      this.keys.set(target, mk);
     }
-    this.windows.set(target, window);
+    this.keys.set(target, entry);
     const out = new Uint8Array(n + body.length);
     out.set(head, 0);
     out.set(body, n);

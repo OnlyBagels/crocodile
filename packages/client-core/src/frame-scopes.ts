@@ -7,6 +7,9 @@ import {
 } from '@crocodile/crypto';
 import type { FrameKeys } from './keyring';
 
+/** A bit over a generation of the audio chain (`AUDIO_EPOCH_MS`). */
+const KEEP_SENDERS_MS = 45_000;
+
 export interface FrameScope {
   sender: AudioSender | null;
   receivers: Map<number, AudioReceiver>;
@@ -25,6 +28,7 @@ export class FrameScopes {
   readonly scopes = new Map<string, FrameScope>();
   private senders = new Map<number, AudioSender>();
   private videoSenders = new Map<number, VideoSender>();
+  private forgetTimer?: ReturnType<typeof setTimeout>;
   /** Our sender key as of the last update: its senders outlive the connections using them. */
   private mineKid?: number;
 
@@ -68,11 +72,24 @@ export class FrameScopes {
     s.videoReceivers = nextVideo;
   }
 
+  private forgetIdle() {
+    if (this.scopes.size > 0) return;
+    this.senders.clear();
+    this.videoSenders.clear();
+    this.mineKid = undefined;
+  }
+
   drop(id: string) {
     this.scopes.delete(id);
-    // Forget senders for keys that have been replaced. The current key's stay even with no
-    // connection: a new one must continue their counters, as listeners that stayed refuse
-    // counters they have already passed.
+    // Forget senders for keys that have been replaced. The current key's stay a little after the
+    // last connection goes: a new one must continue their counters, as listeners that stayed
+    // refuse counters they have already passed. Past the length of a generation they are no
+    // use (the chain has moved on), and the key shouldn't linger once the call is left.
+    clearTimeout(this.forgetTimer);
+    if (this.scopes.size === 0) {
+      this.forgetTimer = setTimeout(() => this.forgetIdle(), KEEP_SENDERS_MS);
+      (this.forgetTimer as { unref?: () => void }).unref?.();
+    }
     const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
     for (const [kid, sender] of this.senders)
       if (!inUse.has(sender) && kid !== this.mineKid) this.senders.delete(kid);

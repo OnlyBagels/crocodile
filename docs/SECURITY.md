@@ -102,7 +102,7 @@ picture size.
   replaced every 30 minutes and on leave.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
-  A listener takes each counter once per key (a window of the last 256), so
+  A listener takes each counter once per key (a window of the last 1024), so
   the host can't play a recorded frame again; the window starts over when the
   listener's connection to the host does, so a frame of the current 30-second
   generation can be replayed once after a reconnect.
