@@ -25,6 +25,8 @@ export class FrameScopes {
   readonly scopes = new Map<string, FrameScope>();
   private senders = new Map<number, AudioSender>();
   private videoSenders = new Map<number, VideoSender>();
+  /** Our sender key as of the last update: its senders outlive the connections using them. */
+  private mineKid?: number;
 
   get(id: string): FrameScope | undefined {
     return this.scopes.get(id);
@@ -38,6 +40,7 @@ export class FrameScopes {
         (s = { sender: null, receivers: new Map(), video: null, videoReceivers: new Map() }),
       );
     if (keys.mine) {
+      this.mineKid = keys.mine.kid;
       const chain = () => importChain({ gen: keys.mine!.gen, key: keys.mine!.key });
       let sender = this.senders.get(keys.mine.kid);
       if (!sender) {
@@ -67,11 +70,14 @@ export class FrameScopes {
 
   drop(id: string) {
     this.scopes.delete(id);
-    // Forget senders no scope uses any more (their keys have been replaced).
+    // Forget senders for keys that have been replaced. The current key's stay even with no
+    // connection: a new one must continue their counters, as listeners that stayed refuse
+    // counters they have already passed.
     const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
-    for (const [kid, sender] of this.senders) if (!inUse.has(sender)) this.senders.delete(kid);
+    for (const [kid, sender] of this.senders)
+      if (!inUse.has(sender) && kid !== this.mineKid) this.senders.delete(kid);
     for (const [kid, sender] of this.videoSenders)
-      if (!inUse.has(sender)) this.videoSenders.delete(kid);
+      if (!inUse.has(sender) && kid !== this.mineKid) this.videoSenders.delete(kid);
   }
 }
 

@@ -36,6 +36,8 @@ const TAG_BYTES = 16;
 const MAX_TEXT_SKIP = 2000;
 const MAX_SKIPPED_KEYS = 256;
 const MAX_AUDIO_SKIP = 16;
+/** Frames a receiver remembers having taken, counting back from the newest. */
+const REPLAY_WINDOW = 256;
 
 export interface ChainState {
   gen: number;
@@ -246,8 +248,41 @@ export function peekFrameKid(data: Uint8Array): number | null {
   return new DataView(data.buffer, data.byteOffset + data.length - trailer, 4).getUint32(0);
 }
 
+/**
+ * Which frame counters of one key have been taken, as in SRTP and SFrame: the newest, and a
+ * window of those just before it. A counter is refused if it was taken, or is older than the
+ * window. Counters start anywhere and wrap, so they are compared by distance.
+ */
+class ReplayWindow {
+  private newest: number | null = null;
+  private seen = new Uint8Array(REPLAY_WINDOW);
+
+  /** Whether a frame with this counter may still be taken (call `take` once it is verified). */
+  fresh(counter: number): boolean {
+    if (this.newest === null) return true;
+    const back = (this.newest - counter) | 0;
+    if (back < 0) return true;
+    return back < REPLAY_WINDOW && !this.seen[counter % REPLAY_WINDOW];
+  }
+
+  take(counter: number) {
+    if (this.newest === null) {
+      this.newest = counter;
+    } else {
+      const ahead = (counter - this.newest) | 0;
+      if (ahead > 0) {
+        for (let i = 1; i <= Math.min(ahead, REPLAY_WINDOW); i++)
+          this.seen[(this.newest + i) % REPLAY_WINDOW] = 0;
+        this.newest = counter;
+      }
+    }
+    this.seen[counter % REPLAY_WINDOW] = 1;
+  }
+}
+
 export class AudioReceiver {
   private keys = new Map<number, MessageKey>();
+  private windows = new Map<number, ReplayWindow>();
   constructor(
     readonly kid: number,
     private chain: ChainState,
@@ -282,6 +317,8 @@ export class AudioReceiver {
       mk = messageKey(chain, this.kid, 'audio');
     }
     if (!mk) return null;
+    const window = this.windows.get(target) ?? new ReplayWindow();
+    if (!window.fresh(counter)) return null;
     const plain = aesGcmDecrypt(
       mk.key,
       frameNonce(mk.salt, counter),
@@ -289,14 +326,21 @@ export class AudioReceiver {
       trailer,
     );
     if (!plain) return null;
+    window.take(counter);
     if (target > this.chain.gen) {
       // Keep only the previous generation for frames reordered across the boundary.
       const prev = this.keys.get(this.chain.gen);
+      const prevWindow = this.windows.get(this.chain.gen);
       this.keys.clear();
-      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
+      this.windows.clear();
+      if (target - this.chain.gen === 1 && prev) {
+        this.keys.set(this.chain.gen, prev);
+        if (prevWindow) this.windows.set(this.chain.gen, prevWindow);
+      }
       this.chain = chain;
       this.keys.set(target, mk);
     }
+    this.windows.set(target, window);
     return plain;
   }
 }
@@ -362,6 +406,7 @@ export class VideoSender {
 
 export class VideoReceiver {
   private keys = new Map<number, MessageKey>();
+  private windows = new Map<number, ReplayWindow>();
   constructor(
     readonly kid: number,
     private chain: ChainState,
@@ -400,6 +445,8 @@ export class VideoReceiver {
       mk = messageKey(chain, this.kid, 'video');
     }
     if (!mk) return null;
+    const window = this.windows.get(target) ?? new ReplayWindow();
+    if (!window.fresh(counter)) return null;
     const head = data.subarray(0, n);
     const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
     aad.set(head, 0);
@@ -411,13 +458,20 @@ export class VideoReceiver {
       aad,
     );
     if (!body) return null;
+    window.take(counter);
     if (target > this.chain.gen) {
       const prev = this.keys.get(this.chain.gen);
+      const prevWindow = this.windows.get(this.chain.gen);
       this.keys.clear();
-      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
+      this.windows.clear();
+      if (target - this.chain.gen === 1 && prev) {
+        this.keys.set(this.chain.gen, prev);
+        if (prevWindow) this.windows.set(this.chain.gen, prevWindow);
+      }
       this.chain = chain;
       this.keys.set(target, mk);
     }
+    this.windows.set(target, window);
     const out = new Uint8Array(n + body.length);
     out.set(head, 0);
     out.set(body, n);

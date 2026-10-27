@@ -502,6 +502,77 @@ describe('ratcheting sender keys', () => {
     expect(rx.decrypt(sender.encrypt(frame, 3))).toEqual(frame);
   });
 
+  describe.each([
+    {
+      name: 'audio',
+      make: (sk: ReturnType<typeof createSenderKey>) => {
+        const sender = new AudioSender(sk.kid, sk.audio);
+        return {
+          encrypt: (f: Uint8Array) => sender.encrypt(f),
+          update: (c: typeof sk.audio) => sender.update(c),
+          setCounter: (n: number) => ((sender as unknown as { counter: number }).counter = n),
+          receiver: () => new AudioReceiver(sk.kid, importChain(exportChains(sk).audio)),
+        };
+      },
+    },
+    {
+      name: 'video',
+      make: (sk: ReturnType<typeof createSenderKey>) => {
+        const sender = new VideoSender(sk.kid, sk.audio);
+        return {
+          encrypt: (f: Uint8Array) => sender.encrypt(f, 3),
+          update: (c: typeof sk.audio) => sender.update(c),
+          setCounter: (n: number) => ((sender as unknown as { counter: number }).counter = n),
+          receiver: () => new VideoReceiver(sk.kid, importChain(exportChains(sk).audio)),
+        };
+      },
+    },
+  ])('$name frames are taken once', ({ make }) => {
+    const frame = Uint8Array.from({ length: 80 }, (_, i) => i);
+
+    it('refuses a frame played again, and takes frames out of order', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 10 }, () => tx.encrypt(frame));
+      for (const i of [3, 0, 2, 9, 1, 8, 4, 7, 5, 6]) expect(rx.decrypt(frames[i]!)).toEqual(frame);
+      for (const f of frames) expect(rx.decrypt(f)).toBeNull();
+    });
+
+    it('refuses frames older than the window, and takes those just inside it', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 300 }, () => tx.encrypt(frame));
+      expect(rx.decrypt(frames[299]!)).toEqual(frame);
+      expect(rx.decrypt(frames[0]!)).toBeNull();
+      expect(rx.decrypt(frames[100]!)).toEqual(frame);
+      expect(rx.decrypt(frames[100]!)).toBeNull();
+    });
+
+    it('keeps count when the frame counter wraps around', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      tx.setCounter(0xfffffffa);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 12 }, () => tx.encrypt(frame));
+      for (const i of [0, 1, 9, 11, 5, 10, 2, 3, 4, 6, 7, 8])
+        expect(rx.decrypt(frames[i]!)).toEqual(frame);
+      for (const f of frames) expect(rx.decrypt(f)).toBeNull();
+    });
+
+    it('refuses a frame of the previous generation played again after the next began', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const old = tx.encrypt(frame);
+      expect(rx.decrypt(old)).toEqual(frame);
+      tx.update(ratchet(sk.audio));
+      expect(rx.decrypt(tx.encrypt(frame))).toEqual(frame);
+      expect(rx.decrypt(old)).toBeNull();
+    });
+  });
+
   it("video and audio frames can't stand in for each other", () => {
     const sk = createSenderKey();
     const frame = new Uint8Array(200).fill(9);

@@ -32,6 +32,28 @@ describe('voice frame keys in the worker', () => {
     keyring.dispose();
   });
 
+  it('continues the counter after every connection was lost, since listeners refuse counters they have passed', () => {
+    const keyring = new GroupKeyring({ autoRatchet: false });
+    const scopes = new FrameScopes();
+    const frame = new Uint8Array(60);
+    scopes.update('conn-1', keyring.frameKeys());
+    const before = [1, 2].map(() => counterOf(scopes.get('conn-1')!.sender!.encrypt(frame)));
+    const video = scopes.get('conn-1')!.video!;
+    const cam = video.encrypt(frame, vp8ClearBytes(true));
+    // The connection drops and the next one is made only afterwards.
+    scopes.drop('conn-1');
+    scopes.update('conn-2', keyring.frameKeys());
+    expect(counterOf(scopes.get('conn-2')!.sender!.encrypt(frame))).toBe((before[1]! + 1) >>> 0);
+    expect(scopes.get('conn-2')!.video).toBe(video);
+    expect(cam.length).toBeGreaterThan(0);
+    // Once our key is replaced, the old sender goes.
+    keyring.rotate();
+    scopes.drop('conn-2');
+    scopes.update('conn-3', keyring.frameKeys());
+    expect(scopes.get('conn-3')!.video).not.toBe(video);
+    keyring.dispose();
+  });
+
   it('takes the newer audio position from a key sent again, so a new connection can still decrypt', () => {
     const alice = new GroupKeyring({ autoRatchet: false });
     const bob = new GroupKeyring({ autoRatchet: false });
