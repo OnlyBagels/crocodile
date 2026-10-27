@@ -107,8 +107,9 @@ picture size.
   and is authenticated with the trailer.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
 - Files: a random key per file, and an id that is a hash of the author and
-  that key (a message with any other id is refused); 1 MiB blocks encrypted with AES-256-GCM
-  (index as nonce; file id, index and a last-block flag as associated data);
+  that key (a message with any other id is refused); 1 MiB blocks encrypted
+  with AES-256-GCM (index as nonce; file id, index and a last-block flag as
+  associated data);
   the hash of the encrypted blocks' SHA-256 list is in the author-signed
   manifest. Stored encrypted as received.
 - Device linking: short one-time code plus a 6-digit security code compared

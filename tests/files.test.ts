@@ -239,7 +239,8 @@ describe('files', () => {
       mallory as unknown as { sessions: Map<string, { sendGroup(p: unknown): boolean }> }
     ).sessions.get(sid)!;
     expect(mallorySession.sendGroup({ type: 'message', message: squat })).toBe(true);
-    await alice.sendMessage(ch, 'after');
+    // Same connection, so Bob has handled the squat by the time this arrives.
+    await mallory.sendMessage(ch, 'after');
     await waitFor(() => bob.state.messages[ch]?.some((m) => m.body === 'after'), 8000, 'later');
     expect((bob.state.messages[ch] ?? []).filter((m) => m.file)).toHaveLength(1);
     expect(await accept(sid, squat)).toBe(false);
