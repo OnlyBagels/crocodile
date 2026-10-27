@@ -526,20 +526,45 @@ describe('TURN relay', () => {
     const turn = await limitedTurn({});
     const c = await turnClient(turn);
     expect(await allocate(c)).toBe(0);
-    // A signed CreatePermission with no peer, and a peer appended to the datagram afterwards.
-    const tx = randomBytes(12);
-    const signed = encodeStun(0x008, 0, tx, c.auth, c.key);
-    const peer = xorAddress(publicPeers(1, 1)[0]!, 9, tx);
-    const appended = Buffer.alloc(4 + peer.length);
-    appended.writeUInt16BE(0x0012, 0);
-    appended.writeUInt16BE(peer.length, 2);
-    peer.copy(appended, 4);
-    const forged = Buffer.concat([signed, appended]);
-    forged.writeUInt16BE(forged.length - 20, 2);
-    c.sock.send(forged, turn.port, '127.0.0.1');
-    const err = (await c.answer(tx)).attrs.find((a) => a.type === 0x0009)?.value;
-    expect(err && err[2]! * 100 + err[3]!).toBe(400);
-    // The same peer, signed, is accepted.
+    // A signed request, then an attribute appended to the datagram by someone on the path. (The
+    // server does not check the fingerprint, so the appended bytes need not keep it valid.)
+    const forge = async (
+      method: number,
+      attrs: { type: number; value: Buffer }[],
+      extra: Buffer,
+    ) => {
+      const tx = randomBytes(12);
+      const signed = encodeStun(method, 0, tx, attrs, c.key);
+      const forged = Buffer.concat([signed, extra]);
+      forged.writeUInt16BE(forged.length - 20, 2);
+      c.sock.send(forged, turn.port, '127.0.0.1');
+      return c.answer(tx);
+    };
+    const attr = (type: number, value: Buffer) => {
+      const out = Buffer.alloc(4 + value.length);
+      out.writeUInt16BE(type, 0);
+      out.writeUInt16BE(value.length, 2);
+      value.copy(out, 4);
+      return out;
+    };
+    const code = (m: { attrs: { type: number; value: Buffer }[] }) => {
+      const err = m.attrs.find((a) => a.type === 0x0009)?.value;
+      return err ? err[2]! * 100 + err[3]! : 0;
+    };
+    // A peer added to a CreatePermission that named none is not a peer the user asked for.
+    const peerless = await forge(
+      0x008,
+      c.auth,
+      attr(0x0012, xorAddress(publicPeers(1, 1)[0]!, 9, Buffer.alloc(12))),
+    );
+    expect(code(peerless)).toBe(400);
+    // A zero lifetime added to a refresh does not release the allocation.
+    const refreshed = await forge(0x004, c.auth, attr(0x000d, Buffer.from([0, 0, 0, 0])));
+    expect(code(refreshed)).toBe(0);
+    expect(refreshed.attrs.find((a) => a.type === 0x000d)?.value.readUInt32BE(0)).toBeGreaterThan(
+      0,
+    );
+    // What was signed is still honoured.
     expect(await permit(c, publicPeers(1, 1))).toBe(0);
   });
 
