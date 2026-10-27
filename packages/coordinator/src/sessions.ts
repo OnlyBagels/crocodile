@@ -46,6 +46,14 @@ const VOICE_REFRESH_MS = 5 * 60_000;
 const VOICE_MAX_AGE_MS = 15 * 60_000;
 /** An announcement dated further ahead than this is refused. */
 const VOICE_AHEAD_MS = 5 * 60_000;
+/**
+ * How long an operation from a server waits for news that the member is connected
+ * to it (the news may still be on its way), and how many may wait at once.
+ */
+const HOSTING_GRACE_MS = 1500;
+const HOSTING_WAITERS_MAX = 200;
+/** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
+const HINT_EPOCH_MAX = 1_000_000;
 
 /**
  * Sessions and host election.
@@ -238,17 +246,90 @@ export class SessionService {
     });
   }
 
+  /** Operations on one session are applied one at a time, in the order they arrived. */
+  private opChains = new Map<string, Promise<void>>();
+  private hostingWaiters = 0;
+
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
-    try {
-      const ok = this.apply(frame.sessionId, frame.peer, fromServer, frame.op);
-      this.hub.mesh.sendTo(fromServer, { t: 'session_op_res', opId: frame.opId, ok });
-    } catch (err) {
-      const code = err instanceof RpcFailure ? err.code : 'internal';
-      this.hub.mesh.sendTo(fromServer, {
-        t: 'session_op_res',
-        opId: frame.opId,
-        err: { code, message: err instanceof Error ? err.message : String(err) },
+    const reply = (res: { ok: unknown } | { err: unknown }) =>
+      this.hub.mesh.sendTo(fromServer, { t: 'session_op_res', opId: frame.opId, ...res } as never);
+    const fail = (err: unknown) =>
+      reply({
+        err: {
+          code: err instanceof RpcFailure ? err.code : 'internal',
+          message: err instanceof Error ? err.message : String(err),
+        },
       });
+    // Only a join has to be vouched for by presence: whoever else speaks for a
+    // member must be the server it joined from, which `apply` checks. (A member
+    // who disconnects is already gone from the presence when its leave arrives.)
+    const vouched =
+      frame.op.op === 'join' ? this.connectedTo(fromServer, frame.peer) : Promise.resolve(true);
+    void vouched.then((connected) => {
+      if (!connected) {
+        fail(new RpcFailure('forbidden', 'that device is not connected to the sending server'));
+        return;
+      }
+      const previous = this.opChains.get(frame.sessionId) ?? Promise.resolve();
+      const run: Promise<void> = previous.then(async () => {
+        try {
+          reply({ ok: await this.runRemoteOp(fromServer, frame) });
+        } catch (err) {
+          fail(err);
+        }
+      });
+      this.opChains.set(frame.sessionId, run);
+      void run.then(() => {
+        if (this.opChains.get(frame.sessionId) === run) this.opChains.delete(frame.sessionId);
+      });
+    });
+  }
+
+  /**
+   * Whether the server may add this device to a session: it has told the mesh
+   * the device is connected to it. News of a device that has only just connected
+   * can still be on its way, so it is waited for briefly.
+   */
+  private async connectedTo(server: string, peer: string): Promise<boolean> {
+    const presence = this.hub.presence;
+    if (presence.hosts(server, peer)) return true;
+    if (this.hostingWaiters >= HOSTING_WAITERS_MAX) return false;
+    this.hostingWaiters += 1;
+    try {
+      const until = Date.now() + HOSTING_GRACE_MS;
+      while (Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 50));
+        if (presence.hosts(server, peer)) return true;
+      }
+      return false;
+    } finally {
+      this.hostingWaiters -= 1;
+    }
+  }
+
+  /** The owner's side of an operation: whoever joins must still be allowed, and so must the host they name. */
+  private async runRemoteOp(fromServer: string, frame: FedSessionOp): Promise<unknown> {
+    let op = frame.op;
+    if (op.op === 'join') {
+      await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
+      if (op.hint) {
+        const { hint, ...rest } = op;
+        op = (await this.hintAllowed(frame.sessionId, hint)) ? op : rest;
+      }
+    }
+    return this.apply(frame.sessionId, frame.peer, fromServer, op);
+  }
+
+  /** A hint is believed only if the host and backup it names may be in the session. */
+  private async hintAllowed(sessionId: string, hint: Hint): Promise<boolean> {
+    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return false;
+    try {
+      for (const peer of [hint.host, hint.backup]) {
+        if (peer) await this.checkAccess(peerIds.user(peer), sessionId);
+      }
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -320,6 +401,8 @@ export class SessionService {
 
     if (!s) return {};
     const member = s.state.members.find((m) => m.peer === peer);
+    // Only the server a member joined from speaks for it afterwards.
+    if (member && s.memberServer.get(peer) !== serverId) return {};
     switch (op.op) {
       case 'update':
         if (member) {

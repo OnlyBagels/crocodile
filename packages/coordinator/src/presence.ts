@@ -159,6 +159,18 @@ export class PresenceService {
       .map(([s]) => s);
   }
 
+  /**
+   * Whether `server` has told us it has `who` connected: a device (a peer id)
+   * or any device of a user (a user id). Servers are taken at their word about
+   * their own users, never about another server's.
+   */
+  hosts(server: string, who: string): boolean {
+    const [userId, deviceId] = who.split('.') as [string, string | undefined];
+    const entry = this.remote.get(userId)?.get(server);
+    if (!entry || entry.status === 'offline') return false;
+    return deviceId === undefined || entry.devices.includes(deviceId);
+  }
+
   /** Server hosting a specific device. */
   locatePeer(peer: string): string | null {
     if (this.localPeer(peer)) return this.hub.info.id;

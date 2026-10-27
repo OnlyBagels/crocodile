@@ -10,12 +10,14 @@ import {
 import {
   PROTOCOL_VERSION,
   SIG_DOMAIN,
+  peerIds,
   presenceSigned,
+  sessionIds,
   voiceSigned,
   type FedPresence,
 } from '@crocodile/protocol';
 import { Coordinator, rendezvousOwner } from '@crocodile/coordinator';
-import { connectUser, meshLinkTo, startCoordinator, waitFor } from './helpers';
+import { caps, connectUser, meshLinkTo, startCoordinator, waitFor } from './helpers';
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -273,5 +275,181 @@ describe('voice occupancy from other servers', () => {
     expect(shown(forged)).toBe(0);
     expect(shown(notMine)).toBe(0);
     expect(shown(stale)).toBe(0);
+  });
+});
+
+describe('events and session operations from other servers', () => {
+  /**
+   * Alice is on `victim`, Bob on `honest`, and their conversation is owned by
+   * `victim`. `rogue` is a third server writing into its link to the victim.
+   */
+  async function conversation() {
+    const net = await threeServers();
+    let a = createIdentity();
+    let b = createIdentity();
+    while (
+      rendezvousOwner(sessionIds.dm(a.userId, b.userId), net.victim.membership.liveIds()) !==
+      net.victim.info.id
+    ) {
+      a = createIdentity();
+      b = createIdentity();
+    }
+    const alice = await connectUser(net.victim, a, 'alice');
+    const bob = await connectUser(net.honest, b, 'bob');
+    cleanup.push(() => alice.conn.close());
+    cleanup.push(() => bob.conn.close());
+    const invites: unknown[] = [];
+    alice.conn.on('session_invite', (d) => invites.push(d));
+    await waitFor(
+      () => online(net.victim, b.userId) && online(net.honest, a.userId),
+      3000,
+      'users',
+    );
+    return {
+      ...net,
+      alice,
+      bob,
+      invites,
+      sessionId: sessionIds.dm(a.userId, b.userId),
+      toVictim: meshLinkTo(net.rogue, net.victim.info.id),
+    };
+  }
+  type Net = Awaited<ReturnType<typeof conversation>>;
+
+  const bye = { type: 'bye' as const, epoch: 1, dir: 'toRelay' as const };
+
+  async function joined(net: Net) {
+    await net.alice.conn.request('session.join', { sessionId: net.sessionId, caps: caps() });
+    await net.bob.conn.request('session.join', { sessionId: net.sessionId, caps: caps() });
+    return () => net.victim.sessions.ownedState(net.sessionId)!;
+  }
+
+  /** The marker lands after everything sent before it on the link. */
+  async function settled(net: Net) {
+    const marker = createIdentity().userId;
+    net.toVictim.send(presenceFrom(net.rogue, Date.now(), [entry(marker)]));
+    await waitFor(() => online(net.victim, marker), 3000, 'the marker to land');
+  }
+
+  const op = (net: Net, peer: string, body: unknown) =>
+    net.toVictim.send({ t: 'session_op', opId: 'o1', sessionId: net.sessionId, peer, op: body });
+
+  describe('routed events', () => {
+    it('delivers a signal only from the server that has the sender connected', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      expect(state().members).toHaveLength(2);
+      const signals = () => net.alice.events.filter((e) => e.ev === 'signal');
+      // Made up by the rogue server, in Bob's name.
+      net.toVictim.send({
+        t: 'route',
+        to: net.alice.conn.peer,
+        ev: 'signal',
+        d: { from: net.bob.conn.peer, sessionId: net.sessionId, data: bye },
+      });
+      await settled(net);
+      expect(signals()).toHaveLength(0);
+      // Bob's own server may.
+      await net.bob.conn.request('signal.send', {
+        to: net.alice.conn.peer,
+        sessionId: net.sessionId,
+        data: bye,
+      });
+      await waitFor(() => signals().length === 1, 3000, 'the real signal');
+    });
+
+    it('delivers an invitation only from the server that owns the conversation', async () => {
+      const net = await conversation();
+      net.toVictim.send({
+        t: 'route',
+        to: net.alice.identity.userId,
+        ev: 'session_invite',
+        d: { sessionId: net.sessionId, from: net.bob.identity.userId },
+      });
+      await settled(net);
+      expect(net.invites).toHaveLength(0);
+    });
+
+    it('drops events whose content is not what the event says', async () => {
+      const net = await conversation();
+      net.toVictim.send({ t: 'route', to: net.alice.conn.peer, ev: 'mail', d: { items: 'x' } });
+      net.toVictim.send({ t: 'route', to: net.alice.conn.peer, ev: 'signal', d: { from: 5 } });
+      net.toVictim.send({
+        t: 'route',
+        to: net.alice.identity.userId,
+        ev: 'relay_expired',
+        d: { reason: 'the rogue server says so' },
+      });
+      await settled(net);
+      expect(
+        net.alice.events.filter((e) => ['mail', 'signal', 'relay_expired'].includes(e.ev)),
+      ).toEqual([]);
+    });
+  });
+
+  describe('session operations', () => {
+    it('refuses operations for a device the sender does not have connected', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // Kick Bob, and fail the host over, in the name of the rogue server.
+      op(net, net.bob.conn.peer, { op: 'leave' });
+      op(net, net.alice.conn.peer, {
+        op: 'report',
+        epoch: state().epoch,
+        issue: 'host_unreachable',
+      });
+      await settled(net);
+      expect(
+        state()
+          .members.map((m) => m.peer)
+          .sort(),
+      ).toEqual([net.alice.conn.peer, net.bob.conn.peer].sort());
+      expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('still lets a member on another server leave when it disconnects', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      expect(state().members).toHaveLength(2);
+      // Bob's server says he has gone, and then that he has left the conversation.
+      net.bob.conn.close();
+      await waitFor(
+        () => state().members.length === 1,
+        4000,
+        'bob to be taken out of the conversation',
+      );
+      expect(state().members[0]!.peer).toBe(net.alice.conn.peer);
+    });
+
+    it('checks again that whoever joins may', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // The rogue server says Mallory is on it, which it may; she is not in the conversation.
+      const mallory = createIdentity().userId;
+      const peer = peerIds.make(mallory, 'abcdefgh');
+      net.toVictim.send(presenceFrom(net.rogue, Date.now(), [entry(mallory, ['abcdefgh'])]));
+      op(net, peer, { op: 'join', caps: caps(), hint: { epoch: 1e9, host: peer, backup: null } });
+      await settled(net);
+      expect(state().members.map((m) => m.userId)).not.toContain(mallory);
+      expect(state().epoch).toBeLessThan(5);
+    });
+
+    it('does not take a host from a member who was never there', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      // The rogue server joins as Alice, which it claims to have, naming Mallory the host.
+      net.toVictim.send(
+        presenceFrom(net.rogue, Date.now(), [entry(net.alice.identity.userId, ['abcdefgh'])]),
+      );
+      const mallory = peerIds.make(createIdentity().userId, 'abcdefgh');
+      op(net, peerIds.make(net.alice.identity.userId, 'abcdefgh'), {
+        op: 'join',
+        caps: caps(),
+        hint: { epoch: 1e9, host: mallory, backup: null },
+      });
+      await settled(net);
+      expect(state().host).not.toBe(mallory);
+      expect(state().epoch).toBeLessThan(5);
+    });
   });
 });

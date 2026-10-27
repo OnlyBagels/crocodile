@@ -24,6 +24,7 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import { fnv1a } from './election';
+import { routedEvent } from './routes';
 import { RateLimiter, RpcFailure, chunkByBytes, sendJson, toWsUrl } from './util';
 
 interface Link {
@@ -724,14 +725,12 @@ export class Mesh {
         return;
       }
       case 'route': {
-        // Only events servers route (ROUTED_EVENTS); a session's state only
-        // from the server that owns it.
-        if (frame.ev === 'session') {
-          const state = (frame.d as { state?: { id?: unknown } })?.state;
-          if (typeof state?.id !== 'string' || this.hub.sessions.ownerOf(state.id) !== peerId)
-            return;
+        const d = routedEvent(this.hub, peerId, frame);
+        if (d === undefined) {
+          this.hub.log.debug('dropped a routed event', { from: peerId, ev: frame.ev });
+          return;
         }
-        this.hub.deliverLocal(frame.to, frame.ev as never, frame.d as never);
+        this.hub.deliverLocal(frame.to, frame.ev as never, d as never);
         return;
       }
       case 'session_op':
