@@ -253,6 +253,8 @@ export const RpcParams = {
   'records.list': z.object({
     prefix: z.string().min(3).max(200),
     limit: z.number().int().min(1).max(5000).optional(),
+    /** Continue after this key, when the previous answer said there is more. */
+    after: z.string().max(200).optional(),
   }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),
@@ -305,8 +307,16 @@ export const RpcParams = {
 
 export interface RpcMethods {
   'records.put': { accepted: boolean; current: SignedRecord | null; reason?: string };
-  'records.get': { records: SignedRecord[] };
-  'records.list': { records: SignedRecord[] };
+  /**
+   * `more`: the answer was cut to fit one frame; ask again for the keys from index `next` on.
+   * Keys before it were answered, or have no record to give.
+   */
+  'records.get': { records: SignedRecord[]; more?: boolean; next?: number };
+  /**
+   * `more`: there are records after these. Ask again with `after` the last key returned, or `next`
+   * if given (a page that held nothing to return).
+   */
+  'records.list': { records: SignedRecord[]; more?: boolean; next?: string };
   'records.subscribe': Record<string, never>;
   'users.search': { profiles: SignedRecord<'profile'>[] };
   'friends.incoming': { records: SignedRecord<'friends'>[] };

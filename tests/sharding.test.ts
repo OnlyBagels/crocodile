@@ -9,6 +9,8 @@ import type { Coordinator, CoordinatorConfig } from '@crocodile/coordinator';
 import {
   createIdentity,
   createPrekey,
+  randomDeviceId,
+  sealAnonymous,
   sealToDevice,
   signMailProof,
   signRecord,
@@ -819,4 +821,53 @@ describe('frames from other servers', () => {
     } as never);
     await waitFor(() => victim.events.some((e) => e.ev === 'relay_expired'), 3000, 'routed');
   });
+  it('pages a list through a server that does not hold it, however long it is', async () => {
+    const servers = await network(3);
+    const bob = createIdentity();
+    const reader = await user(servers[0]!);
+    // Notes large enough that a handful fill a frame, written by one-time keys.
+    const from = createIdentity();
+    const prekey = createPrekey().bundle;
+    const notes: SignedRecord[] = [];
+    for (let i = 0; i < 10; i++) {
+      const author = createIdentity();
+      const boxes = Array.from({ length: 8 }, () =>
+        sealAnonymous(
+          from,
+          randomDeviceId(),
+          { peer: peerIds.make(bob.userId, randomDeviceId()), prekey },
+          utf8.encode('x'.repeat(4000)),
+        ),
+      );
+      const note = signRecord(author, 'note', recordKey.note(bob.userId, author.userId), { boxes });
+      await put(reader, note);
+      notes.push(note);
+    }
+    const placed = owners(servers, notes[0]!);
+    const away = servers.find((c) => !placed.includes(c.info.id))!;
+    const owner = await connectUser(away, bob, 'bob');
+    cleanup.push(() => owner.conn.close());
+    await waitFor(
+      async () =>
+        (await owner.conn.request('records.list', { prefix: `note:${bob.userId}:` })).records
+          .length > 0,
+      5000,
+      'notes reach the owners',
+    );
+    // Page by page through the server holding none of them.
+    const seen: string[] = [];
+    let after: string | undefined;
+    for (let rounds = 0; rounds < 30; rounds++) {
+      const res = await owner.conn.request('records.list', {
+        prefix: `note:${bob.userId}:`,
+        ...(after ? { after } : {}),
+      });
+      expect(Buffer.byteLength(JSON.stringify(res.records))).toBeLessThan(1024 * 1024);
+      seen.push(...res.records.map((r) => r.key));
+      after = res.records.at(-1)?.key;
+      if (!res.more) break;
+    }
+    expect(seen).toEqual([...seen].sort());
+    expect(seen.sort()).toEqual(notes.map((n) => n.key).sort());
+  }, 60_000);
 });

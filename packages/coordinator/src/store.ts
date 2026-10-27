@@ -32,7 +32,8 @@ export interface Store {
   get(key: string): SignedRecord | undefined;
   /** Inserts or replaces; caller has already validated the record. */
   put(record: SignedRecord): number;
-  listPrefix(prefix: string, limit: number): SignedRecord[];
+  /** Records under a prefix in key order, those after the key `after` if one is given. */
+  listPrefix(prefix: string, limit: number, after?: string): SignedRecord[];
   since(seq: number, limit: number): StoredRecord[];
   latestSeq(): number;
   /** Records indexed under a term (see indexTerms). */
@@ -158,13 +159,15 @@ export class MemoryStore implements Store {
     return this.terms.get(term)?.size ?? 0;
   }
 
-  listPrefix(prefix: string, limit: number) {
-    const out: SignedRecord[] = [];
-    for (const [key, r] of this.records) {
-      if (key.startsWith(prefix)) out.push(r.record);
-      if (out.length >= limit) break;
-    }
-    return out;
+  // Sorted on every call: this store is for tests and development.
+  listPrefix(prefix: string, limit: number, after?: string) {
+    const keys: string[] = [];
+    for (const key of this.records.keys())
+      if (key.startsWith(prefix) && (after === undefined || key > after)) keys.push(key);
+    return keys
+      .sort()
+      .slice(0, limit)
+      .map((key) => this.records.get(key)!.record);
   }
 
   since(seq: number, limit: number) {
@@ -332,6 +335,9 @@ export class SqliteStore implements Store {
       prefix: this.db.prepare(
         'SELECT json FROM records WHERE key >= ? AND key < ? ORDER BY key LIMIT ?',
       ),
+      prefixAfter: this.db.prepare(
+        'SELECT json FROM records WHERE key > ? AND key < ? ORDER BY key LIMIT ?',
+      ),
       since: this.db.prepare('SELECT seq, json FROM records WHERE seq > ? ORDER BY seq LIMIT ?'),
       byTerm: this.db.prepare(
         'SELECT r.json FROM terms t JOIN records r ON r.key = t.key WHERE t.term = ? LIMIT ?',
@@ -418,13 +424,15 @@ export class SqliteStore implements Store {
     return Number(this.stmts.countTerm.get(term)?.n ?? 0);
   }
 
-  listPrefix(prefix: string, limit: number) {
+  listPrefix(prefix: string, limit: number, after?: string) {
     // Prefixes end in ':' so bumping the last char gives an exclusive upper bound.
     const upper =
       prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-    return this.stmts.prefix
-      .all(prefix, upper, limit)
-      .map((r) => JSON.parse(r.json as string) as SignedRecord);
+    const rows =
+      after !== undefined && after >= prefix
+        ? this.stmts.prefixAfter.all(after, upper, limit)
+        : this.stmts.prefix.all(prefix, upper, limit);
+    return rows.map((r) => JSON.parse(r.json as string) as SignedRecord);
   }
 
   since(seq: number, limit: number) {

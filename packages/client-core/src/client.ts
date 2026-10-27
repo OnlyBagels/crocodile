@@ -939,12 +939,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const [mine, incoming, own] = await Promise.all([
       link.request('spaces.mine', {}),
       link.request('friends.incoming', {}),
-      link.request('records.get', { keys: [recordKey.profile(me), recordKey.friends(me)] }),
+      fetchRecords(link, [recordKey.profile(me), recordKey.friends(me)]),
     ]);
-    const myDevices = await link.request('records.list', { prefix: recordKey.devicePrefix(me) });
+    const myDevices = await fetchList(link, recordKey.devicePrefix(me));
     this.records.ingestAll([
-      ...own.records,
-      ...myDevices.records,
+      ...own,
+      ...myDevices,
       ...mine.spaces,
       ...mine.members,
       // Requests from apps that still write readable lists.
@@ -953,8 +953,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // Notes that came while we were away, then whatever our list still owes
     // the server (a change made offline, or moving an old readable list over)
     // and our friends (notes not sent yet).
-    const notes = await link.request('records.list', { prefix: recordKey.notePrefix(me) });
-    await this.readNotes(notes.records);
+    await this.readNotes(await fetchList(link, recordKey.notePrefix(me)));
     await this.queueFriends(() => this.syncFriendList()).catch((err) =>
       this.log('friends list not saved', { err: String(err) }),
     );
@@ -963,8 +962,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
     for (const id of spaceIds) {
-      const members = await link.request('records.list', { prefix: recordKey.memberPrefix(id) });
-      this.records.ingestAll(members.records);
+      this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(id)));
     }
     await this.subscribe([
       recordKey.profile(me),
@@ -1135,11 +1133,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async mailTargets(userIds: string[], max = 20) {
     const out: { peer: string; prekey: DeviceBody['prekey'] }[] = [];
     for (const userId of new Set(userIds)) {
-      const res = await this.link!.request('records.list', {
-        prefix: recordKey.devicePrefix(userId),
-      });
-      this.records.ingestAll(res.records);
-      for (const r of res.records as SignedRecord<'device'>[]) {
+      const found = await fetchList(this.link!, recordKey.devicePrefix(userId));
+      this.records.ingestAll(found);
+      for (const r of found as SignedRecord<'device'>[]) {
         const verified = this.records.get(r.key) as SignedRecord<'device'> | undefined;
         if (!verified || verified.sig !== r.sig || verified.body.revoked) continue;
         const peer = peerIds.make(userId, verified.body.deviceId);
@@ -1202,8 +1198,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const missing = ids.filter((id) => id !== this.userId);
     for (const part of chunks(missing, 400)) {
       const keys = part.map((id) => recordKey.profile(id));
-      const res = await this.link!.request('records.get', { keys });
-      this.records.ingestAll(res.records);
+      this.records.ingestAll(await fetchRecords(this.link!, keys));
     }
     await this.subscribe(missing.map((id) => recordKey.profile(id)));
     const presence: PresenceEntry[] = [];
@@ -1255,10 +1250,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
     if (!missing.length || !link) return;
     for (const part of chunks(missing, 400)) {
-      const res = await link
-        .request('records.get', { keys: part.map((id) => recordKey.profile(id)) })
-        .catch(() => null);
-      if (res) this.records.ingestAll(res.records);
+      const found = await fetchRecords(
+        link,
+        part.map((id) => recordKey.profile(id)),
+      ).catch(() => null);
+      if (found) this.records.ingestAll(found);
     }
     for (const part of chunks(missing, 2000))
       await link
@@ -1859,10 +1855,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       this.wantedTimer = undefined;
       const batch = [...this.wanted].slice(0, 400);
       for (const k of batch) this.wanted.delete(k);
-      void this.link
-        ?.request('records.get', { keys: batch })
-        .then((res) => this.records.ingestAll(res.records))
-        .catch(() => {});
+      if (this.link)
+        void fetchRecords(this.link, batch)
+          .then((found) => this.records.ingestAll(found))
+          .catch(() => {});
     }, 20);
   }
 
@@ -1886,10 +1882,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.link!.request('records.subscribe', {
       prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
     });
-    const members = await this.link!.request('records.list', {
-      prefix: recordKey.memberPrefix(spaceId),
-    });
-    this.records.ingestAll(members.records);
+    this.records.ingestAll(await fetchList(this.link!, recordKey.memberPrefix(spaceId)));
     const spaceIds = Object.keys(this.state.spaces);
     const { voice } = await this.link!.request('voice.watch', { spaceIds });
     for (const v of voice) this.setOccupancy(v);
@@ -2510,8 +2503,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const keys = [recordKey.device(userId, peerIds.device(peer))];
     if (scope.kind !== 'dm')
       keys.push(recordKey.member(scope.spaceId, userId), recordKey.space(scope.spaceId));
-    const res = await this.link.request('records.get', { keys });
-    this.records.ingestAll(res.records);
+    this.records.ingestAll(await fetchRecords(this.link, keys));
   }
 
   /** `peer` is `<userId>.<deviceId>`; bare user ids are accepted too. */
@@ -3503,6 +3495,35 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
     out.push(m);
   }
   return out;
+}
+
+/** Records by key. A server cuts a long answer to fit one frame, so ask again for what is left. */
+async function fetchRecords(link: CoordinatorLink, keys: string[]): Promise<SignedRecord[]> {
+  const out: SignedRecord[] = [];
+  let rest = keys;
+  for (;;) {
+    const res = await link.request('records.get', { keys: rest });
+    out.push(...res.records);
+    if (!res.more) return out;
+    // The server says where it got to; one that says none would have us ask for ever.
+    if (!res.next || res.next >= rest.length) throw new Error('incomplete answer');
+    rest = rest.slice(res.next);
+  }
+}
+
+/** The records under a prefix, going on after the last key for as long as the server says more. */
+async function fetchList(link: CoordinatorLink, prefix: string): Promise<SignedRecord[]> {
+  const out: SignedRecord[] = [];
+  let after: string | undefined;
+  for (;;) {
+    const res = await link.request('records.list', { prefix, ...(after ? { after } : {}) });
+    out.push(...res.records);
+    if (!res.more) return out;
+    const last = res.next ?? res.records.at(-1)?.key;
+    if (last === undefined || (after !== undefined && last <= after))
+      throw new Error('incomplete answer');
+    after = last;
+  }
 }
 
 function chunks<T>(items: T[], size: number): T[][] {

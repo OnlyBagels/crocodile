@@ -46,6 +46,35 @@ describe.each(stores)('%s store', (_name, make) => {
     store.close();
   });
 
+  it('lists a prefix in key order, from after a key', () => {
+    const store = make();
+    const alice = createIdentity();
+    const keys = ['b', 'a', 'd', 'c'].map((x) => recordKey.note(alice.userId, x.repeat(26)));
+    for (const key of keys) {
+      const author = createIdentity();
+      store.put(signRecord(author, 'profile', key, { username: 'x', encKey: author.encPublicKey }));
+    }
+    store.put(
+      signRecord(alice, 'profile', recordKey.profile(alice.userId), {
+        username: 'alice',
+        encKey: alice.encPublicKey,
+      }),
+    );
+    const prefix = `note:${alice.userId}:`;
+    const sorted = [...keys].sort();
+    const list = (limit: number, after?: string) =>
+      store.listPrefix(prefix, limit, after).map((r) => r.key);
+    expect(list(10)).toEqual(sorted);
+    expect(list(2)).toEqual(sorted.slice(0, 2));
+    expect(list(10, sorted[1])).toEqual(sorted.slice(2));
+    expect(list(1, sorted[1])).toEqual([sorted[2]]);
+    expect(list(10, sorted[3])).toEqual([]);
+    // A key before the prefix or past it leaves the range alone.
+    expect(list(10, 'a')).toEqual(sorted);
+    expect(list(10, 'z')).toEqual([]);
+    store.close();
+  });
+
   it('counts by term and deletes records and mail outright', () => {
     const store = make();
     const alice = createIdentity();

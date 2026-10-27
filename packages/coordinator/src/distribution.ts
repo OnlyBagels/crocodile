@@ -19,7 +19,7 @@ import {
   type View,
 } from './placement';
 import type { PutResult } from './records';
-import { RpcFailure, withinBytes } from './util';
+import { RpcFailure, cutToFrame, withinBytes } from './util';
 
 export interface DistributionConfig {
   /** Records we no longer own go once the live set has been stable this long. */
@@ -56,6 +56,9 @@ const WATCHES_PER_SERVER = 50_000;
 /** Copies that arrived before what they depend on: fetched and tried again a few times. */
 const RETRY_MS = 1500;
 const RETRY_TRIES = 5;
+
+const greatest = (keys: string[]) =>
+  keys.length ? keys.reduce((a, b) => (b > a ? b : a)) : undefined;
 
 /**
  * Where records are read from and written to (docs/MESH.md). Each record lives
@@ -363,7 +366,7 @@ export class Distribution {
     shard: string,
     m: 'rec_get' | 'rec_list' | 'rec_term',
     p: unknown,
-    more?: { value: boolean },
+    more?: { value: boolean; upTo?: string },
   ): Promise<SignedRecord[] | null> {
     const answers = await this.hub.mesh.gather<{ records: SignedRecord[]; more?: boolean }>(
       this.others(shard),
@@ -371,9 +374,20 @@ export class Distribution {
       p,
     );
     if (answers.length === 0) return null;
-    if (more) more.value = answers.some((a) => a.more === true);
     // Only well-signed records count: an owner can't hand us a forged newer copy.
     const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
+    if (more) {
+      more.value = answers.some((a) => a.more === true);
+      // For lists, in key order: an owner that cut its answer says nothing past the last
+      // well-signed key it gave.
+      const good = new Set(valid.map((r) => r.key));
+      for (const a of answers) {
+        if (!a.more) continue;
+        const bound = greatest((a.records ?? []).map((r) => r.key).filter((k) => good.has(k)));
+        if (bound !== undefined && (more.upTo === undefined || bound < more.upTo))
+          more.upTo = bound;
+      }
+    }
     const newest = new Map<string, SignedRecord>();
     for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
     const found = [...newest.values()];
@@ -437,18 +451,45 @@ export class Distribution {
     return [...out.values()];
   }
 
-  async list(prefix: string, limit: number): Promise<SignedRecord[]> {
+  /**
+   * Records under a prefix in key order, at most `limit`, those after `after` if given. `more`:
+   * there are others after these (past `limit`, or an owner could not give everything it has in
+   * one frame, so this is cut where its answer was).
+   */
+  async list(
+    prefix: string,
+    limit: number,
+    after?: string,
+  ): Promise<{ records: SignedRecord[]; more: boolean }> {
     const shard = shardOfPrefix(prefix);
     const store = this.hub.records.store;
     const owned = !shard || this.ownsShard(shard);
-    const local = owned ? store.listPrefix(prefix, limit) : [];
-    if (!shard || (owned && !this.catchingUp())) return local;
-    const remote = await this.fromOwners(shard, 'rec_list', { prefix, limit });
-    if (!remote) return owned ? local : store.listPrefix(prefix, limit);
-    return Distribution.merge(
+    // One more than asked for, to know whether there is more (and 5000 is what a peer takes).
+    limit = Math.min(limit, 4999);
+    const local = owned ? store.listPrefix(prefix, limit + 1, after) : [];
+    const page = (records: SignedRecord[], cut = false) => ({
+      records: records.slice(0, limit),
+      more: cut || records.length > limit,
+    });
+    if (!shard || (owned && !this.catchingUp())) return page(local);
+    const cut: { value: boolean; upTo?: string } = { value: false };
+    const remote = await this.fromOwners(
+      shard,
+      'rec_list',
+      { prefix, limit: limit + 1, after },
+      cut,
+    );
+    if (!remote) return page(owned ? local : store.listPrefix(prefix, limit + 1, after));
+    // An owner that ignored `after` (an older server) cannot be paged through.
+    if (after !== undefined && cut.upTo !== undefined && cut.upTo <= after)
+      throw new RpcFailure('unavailable', 'a server holding these records cannot page them');
+    const merged = Distribution.merge(
       local,
-      remote.filter((r) => r.key.startsWith(prefix)),
-    ).slice(0, limit);
+      remote.filter((r) => r.key.startsWith(prefix) && (after === undefined || r.key > after)),
+    )
+      .filter((r) => cut.upTo === undefined || r.key <= cut.upTo)
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    return page(merged, cut.upTo !== undefined);
   }
 
   async findByTerm(term: string, limit: number): Promise<SignedRecord[]> {
@@ -485,13 +526,15 @@ export class Distribution {
       case 'rec_get': {
         const { keys } = parsed.data as { keys: string[] };
         // As many as fit in one frame; the asker comes back for the rest.
-        const found = keys.map((k) => store.get(k)).filter((r) => r !== undefined);
-        const records = withinBytes(found);
-        return records.length < found.length ? { records, more: true } : { records };
+        return cutToFrame(keys.map((k) => store.get(k)).filter((r) => r !== undefined));
       }
       case 'rec_list': {
-        const { prefix, limit } = parsed.data as { prefix: string; limit?: number };
-        return { records: withinBytes(store.listPrefix(prefix, limit ?? 1000)) };
+        const { prefix, limit, after } = parsed.data as {
+          prefix: string;
+          limit?: number;
+          after?: string;
+        };
+        return cutToFrame(store.listPrefix(prefix, limit ?? 1000, after));
       }
       case 'rec_term': {
         const { term, limit } = parsed.data as { term: string; limit?: number };
