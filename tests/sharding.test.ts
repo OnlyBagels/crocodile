@@ -719,6 +719,58 @@ describe('large records between servers', () => {
     // One record after another would take 40 × 150 ms at least.
     expect(Date.now() - started).toBeLessThan(2000);
   });
+  it('gets every record an owner has, however many keys and however large', async () => {
+    const servers = await network(3);
+    // Profiles near the largest allowed: an owner fits one or two in a frame.
+    const avatar = `data:image/png;base64,${'A'.repeat(300_000)}`;
+    const records: SignedRecord[] = [];
+    for (let i = 0; i < 36; i++) {
+      const u = await user(servers[1 + (i % 2)]!, `big${i}`);
+      const profile = signRecord(u.identity, 'profile', recordKey.profile(u.identity.userId), {
+        username: `big${i}`,
+        encKey: u.identity.encPublicKey,
+        avatar,
+      });
+      await put(u, profile);
+      records.push(profile);
+    }
+    // The server holding the fewest asks for those it holds none of: all must come from the others.
+    const held = (c: Coordinator) => records.filter((r) => owners(servers, r).includes(c.info.id));
+    const reader = servers.reduce((a, b) => (held(b).length < held(a).length ? b : a));
+    const away = records.filter((r) => !owners(servers, r).includes(reader.info.id));
+    expect(away.length).toBeGreaterThan(3);
+    await waitFor(
+      () => away.every((r) => holders(servers, r.key).length >= 2),
+      30_000,
+      'profiles reach their owners',
+    );
+    const real = reader.mesh.request.bind(reader.mesh);
+    const asked = vi.spyOn(reader.mesh, 'request');
+    // Slow the second and later questions to a server, so that a lookup which stopped waiting
+    // once every server had answered something would come back short.
+    const seen = new Set<string>();
+    asked.mockImplementation(async (id, m, p, timeout) => {
+      if (m === 'rec_get' && seen.has(id)) await new Promise((r) => setTimeout(r, 400));
+      seen.add(id);
+      return real(id, m, p, timeout);
+    });
+    const got = await reader.dist.get(away.map((r) => r.key));
+    expect(got.map((r) => r.key).sort()).toEqual(away.map((r) => r.key).sort());
+    // More than one request to a server: its answers were cut to a frame, and it was asked again.
+    expect(asked.mock.calls.filter((c) => c[1] === 'rec_get').length).toBeGreaterThan(2);
+
+    // And far more keys than a request holds are asked in parts, each part within the limit.
+    asked.mockClear();
+    const absent = Array.from({ length: 2500 }, (_, i) =>
+      recordKey.profile(`${'b'.repeat(24)}${String(i).padStart(4, '0')}`),
+    );
+    expect(await reader.dist.get(absent)).toEqual([]);
+    const sizes = asked.mock.calls
+      .filter((c) => c[1] === 'rec_get')
+      .map((c) => (c[2] as { keys: string[] }).keys.length);
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
+    expect(sizes.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(2500);
+  }, 120_000);
 });
 
 describe('records from other servers', () => {

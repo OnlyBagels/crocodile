@@ -364,7 +364,7 @@ export class Distribution {
    */
   private async fromOwners(
     shard: string,
-    m: 'rec_get' | 'rec_list' | 'rec_term',
+    m: 'rec_list' | 'rec_term',
     p: unknown,
     more?: { value: boolean; upTo?: string },
   ): Promise<SignedRecord[] | null> {
@@ -437,9 +437,17 @@ export class Distribution {
   private async askOwners(owners: Map<string, string[]>): Promise<SignedRecord[]> {
     const byServer = new Map<string, string[]>();
     for (const [key, servers] of owners)
-      for (const id of servers) byServer.set(id, [...(byServer.get(id) ?? []), key]);
+      for (const id of servers) {
+        const list = byServer.get(id) ?? [];
+        list.push(key);
+        byServer.set(id, list);
+      }
     if (byServer.size === 0) return [];
-    const answered = new Set<string>();
+    // The keys each server has finished answering for (not just started), and the servers that
+    // have answered everything they will or failed.
+    const answered = new Map<string, Set<string>>(
+      [...byServer.keys()].map((id) => [id, new Set()]),
+    );
     const settled = new Set<string>();
     const got: SignedRecord[] = [];
     let release!: () => void;
@@ -447,8 +455,9 @@ export class Distribution {
     let grace: ReturnType<typeof setTimeout> | undefined;
     const check = () => {
       if (settled.size === byServer.size) return release();
-      const covered = [...owners.values()].every(
-        (list) => list.some((id) => answered.has(id)) || list.every((id) => settled.has(id)),
+      const covered = [...owners].every(
+        ([key, list]) =>
+          list.some((id) => answered.get(id)!.has(key)) || list.every((id) => settled.has(id)),
       );
       if (covered && !grace) grace = setTimeout(release, 250);
     };
@@ -465,10 +474,13 @@ export class Distribution {
               { keys: left },
             );
             got.push(...(res.records ?? []));
-            answered.add(id);
             const have = new Set((res.records ?? []).map((r) => r.key));
             const rest = left.filter((k) => !have.has(k));
-            left = res.more && rest.length < left.length ? rest : [];
+            const more = res.more && rest.length < left.length;
+            // Keys not given back are ones it has no record of, unless it cut its answer short.
+            for (const k of more ? have : left) answered.get(id)!.add(k);
+            left = more ? rest : [];
+            check();
           }
         }
       } catch {
