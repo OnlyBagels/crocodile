@@ -146,7 +146,8 @@ picture size.
   stop it. Anyone can also send notes, so a user's quota of unread notes can
   be filled by others, and their friend requests then wait. Copies of notes
   from other owners are let in up to twice the per-account quota, so owners
-  can end up holding different notes beyond it.
+  can end up holding different notes beyond it (the servers then keep
+  trying to reconcile them, which costs bandwidth until the notes expire).
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

@@ -93,9 +93,14 @@ export class RecordService {
     return this.store.countByTerm(`note-to:${note.key.split(':')[1]}`);
   }
 
-  /** Why a new record would exceed its author's quota, if it would. */
-  private overQuota(record: SignedRecord): string | undefined {
+  /**
+   * Why a new record would exceed its author's quota, if it would. Only notes are counted when a
+   * copy comes from another server: each owner takes a user's notes up to the quota on its own, so
+   * copies are let in past it, but only so far (a deletion marker takes no place in the count).
+   */
+  private overQuota(record: SignedRecord, fresh: boolean): string | undefined {
     const q = this.quotas;
+    if (!fresh && record.kind !== 'note') return undefined;
     switch (record.kind) {
       case 'device': {
         const { userId } = record.body as RecordBodies['device'];
@@ -122,10 +127,13 @@ export class RecordService {
           ? `at most ${q.membershipsPerUser} spaces per account`
           : undefined;
       }
-      case 'note':
-        return this.notesHeld(record) >= q.notesPerUser
-          ? `at most ${q.notesPerUser} unread notes per account`
+      case 'note': {
+        if ((record.body as RecordBodies['note']).deleted) return undefined;
+        const limit = q.notesPerUser * (fresh ? 1 : NOTE_COPIES_MAX);
+        return this.notesHeld(record) >= limit
+          ? `at most ${limit} unread notes per account`
           : undefined;
+      }
       default:
         return undefined;
     }
@@ -182,25 +190,10 @@ export class RecordService {
       (record.body as RecordBodies['note']).deleted
     )
       return { accepted: false, current, reason: 'no such note' };
-    if (opts.fresh && grows) {
-      const over = this.overQuota(record);
+    if (grows) {
+      const over = this.overQuota(record, opts.fresh);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
     }
-    // Owners each take a user's notes up to the quota on their own, so a copy from another
-    // server is let in past it, but only so far: every server stops at the same ceiling.
-    // (A deletion marker takes no place in the count, so it is always let in.)
-    if (
-      !opts.fresh &&
-      grows &&
-      record.kind === 'note' &&
-      !(record.body as RecordBodies['note']).deleted &&
-      this.notesHeld(record) >= this.quotas.notesPerUser * NOTE_COPIES_MAX
-    )
-      return {
-        accepted: false,
-        current,
-        reason: 'quota reached: too many notes for this account',
-      };
     const seq = this.store.put(record);
     for (const fn of this.listeners) {
       try {

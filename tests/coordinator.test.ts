@@ -1194,7 +1194,14 @@ describe('sealed friends lists and notes', () => {
       signRecord(bob.identity, 'note', n.key, { boxes: [], deleted: true }, n.version + 1);
     const unseen = noteTo(bob);
     expect(c.records.put(marker(unseen), { fresh: false, origin: 'peer' }).accepted).toBe(true);
+    // It is not counted, so a note is still refused after it.
+    expect(c.store.countByTerm(`note-to:${bob.identity.userId}`)).toBe(4);
+    expect(c.records.put(noteTo(bob), { fresh: false, origin: 'peer' }).reason).toMatch(
+      /quota reached/,
+    );
+    // One for a note that is held takes that note's place.
     expect(c.records.put(marker(copies[0]!), { fresh: false, origin: 'peer' }).accepted).toBe(true);
+    expect(c.store.countByTerm(`note-to:${bob.identity.userId}`)).toBe(3);
   });
 
   it("writes only a user's own records for them, notes apart", async () => {
@@ -1235,6 +1242,13 @@ describe('sealed friends lists and notes', () => {
     await expect(mallory.conn.request('records.put', { record: space })).rejects.toThrow(
       /written by their author/,
     );
+    // Nor anything else of someone else's: the check comes before the record is looked at.
+    for (const kind of ['friends', 'member', 'invite'] as const) {
+      const other = signRecord(stranger, kind, `${kind}:${stranger.userId}`, {} as never);
+      await expect(mallory.conn.request('records.put', { record: other })).rejects.toThrow(
+        /written by their author/,
+      );
+    }
     // A note is signed by a key of its own and may come from anyone.
     expectAccepted(await mallory.conn.request('records.put', { record: noteTo(alice) }));
     // And a user's own go in as before.
