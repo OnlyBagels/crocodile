@@ -412,8 +412,10 @@ don't ride the session's relay channel but a direct connection of their own.
 author, encrypted with the text chain, synced to members who were offline)
 carrying a **manifest**: name, size, type, a random 32-byte file key and a
 **root hash**, plus for pictures and videos a tiny thumbnail (a few hundred
-bytes, still images only) and dimensions or duration. Deleting the message
-deletes the file on every member device that has it.
+bytes, still images only) and dimensions or duration. The file id is a hash
+of the author and the file key, and a message whose file id is not that is
+refused, so nobody can post a file under another member's id. Deleting the
+message deletes the file on every member device that has it.
 
 **The content.** The file is split into 1 MiB blocks, each encrypted with
 AES-256-GCM under a key derived from the file key (HKDF, salted with the file

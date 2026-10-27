@@ -3,7 +3,7 @@ import {
   checkHashList,
   encryptFile,
   fileCipher,
-  newFileId,
+  fileIdFor,
   newFileKey,
   randomId,
   sha256Async,
@@ -199,8 +199,8 @@ export class FileTransfers {
      */
     store = true,
   ): Promise<{ manifest: FileManifest; hashes: Uint8Array }> {
-    const id = newFileId();
     const key = newFileKey();
+    const id = fileIdFor(peerIds.user(this.ctx.peer()), key);
     const { hashes, root } = await encryptFile(
       { id, key, size: source.size, read: (o, l) => source.read(o, l) },
       async (i, block) => {

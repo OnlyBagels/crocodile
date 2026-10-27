@@ -11,7 +11,8 @@ import {
   type PlatformAdapter,
 } from '@crocodile/client-core';
 import type { Coordinator } from '@crocodile/coordinator';
-import { fileBlockCipherSize, sessionIds } from '@crocodile/protocol';
+import { newFileKey, sign } from '@crocodile/crypto';
+import { SIG_DOMAIN, fileBlockCipherSize, sessionIds, type ChatMessage } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
 import { startCoordinator, waitFor } from './helpers';
 
@@ -199,6 +200,47 @@ describe('files', () => {
     const list = await bobKv.get<string>(`file-hashes:${id}`);
     expect(list).toHaveLength(Math.ceil((3 * 32 * 4) / 3));
     expect(JSON.stringify(await bobKv.get(`file:${id}`))).not.toContain(list);
+  });
+
+  it("does not let another member post a file under the id of someone else's", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord).client, 'alice');
+    const mallory = await signUp(makeClient(net, coord).client, 'mallory');
+    const bob = await signUp(makeClient(net, coord).client, 'bob');
+    const { ch, sid } = await spaceOf(alice, [mallory, bob]);
+
+    const data = content(300_000);
+    const id = await alice.sendFile(ch, source('report.pdf', data, 'application/pdf'));
+    const real = await waitFor(() => fileMessage(bob, ch), 8000, 'file message');
+    expect(real.file!.id).toBe(id);
+
+    // Mallory signs a message of her own that carries Alice's file id and a
+    // key and name of her own.
+    const unsigned = {
+      id: real.id.slice(0, -1) + (real.id.endsWith('a') ? 'b' : 'a'),
+      ch,
+      sid,
+      author: mallory.userId,
+      key: mallory.identity!.publicKey,
+      ts: real.ts,
+      body: '',
+      file: { ...real.file!, name: 'report.pdf', key: newFileKey() },
+    };
+    const squat: ChatMessage = {
+      ...unsigned,
+      sig: sign(mallory.identity!, SIG_DOMAIN.message, unsigned),
+    };
+    const accept = (
+      bob as unknown as Record<string, (s: string, m: ChatMessage) => Promise<boolean>>
+    ).acceptMessage!.bind(bob);
+    expect(await accept(sid, squat)).toBe(false);
+    expect((bob.state.messages[ch] ?? []).filter((m) => m.file)).toHaveLength(1);
+
+    // What Bob fetches is Alice's file.
+    await bob.downloadFile(id);
+    await waitFor(() => bob.state.files[id]?.status === 'done', 15000, 'downloaded');
+    expect(same(await readAll(bob, id), data)).toBe(true);
   });
 
   it('leaves nothing behind when a file cannot be sent', async () => {

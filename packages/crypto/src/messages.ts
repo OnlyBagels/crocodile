@@ -5,6 +5,7 @@ import {
   type FileManifest,
   type SignalData,
 } from '@crocodile/protocol';
+import { fileIdFor } from './files';
 import { verifyPayload } from './primitives';
 import { keyMatchesUserId, sign, timeId, type Identity } from './identity';
 
@@ -40,6 +41,8 @@ export function createChatMessage(
 
 export function verifyChatMessage(message: ChatMessage): boolean {
   if (!keyMatchesUserId(message.key, message.author)) return false;
+  // A file's id has to be the one its author's key gives it (see fileIdFor).
+  if (message.file && message.file.id !== fileIdFor(message.author, message.file.key)) return false;
   const { sig, ...unsigned } = message;
   return verifyPayload(message.key, SIG_DOMAIN.message, unsigned, sig);
 }
