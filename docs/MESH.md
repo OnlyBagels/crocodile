@@ -136,7 +136,16 @@ by name goes to `name:<name>`.
 - Anyone can run a server, so a server could join only to own a share of the
   records and then not answer for them. It can't change or forge them (they
   are signed), and full-copy servers still hold everything, but deciding who
-  may join is a separate, open question.
+  may join is a separate, open question. Server identities are free, so
+  someone can make up as many as a link will let them introduce, and enough of
+  them take over the ownership of chosen shards and sessions (placement uses a
+  32-bit hash, so a key can be ground to land where it is wanted). What is
+  limited is the cost: a link may introduce 1000 servers we do not know at
+  once and then 5 a second, at most 5000 servers are tracked, the ring is
+  rebuilt only when the live set really changes, and servers not heard from
+  for ten times the live window are forgotten. Admitting only servers the
+  directory has vetted, or that have proved they can be reached, is still to
+  do.
 - Signatures stop one server speaking for another, not a server lying about
   its own users. A server can sign that any user is connected through it, and
   then the events routed to that user (signalling, session invites, mail) go to

@@ -2,6 +2,7 @@ import { keyMatchesUserId, sign, verifyPayload } from '@crocodile/crypto';
 import { ServerInfo, SIG_DOMAIN, type FedBeacon } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import { View } from './placement';
+import { RateLimiter } from './util';
 
 export interface MembershipTiming {
   /** How often each server announces itself. */
@@ -18,6 +19,17 @@ export const defaultMembershipTiming: MembershipTiming = {
   settleMs: 3_000,
 };
 
+/**
+ * Servers cost nothing to make up, so a link may only introduce so many we have not heard of: a
+ * network's worth when it first connects (the burst), then a few a second. At most this many
+ * servers are tracked at all.
+ */
+const NEW_SERVERS_BURST = 1000;
+const NEW_SERVERS_PER_SECOND = 5;
+const MAX_TRACKED_SERVERS = 5000;
+/** A beacon is forgotten when it is this many times older than a live one could be. */
+const FORGET_AFTER_LIVE = 10;
+
 type Listener = {
   up?: (id: string) => void;
   down?: (id: string) => void;
@@ -33,6 +45,10 @@ export class Membership {
   private beacons = new Map<string, { frame: FedBeacon; at: number }>();
   private linked = new Set<string>();
   private liveSet = new Set<string>();
+  /** The live servers that keep a full copy, when the current view was built. */
+  private fullSet = new Set<string>();
+  /** How many unknown servers each link may still introduce. */
+  private introductions = new Map<string, RateLimiter>();
   private currentView: View;
   private settledView: View;
   private settledSince = Date.now();
@@ -124,7 +140,7 @@ export class Membership {
   }
 
   /** A beacon from the overlay. Returns true if it was news (and should travel on). */
-  onBeacon(frame: FedBeacon): boolean {
+  onBeacon(frame: FedBeacon, from?: string): boolean {
     const parsed = ServerInfo.safeParse(frame.server);
     if (!parsed.success) return false;
     const { id, key } = parsed.data;
@@ -134,6 +150,8 @@ export class Membership {
     if (frame.seq < now - this.timing.liveMs) return false;
     const known = this.beacons.get(id);
     if (known && known.frame.seq >= frame.seq) return false;
+    // Before checking a signature, see whether we would take the server at all.
+    if (!known && !this.mayIntroduce(from)) return false;
     if (
       !verifyPayload(
         key,
@@ -150,6 +168,18 @@ export class Membership {
     return true;
   }
 
+  /** Whether the link `from` may tell us of one more server we do not know. */
+  private mayIntroduce(from?: string): boolean {
+    if (this.beacons.size >= MAX_TRACKED_SERVERS) return false;
+    if (from === undefined) return true;
+    let limiter = this.introductions.get(from);
+    if (!limiter) {
+      limiter = new RateLimiter(NEW_SERVERS_PER_SECOND, NEW_SERVERS_BURST);
+      this.introductions.set(from, limiter);
+    }
+    return limiter.take();
+  }
+
   linkUp(id: string) {
     this.linked.add(id);
     this.recompute();
@@ -161,6 +191,7 @@ export class Membership {
    */
   linkDown(id: string, broke: boolean) {
     this.linked.delete(id);
+    this.introductions.delete(id);
     const b = this.beacons.get(id);
     if (broke && b) b.at = 0;
     this.recompute();
@@ -183,12 +214,21 @@ export class Membership {
   private recompute() {
     const now = Date.now();
     const next = new Set<string>([this.selfId, ...this.linked]);
-    for (const [id, b] of this.beacons) if (now - b.at < this.timing.liveMs) next.add(id);
+    for (const [id, b] of this.beacons) {
+      if (now - b.at < this.timing.liveMs) next.add(id);
+      else if (!this.linked.has(id) && now - b.at > this.timing.liveMs * FORGET_AFTER_LIVE)
+        this.beacons.delete(id);
+    }
     const up = [...next].filter((id) => !this.liveSet.has(id));
     const down = [...this.liveSet].filter((id) => !next.has(id));
     this.liveSet = next;
-    const view = this.buildView();
-    if (!view.equals(this.currentView)) {
+    // Building the ring costs a hash for every point of every server: only when something moved.
+    const full = new Set([...next].filter((id) => this.isFull(id)));
+    const fullMoved =
+      full.size !== this.fullSet.size || [...full].some((id) => !this.fullSet.has(id));
+    this.fullSet = full;
+    const view = up.length || down.length || fullMoved ? this.buildView() : undefined;
+    if (view && !view.equals(this.currentView)) {
       this.currentView = view;
       clearTimeout(this.settleTimer);
       this.settleTimer = setTimeout(() => this.settle(), this.timing.settleMs);

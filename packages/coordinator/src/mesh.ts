@@ -680,7 +680,7 @@ export class Mesh {
         void this.hub.dist.onPush(frame.record);
         return;
       case 'beacon':
-        if (this.hub.membership.onBeacon(frame)) this.forward(frame, peerId);
+        if (this.hub.membership.onBeacon(frame, peerId)) this.forward(frame, peerId);
         return;
       case 'presence':
         if (this.hub.presence.applyRemote(frame)) this.forward(frame, peerId);
