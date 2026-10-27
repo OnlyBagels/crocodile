@@ -136,26 +136,28 @@ by name goes to `name:<name>`.
 - Anyone can run a server, so a server could join only to own a share of the
   records and then not answer for them. It can't change or forge them (they
   are signed), and full-copy servers still hold everything, but deciding who
-  may join is a separate, open question. Server identities are free, so
-  someone can make up as many as a link will let them introduce, and enough of
-  them take over the ownership of chosen shards and sessions (placement uses a
-  32-bit hash, so a key can be ground to land where it is wanted; a
-  cryptographic hash would not stop that, since the attacker only has to try
-  keys until one lands, so it is not used until servers have to be admitted). What is
-  limited is the cost: a link may introduce 1000 servers we do not know at
-  once and then 5 a second (a link that drops and returns keeps what it
-  spent; links are remembered in order of use, so a flood of new
-  identities pushes out idle ones first, though enough of them still can),
-  at most 5000 servers are admitted to the live set (a flood of made-up
-  ones can fill it and keep real newcomers out, which is why admission control
-  is still needed; room is made only by a beacon that checks out, from a link
-  that may introduce, and only by dropping a server that is not live), the ring
-  is built only when the live set really changes and someone looks (under a
-  steady trickle of new servers that is still once per look), and servers not
-  heard from for ten times the live window are forgotten, with the address we
-  would dial. Admitting only servers the
-  directory has vetted, or that have proved they can be reached, is still to
-  do.
+  may join is a separate, open question.
+- Server identities are free, so someone can make up as many as a link will
+  let them introduce, and enough of them take over the ownership of chosen
+  shards and sessions. Placement uses a 32-bit hash, so a key can be ground to
+  land where it is wanted; a cryptographic hash would not stop that, since the
+  attacker only has to try keys until one lands, so it is not used until
+  servers have to be admitted. What is limited is the cost:
+  - A link may introduce 1000 servers we do not know at once, then 5 a second.
+    A link that drops and returns keeps what it has spent. A mesh of more than
+    1000 servers would therefore be learnt over minutes, not at once.
+  - At most 5000 servers are tracked. Room is made only for a beacon that
+    checks out, from a link that may introduce, by dropping the server silent
+    longest that is neither live nor linked nor a beacon that could still be
+    passed on as news. Servers not heard from for ten times the live window are
+    forgotten, with the address we would dial.
+  - The ring is built only when the live set really changes and someone looks.
+    Under a steady trickle of new servers that is still once per look.
+  - Spent allowances are kept for 2000 links, idle ones dropped first.
+- What is not limited: a flood of live made-up servers can fill the 5000
+  places and keep real newcomers out, and enough made-up link identities push
+  out the allowances of real ones. Admitting only servers the directory has
+  vetted, or that have proved they can be reached, is still to do.
 - Signatures stop one server speaking for another, not a server lying about
   its own users. A server can sign that any user is connected through it, and
   then the events routed to that user (signalling, session invites, mail) go to

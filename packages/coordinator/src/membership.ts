@@ -207,14 +207,12 @@ export class Membership {
   private makeRoom(): boolean {
     const stale = Date.now() - this.timing.liveMs;
     let oldest: string | undefined;
+    let oldestSeq = Infinity;
     for (const [id, b] of this.beacons)
-      if (
-        !this.liveSet.has(id) &&
-        !this.linked.has(id) &&
-        b.frame.seq < stale &&
-        (oldest === undefined || b.frame.seq < this.beacons.get(oldest)!.frame.seq)
-      )
+      if (!this.liveSet.has(id) && b.frame.seq < stale && b.frame.seq < oldestSeq) {
         oldest = id;
+        oldestSeq = b.frame.seq;
+      }
     if (oldest === undefined) return false;
     this.forget(oldest);
     return true;
