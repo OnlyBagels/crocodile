@@ -708,11 +708,16 @@ describe('large records between servers', () => {
       return { seq: 0, record };
     });
     let calls = 0;
-    a.mesh.request = (async () => {
+    const real = a.mesh.request.bind(a.mesh);
+    const lookups = vi.spyOn(a.mesh, 'request').mockImplementation((async (
+      ...args: Parameters<typeof real>
+    ) => {
+      if (args[1] !== 'rec_get') return real(...args);
       calls++;
       await new Promise((r) => setTimeout(r, 150));
       return { records: [] };
-    }) as typeof a.mesh.request;
+    }) as typeof a.mesh.request);
+    cleanup.push(() => lookups.mockRestore());
     const started = Date.now();
     await a.dist.onReplicated(items, 'elsewhere');
     expect(calls).toBeGreaterThan(0);
@@ -932,7 +937,13 @@ describe('frames from other servers', () => {
     const keys = everyone.map((u) => recordKey.profile(u.identity.userId));
     const res = await reader.conn.request('records.get', { keys });
     expect(res.records.map((r) => r.key).sort()).toEqual(keys.sort());
-    const lookups = asked.mock.calls.filter((c) => c[1] === 'rec_get');
+    // Only the lookups for these keys: the servers ask each other about other things too.
+    const lookupsFor = (wanted: string[]) =>
+      asked.mock.calls.filter(
+        (c) =>
+          c[1] === 'rec_get' && (c[2] as { keys: string[] }).keys.some((k) => wanted.includes(k)),
+      );
+    const lookups = lookupsFor(keys);
     // One question to each of the other two servers, not one to every owner of every user.
     expect(lookups.length).toBeLessThanOrEqual(2);
     expect(lookups.length).toBeGreaterThan(0);
@@ -945,6 +956,10 @@ describe('frames from other servers', () => {
     cleanup.push(() => aliceAtZero.conn.close());
     asked.mockClear();
     await aliceAtZero.conn.request('voice.watch', { spaceIds: spaces });
-    expect(asked.mock.calls.filter((c) => c[1] === 'rec_get').length).toBeLessThanOrEqual(2);
+    expect(
+      lookupsFor(
+        spaces.flatMap((id) => [recordKey.space(id), recordKey.member(id, alice.identity.userId)]),
+      ).length,
+    ).toBeLessThanOrEqual(2);
   }, 60_000);
 });
