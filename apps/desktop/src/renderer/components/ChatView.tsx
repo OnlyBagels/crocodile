@@ -18,7 +18,7 @@ import {
   Video,
   X,
 } from 'lucide-react';
-import type { MessageView } from '@crocodile/client-core';
+import { messageKey, type MessageView } from '@crocodile/client-core';
 import { getClient, openModal, ui, useCroc, useUi } from '../croc';
 import { colorFor, copyText, dayOf, plain, renderMessage, timeOf } from '../lib/format';
 import { useContextMenu } from './ContextMenu';
@@ -335,7 +335,13 @@ function MessageList(props: {
   bubbles: boolean;
 }) {
   const { messages, me } = props;
-  const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  // Authors choose their ids, so two messages can share one; a reply to an id
+  // that more than one message has shows no preview rather than the wrong one.
+  const byId = useMemo(() => {
+    const out = new Map<string, MessageView | null>();
+    for (const m of messages) out.set(m.id, out.has(m.id) ? null : m);
+    return out;
+  }, [messages]);
   return (
     <div className="flex flex-col">
       {messages.map((m, i) => {
@@ -351,7 +357,7 @@ function MessageList(props: {
           next.author === m.author &&
           next.ts - m.ts < 5 * 60_000;
         return (
-          <div key={m.id}>
+          <div key={messageKey(m)}>
             {newDay && (
               <div className="my-4 flex justify-center">
                 <span className="rounded-full bg-raised px-3 py-1 text-[11px] font-semibold text-muted">
@@ -365,7 +371,7 @@ function MessageList(props: {
               first={!sameAsPrev}
               last={!sameAsNext}
               mine={m.author === me}
-              replied={m.replyTo ? byId.get(m.replyTo) : undefined}
+              replied={m.replyTo ? (byId.get(m.replyTo) ?? undefined) : undefined}
             />
           </div>
         );
