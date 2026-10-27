@@ -1475,4 +1475,33 @@ describe('channel ids belong to one space', () => {
     await new Promise((r) => setTimeout(r, 1000));
     expect(bodies(bob, ch)).toEqual([]);
   });
+
+  it('hides the channel of a space joined later, rather than mixing the two', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const mallory = await signUp(makeClient(net, coord), 'mallory');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('A');
+    const ch = channelOf(alice, spaceA);
+    const other = await reusing(mallory, ch);
+    // Bob joins the other space first, so it keeps the channel id.
+    await bob.joinWithInvite(other.code);
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    const texts = (id: string) =>
+      bob.state.spaces[id]!.channels.filter((c) => c.kind === 'text').map((c) => c.id);
+    expect(texts(other.spaceId)).toEqual([ch]);
+    expect(texts(spaceA)).toEqual([]);
+
+    // What Alice says in A doesn't turn up in the other space's channel.
+    await bob.openChannel(ch);
+    await waitFor(
+      () => alice.state.sessions[sessionIds.space(spaceA)]?.peers.includes(bob.userId),
+      12000,
+    );
+    await alice.sendMessage(ch, 'said in A');
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(bodies(bob, ch)).toEqual([]);
+    expect(await bob.platform.messages.since(ch, 0, 10)).toEqual([]);
+  });
 });
