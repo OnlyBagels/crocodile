@@ -9,9 +9,9 @@ import {
 import type { FrameKeys } from './keyring';
 
 /**
- * How long our senders and the listeners' counters are kept with no connection left: past a
- * generation of the audio chain they are no use (the chain has moved on), and a key shouldn't
- * linger once the call is left.
+ * How long a listener's counters are kept with no connection left: past a generation of the
+ * audio chain, frames recorded earlier are of one that is no longer followed, and a key
+ * shouldn't linger once the call is left.
  */
 const KEEP_IDLE_MS = AUDIO_EPOCH_MS * 1.5;
 
@@ -23,15 +23,15 @@ export interface FrameScope {
 }
 
 /**
- * The frame worker's key state, one scope per connection. A reconnect gets a new scope, and what
- * the scopes use outlives them:
+ * The frame worker's key state, one scope per connection. Scopes share one
+ * sender per sender key (one for audio, one for video): a reconnect gets a
+ * new scope, and its frames must continue the same counter rather than start
+ * over and reuse nonces. Every stream of a kind shares its sender too (the
+ * microphone and a shared screen's sound; the camera and the screen).
  *
- * - One sender per sender key of ours (one for audio, one for video): its frames must continue
- *   the same counter rather than start over, both to not reuse nonces and because listeners
- *   that stayed refuse a counter they have passed. Every stream of a kind shares its sender too
- *   (the microphone and a shared screen's sound; the camera and the screen).
- * - One receiver per sender key of someone else, with the counters it has taken: a host that
- *   cuts a listener's connection can't have recorded frames taken again.
+ * Receivers are shared the same way, one per sender key of someone else, with
+ * the counters they have taken: a host that cuts a listener's connection
+ * can't have a recorded frame taken again.
  */
 export class FrameScopes {
   readonly scopes = new Map<string, FrameScope>();
@@ -40,8 +40,6 @@ export class FrameScopes {
   private receivers = new Map<number, AudioReceiver>();
   private videoReceivers = new Map<number, VideoReceiver>();
   private idleTimer?: ReturnType<typeof setTimeout>;
-  /** Our sender key as of the last update. */
-  private mineKid?: number;
 
   get(id: string): FrameScope | undefined {
     return this.scopes.get(id);
@@ -56,7 +54,6 @@ export class FrameScopes {
       );
     clearTimeout(this.idleTimer);
     if (keys.mine) {
-      this.mineKid = keys.mine.kid;
       const chain = () => importChain({ gen: keys.mine!.gen, key: keys.mine!.key });
       let sender = this.senders.get(keys.mine.kid);
       if (!sender) {
@@ -78,50 +75,41 @@ export class FrameScopes {
       const chain = () => importChain({ gen: p.gen, key: p.key });
       // Keep receivers we already have: they may have ratcheted past the given state, and have
       // the counters taken so far. If the key was sent again and is ahead of them, they follow.
-      const audio = this.receivers.get(kid) ?? new AudioReceiver(kid, chain());
-      const video = this.videoReceivers.get(kid) ?? new VideoReceiver(kid, chain());
-      audio.catchUp(chain());
-      video.catchUp(chain());
-      this.receivers.set(kid, audio);
-      this.videoReceivers.set(kid, video);
+      let audio = this.receivers.get(kid);
+      if (!audio) this.receivers.set(kid, (audio = new AudioReceiver(kid, chain())));
+      else if (p.gen > audio.gen) audio.catchUp(chain());
+      let video = this.videoReceivers.get(kid);
+      if (!video) this.videoReceivers.set(kid, (video = new VideoReceiver(kid, chain())));
+      else if (p.gen > video.gen) video.catchUp(chain());
       next.set(kid, audio);
       nextVideo.set(kid, video);
     }
     s.receivers = next;
     s.videoReceivers = nextVideo;
-    // Keys that are gone (replaced, or their sender left) are forgotten.
-    for (const kid of this.receivers.keys()) if (!next.has(kid)) this.receivers.delete(kid);
+    // Receivers for keys no scope has any more (replaced, or their sender left) are forgotten.
+    const used = new Set([...this.scopes.values()].flatMap((sc) => [...sc.receivers.keys()]));
+    for (const kid of this.receivers.keys()) if (!used.has(kid)) this.receivers.delete(kid);
     for (const kid of this.videoReceivers.keys())
-      if (!nextVideo.has(kid)) this.videoReceivers.delete(kid);
-    this.pruneSenders();
+      if (!used.has(kid)) this.videoReceivers.delete(kid);
   }
 
   drop(id: string) {
     this.scopes.delete(id);
-    this.pruneSenders();
+    // Forget senders no scope uses any more (their keys have been replaced).
+    const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
+    for (const [kid, sender] of this.senders) if (!inUse.has(sender)) this.senders.delete(kid);
+    for (const [kid, sender] of this.videoSenders)
+      if (!inUse.has(sender)) this.videoSenders.delete(kid);
+    // The receivers wait for a reconnect, but not long.
     clearTimeout(this.idleTimer);
     if (this.scopes.size === 0) {
-      this.idleTimer = setTimeout(() => this.forgetAll(), KEEP_IDLE_MS);
+      this.idleTimer = setTimeout(() => {
+        if (this.scopes.size > 0) return;
+        this.receivers.clear();
+        this.videoReceivers.clear();
+      }, KEEP_IDLE_MS);
       (this.idleTimer as { unref?: () => void }).unref?.();
     }
-  }
-
-  /** Senders for keys that have been replaced go; the current key's stay while a reconnect may come. */
-  private pruneSenders() {
-    const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
-    for (const [kid, sender] of this.senders)
-      if (!inUse.has(sender) && kid !== this.mineKid) this.senders.delete(kid);
-    for (const [kid, sender] of this.videoSenders)
-      if (!inUse.has(sender) && kid !== this.mineKid) this.videoSenders.delete(kid);
-  }
-
-  private forgetAll() {
-    if (this.scopes.size > 0) return;
-    this.senders.clear();
-    this.videoSenders.clear();
-    this.receivers.clear();
-    this.videoReceivers.clear();
-    this.mineKid = undefined;
   }
 }
 

@@ -265,21 +265,19 @@ class ReplayWindow {
   /** Whether a frame with this counter may still be taken (call `take` once it is verified). */
   fresh(counter: number): boolean {
     if (this.newest === null) return true;
-    const back = (this.newest - counter) | 0;
-    if (back < 0) return true;
-    return back < REPLAY_WINDOW && !this.seen[counter % REPLAY_WINDOW];
+    const ahead = (counter - this.newest) | 0;
+    return ahead > 0 || (-ahead < REPLAY_WINDOW && !this.seen[counter % REPLAY_WINDOW]);
   }
 
   take(counter: number) {
+    if (!this.fresh(counter)) return;
+    const ahead = this.newest === null ? 0 : (counter - this.newest) | 0;
     if (this.newest === null) {
       this.newest = counter;
-    } else {
-      const ahead = (counter - this.newest) | 0;
-      if (ahead > 0) {
-        for (let i = 1; i <= Math.min(ahead, REPLAY_WINDOW); i++)
-          this.seen[(this.newest + i) % REPLAY_WINDOW] = 0;
-        this.newest = counter;
-      }
+    } else if (ahead > 0) {
+      for (let i = 1; i <= Math.min(ahead, REPLAY_WINDOW); i++)
+        this.seen[(this.newest + i) % REPLAY_WINDOW] = 0;
+      this.newest = counter;
     }
     this.seen[counter % REPLAY_WINDOW] = 1;
   }

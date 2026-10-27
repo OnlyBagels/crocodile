@@ -576,6 +576,51 @@ describe('ratcheting sender keys', () => {
     });
   });
 
+  it('a receiver told of a later chain position follows it, keeps what it took just before, and ignores an earlier one', () => {
+    const sk = createSenderKey();
+    const sender = new AudioSender(sk.kid, sk.audio);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = new Uint8Array(50).fill(1);
+    const old = sender.encrypt(frame);
+    expect(rx.decrypt(old)).toEqual(frame);
+    // One generation on: the frames of the last one that were taken stay taken.
+    const next = ratchet(sk.audio);
+    rx.catchUp(next);
+    expect(rx.gen).toBe(next.gen);
+    expect(rx.decrypt(old)).toBeNull();
+    sender.update(next);
+    expect(rx.decrypt(sender.encrypt(frame))).toEqual(frame);
+    // Far ahead (a sender quiet for long): follows, so what comes next can be followed.
+    let far = next;
+    for (let i = 0; i < 40; i++) far = ratchet(far);
+    sender.update(far);
+    const spoken = sender.encrypt(frame);
+    expect(rx.decrypt(spoken)).toBeNull();
+    rx.catchUp(far);
+    expect(rx.decrypt(spoken)).toEqual(frame);
+    // An earlier position changes nothing.
+    rx.catchUp(sk.audio);
+    expect(rx.gen).toBe(far.gen);
+  });
+
+  it('counters half the range apart are neither ahead nor behind: refused, and nothing is marked', () => {
+    const sk = createSenderKey();
+    const tx = new AudioSender(sk.kid, sk.audio);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = new Uint8Array(50).fill(1);
+    const first = tx.encrypt(frame);
+    const counterOf = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
+    const c0 = counterOf(first);
+    expect(rx.decrypt(first)).toEqual(frame);
+    (tx as unknown as { counter: number }).counter = (c0 + 0x80000000) >>> 0;
+    const far = tx.encrypt(frame);
+    expect(rx.decrypt(far)).toBeNull();
+    // The window is as it was: the next frame in order is taken.
+    (tx as unknown as { counter: number }).counter = c0 + 1;
+    expect(rx.decrypt(tx.encrypt(frame))).toEqual(frame);
+  });
+
   it("video and audio frames can't stand in for each other", () => {
     const sk = createSenderKey();
     const frame = new Uint8Array(200).fill(9);
