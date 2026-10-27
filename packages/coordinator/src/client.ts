@@ -278,10 +278,20 @@ export class ClientConnection implements ClientHandle {
           limit?: number;
           after?: string;
         };
-        // In key order, so that `after` names where to go on from.
-        const found = await hub.dist.list(prefix, limit ?? 1000, after);
-        const cut = cutToFrame(found.records.filter((r) => this.mayRead(r)));
-        return found.more ? { ...cut, more: true } : cut;
+        // In key order, so that `after` names where to go on from. A page may hold nothing this
+        // user may read (another's notes, say) and still have others after it: go on to the next.
+        let cursor = after;
+        for (let rounds = 0; ; rounds++) {
+          const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
+          const readable = found.records.filter((r) => this.mayRead(r));
+          const last = found.records.at(-1)?.key;
+          if (readable.length === 0 && found.more && last !== undefined && rounds < 20) {
+            cursor = last;
+            continue;
+          }
+          const cut = cutToFrame(readable);
+          return found.more ? { ...cut, more: true } : cut;
+        }
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };

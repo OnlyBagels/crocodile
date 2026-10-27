@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createIdentity, signRecord } from '@crocodile/crypto';
-import { recordKey } from '@crocodile/protocol';
+import {
+  createIdentity,
+  createPrekey,
+  randomDeviceId,
+  sealAnonymous,
+  signRecord,
+} from '@crocodile/crypto';
+import { recordKey, utf8 } from '@crocodile/protocol';
 import {
   CrocodileClient,
   MemoryKeyValueStore,
@@ -78,6 +84,50 @@ describe('client RPC answers', () => {
     expect(seen).toEqual([...seen].sort());
     expect(new Set(seen).size).toBe(seen.length);
     for (const u of users) expect(seen).toContain(recordKey.profile(u.identity.userId));
+  });
+
+  it('say there is more past the limit, and skip pages that hold nothing the asker may read', async () => {
+    const { c } = await server(0);
+    const bob = await connectUser(c, createIdentity(), 'bob');
+    const carol = await connectUser(c, createIdentity(), 'carol');
+    cleanup.push(
+      () => bob.conn.close(),
+      () => carol.conn.close(),
+    );
+    const sender = createIdentity();
+    const keys: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const author = createIdentity();
+      const box = sealAnonymous(
+        sender,
+        randomDeviceId(),
+        { peer: bob.conn.peer, prekey: createPrekey().bundle },
+        utf8.encode('hi'),
+      );
+      const note = signRecord(author, 'note', recordKey.note(bob.identity.userId, author.userId), {
+        boxes: [box],
+      });
+      expectAccepted(await carol.conn.request('records.put', { record: note }));
+      keys.push(note.key);
+    }
+    // Pages of two: three requests reach all five, and the last says nothing more.
+    const pages: string[][] = [];
+    let after: string | undefined;
+    for (let rounds = 0; rounds < 10; rounds++) {
+      const res = await bob.conn.request('records.list', {
+        prefix: 'note:',
+        limit: 2,
+        ...(after ? { after } : {}),
+      });
+      pages.push(res.records.map((r) => r.key));
+      after = res.records.at(-1)?.key;
+      if (!res.more) break;
+    }
+    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
+    expect(pages.flat().sort()).toEqual(keys.sort());
+    // Carol may read none of them: she is told so, not that there is more.
+    const hers = await carol.conn.request('records.list', { prefix: 'note:', limit: 2 });
+    expect(hers).toEqual({ records: [] });
   });
 
   it('are asked for again by a client until it has every profile', async () => {

@@ -371,16 +371,20 @@ export class Distribution {
       p,
     );
     if (answers.length === 0) return null;
-    if (more) {
-      more.value = answers.some((a) => a.more === true);
-      // An owner that cut its answer says nothing past the last key it gave.
-      for (const a of answers) {
-        const last = a.more ? a.records?.reduce((k, r) => (r.key > k ? r.key : k), '') : '';
-        if (last && (more.upTo === undefined || last < more.upTo)) more.upTo = last;
-      }
-    }
     // Only well-signed records count: an owner can't hand us a forged newer copy.
     const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
+    if (more) {
+      // An owner that cut its answer says nothing past the last (well-signed) key it gave.
+      const good = new Set(valid.map((r) => r.key));
+      for (const a of answers) {
+        const last = a.more
+          ? (a.records ?? []).reduce((k, r) => (good.has(r.key) && r.key > k ? r.key : k), '')
+          : '';
+        if (!last) continue;
+        more.value = true;
+        if (more.upTo === undefined || last < more.upTo) more.upTo = last;
+      }
+    }
     const newest = new Map<string, SignedRecord>();
     for (const r of valid) if ((newest.get(r.key)?.version ?? 0) < r.version) newest.set(r.key, r);
     const found = [...newest.values()];
@@ -445,8 +449,9 @@ export class Distribution {
   }
 
   /**
-   * Records under a prefix in key order, at most `limit`, those after `after` if given. `more`: an
-   * owner could not give everything it has in one frame, so this is cut where its answer was.
+   * Records under a prefix in key order, at most `limit`, those after `after` if given. `more`:
+   * there are others after these (past `limit`, or an owner could not give everything it has in
+   * one frame, so this is cut where its answer was).
    */
   async list(
     prefix: string,
@@ -456,19 +461,29 @@ export class Distribution {
     const shard = shardOfPrefix(prefix);
     const store = this.hub.records.store;
     const owned = !shard || this.ownsShard(shard);
-    const local = owned ? store.listPrefix(prefix, limit, after) : [];
-    if (!shard || (owned && !this.catchingUp())) return { records: local, more: false };
+    // One more than asked for, to know whether there is more.
+    const local = owned ? store.listPrefix(prefix, limit + 1, after) : [];
+    const page = (records: SignedRecord[], cut = false) => ({
+      records: records.slice(0, limit),
+      more: cut || records.length > limit,
+    });
+    if (!shard || (owned && !this.catchingUp())) return page(local);
     const cut: { value: boolean; upTo?: string } = { value: false };
-    const remote = await this.fromOwners(shard, 'rec_list', { prefix, limit, after }, cut);
-    if (!remote)
-      return { records: owned ? local : store.listPrefix(prefix, limit, after), more: false };
+    const remote = await this.fromOwners(
+      shard,
+      'rec_list',
+      { prefix, limit: limit + 1, after },
+      cut,
+    );
+    if (!remote) return page(owned ? local : store.listPrefix(prefix, limit + 1, after));
+    // An owner that ignored `after` (an older server) must not bring back what was already given.
     const merged = Distribution.merge(
       local,
-      remote.filter((r) => r.key.startsWith(prefix)),
+      remote.filter((r) => r.key.startsWith(prefix) && (after === undefined || r.key > after)),
     )
       .filter((r) => cut.upTo === undefined || r.key <= cut.upTo)
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    return { records: merged.slice(0, limit), more: cut.value };
+    return page(merged, cut.value);
   }
 
   async findByTerm(term: string, limit: number): Promise<SignedRecord[]> {

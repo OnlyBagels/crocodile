@@ -92,34 +92,30 @@ const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
  * A single item larger than the budget goes alone (records are smaller).
  */
 export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinity): T[][] {
-  const out: T[][] = [];
+  return [...runsByBytes(items, budget, max)];
+}
+
+/** `chunkByBytes`, one run at a time: the first costs no more than it takes to fill it. */
+function* runsByBytes<T>(items: T[], budget: number, max = Infinity): Generator<T[]> {
   let run: T[] = [];
   // A run's JSON: its items, a comma or bracket after each, and "[" first.
   let size = 1;
   for (const item of items) {
     const n = jsonBytes(item) + 1;
     if (run.length && (size + n > budget || run.length >= max)) {
-      out.push(run);
+      yield run;
       run = [];
       size = 1;
     }
     run.push(item);
     size += n;
   }
-  if (run.length) out.push(run);
-  return out;
+  if (run.length) yield run;
 }
 
 /** The longest leading run of items that fits in `budget` bytes. */
 export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
-  let size = 1;
-  let n = 0;
-  for (const item of items) {
-    size += jsonBytes(item) + 1;
-    if (n > 0 && size > budget) break;
-    n++;
-  }
-  return items.slice(0, n);
+  return runsByBytes(items, budget).next().value ?? [];
 }
 
 /** What fits in one frame, and `more` when something was left out. */

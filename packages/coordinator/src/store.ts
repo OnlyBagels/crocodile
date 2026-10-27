@@ -159,6 +159,7 @@ export class MemoryStore implements Store {
     return this.terms.get(term)?.size ?? 0;
   }
 
+  // Sorted on every call: this store is for tests and development.
   listPrefix(prefix: string, limit: number, after?: string) {
     const keys: string[] = [];
     for (const key of this.records.keys())
@@ -334,6 +335,9 @@ export class SqliteStore implements Store {
       prefix: this.db.prepare(
         'SELECT json FROM records WHERE key >= ? AND key < ? ORDER BY key LIMIT ?',
       ),
+      prefixAfter: this.db.prepare(
+        'SELECT json FROM records WHERE key > ? AND key < ? ORDER BY key LIMIT ?',
+      ),
       since: this.db.prepare('SELECT seq, json FROM records WHERE seq > ? ORDER BY seq LIMIT ?'),
       byTerm: this.db.prepare(
         'SELECT r.json FROM terms t JOIN records r ON r.key = t.key WHERE t.term = ? LIMIT ?',
@@ -424,11 +428,11 @@ export class SqliteStore implements Store {
     // Prefixes end in ':' so bumping the last char gives an exclusive upper bound.
     const upper =
       prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
-    // The least key greater than `after`.
-    const lower = after !== undefined && after >= prefix ? `${after}\0` : prefix;
-    return this.stmts.prefix
-      .all(lower, upper, limit)
-      .map((r) => JSON.parse(r.json as string) as SignedRecord);
+    const rows =
+      after !== undefined && after >= prefix
+        ? this.stmts.prefixAfter.all(after, upper, limit)
+        : this.stmts.prefix.all(prefix, upper, limit);
+    return rows.map((r) => JSON.parse(r.json as string) as SignedRecord);
   }
 
   since(seq: number, limit: number) {
