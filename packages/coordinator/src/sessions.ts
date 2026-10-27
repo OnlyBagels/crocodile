@@ -260,7 +260,12 @@ export class SessionService {
           message: err instanceof Error ? err.message : String(err),
         },
       });
-    void this.connectedTo(fromServer, frame.peer).then((connected) => {
+    // Only a join has to be vouched for by presence: whoever else speaks for a
+    // member must be the server it joined from, which `apply` checks. (A member
+    // who disconnects is already gone from the presence when its leave arrives.)
+    const vouched =
+      frame.op.op === 'join' ? this.connectedTo(fromServer, frame.peer) : Promise.resolve(true);
+    void vouched.then((connected) => {
       if (!connected) {
         fail(new RpcFailure('forbidden', 'that device is not connected to the sending server'));
         return;
@@ -281,8 +286,8 @@ export class SessionService {
   }
 
   /**
-   * Whether the server may act for this device: it has told the mesh the
-   * device is connected to it. News of a device that has only just connected
+   * Whether the server may add this device to a session: it has told the mesh
+   * the device is connected to it. News of a device that has only just connected
    * can still be on its way, so it is waited for briefly.
    */
   private async connectedTo(server: string, peer: string): Promise<boolean> {

@@ -103,10 +103,11 @@ by name goes to `name:<name>`.
 ## Everything else
 
 - **Sessions** are owned by one live server chosen by rendezvous hashing, as
-  before; members' servers reach it over a direct link. The owner acts on an
-  operation only if the sending server has said that member's device is
+  before; members' servers reach it over a direct link. The owner admits a
+  member only if the sending server has said that member's device is
   connected to it, checks again that the member may be in the session, and
-  believes a host hint only if the host it names may be too. A client event
+  believes a host hint only if the host it names may be too; afterwards it
+  takes operations on that member only from the server it joined from. A client event
   routed to us is delivered only if it comes from a server that could be
   sending it: a signal from the server the sending device is connected to, a
   session's state or a conversation invitation from the session's owner.

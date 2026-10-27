@@ -407,6 +407,20 @@ describe('events and session operations from other servers', () => {
       expect(state().epoch).toBeLessThan(5);
     });
 
+    it('still lets a member on another server leave when it disconnects', async () => {
+      const net = await conversation();
+      const state = await joined(net);
+      expect(state().members).toHaveLength(2);
+      // Bob's server says he has gone, and then that he has left the conversation.
+      net.bob.conn.close();
+      await waitFor(
+        () => state().members.length === 1,
+        4000,
+        'bob to be taken out of the conversation',
+      );
+      expect(state().members[0]!.peer).toBe(net.alice.conn.peer);
+    });
+
     it('checks again that whoever joins may', async () => {
       const net = await conversation();
       const state = await joined(net);
