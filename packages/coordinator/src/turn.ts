@@ -102,6 +102,8 @@ interface Msg {
   cls: number;
   txId: Buffer;
   attrs: Attr[];
+  /** Where MESSAGE-INTEGRITY starts in `raw`; `attrs` end with it, as nothing after it is signed. */
+  integrityAt?: number;
   raw: Buffer;
 }
 
@@ -124,15 +126,28 @@ export function parseStun(buf: Buffer): Msg | null {
   const method = (t & 0x000f) | ((t & 0x00e0) >> 1) | ((t & 0x3e00) >> 2);
   const cls = ((t & 0x0010) >> 4) | ((t & 0x0100) >> 7);
   const attrs: Attr[] = [];
+  let integrityAt: number | undefined;
   let o = 20;
   while (o + 4 <= 20 + len) {
     const type = buf.readUInt16BE(o);
     const alen = buf.readUInt16BE(o + 2);
     if (o + 4 + alen > 20 + len) return null;
     attrs.push({ type, value: buf.subarray(o + 4, o + 4 + alen) });
+    // Only what MESSAGE-INTEGRITY covers can be trusted: after it, anyone on the path can append.
+    if (type === ATTR.messageIntegrity) {
+      integrityAt = o;
+      break;
+    }
     o += 4 + alen + ((4 - (alen % 4)) % 4);
   }
-  return { method, cls, txId: buf.subarray(8, 20), attrs, raw: buf.subarray(0, 20 + len) };
+  return {
+    method,
+    cls,
+    txId: buf.subarray(8, 20),
+    attrs,
+    integrityAt,
+    raw: buf.subarray(0, 20 + len),
+  };
 }
 
 const attrOf = (m: Msg, type: number) => m.attrs.find((a) => a.type === type)?.value;
@@ -191,21 +206,13 @@ export function encodeStun(
 }
 
 function verifyIntegrity(m: Msg, key: Buffer): boolean {
-  // Find MESSAGE-INTEGRITY's offset in the raw message.
-  let o = 20;
-  while (o + 4 <= m.raw.length) {
-    const type = m.raw.readUInt16BE(o);
-    const alen = m.raw.readUInt16BE(o + 2);
-    if (type === ATTR.messageIntegrity) {
-      if (alen !== 20) return false;
-      const prefix = Buffer.from(m.raw.subarray(0, o));
-      prefix.writeUInt16BE(o - 20 + 24, 2);
-      const expected = createHmac('sha1', key).update(prefix).digest();
-      return timingSafeEqual(expected, m.raw.subarray(o + 4, o + 24));
-    }
-    o += 4 + alen + ((4 - (alen % 4)) % 4);
-  }
-  return false;
+  const o = m.integrityAt;
+  const mac = attrOf(m, ATTR.messageIntegrity);
+  if (o === undefined || mac?.length !== 20) return false;
+  const prefix = Buffer.from(m.raw.subarray(0, o));
+  prefix.writeUInt16BE(o - 20 + 24, 2);
+  const expected = createHmac('sha1', key).update(prefix).digest();
+  return timingSafeEqual(expected, mac);
 }
 
 export function xorAddress(address: string, port: number, txId: Buffer): Buffer {
