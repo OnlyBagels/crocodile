@@ -1,8 +1,20 @@
-import type { FedPresence, PresenceEntry, Platform, ServerEvents } from '@crocodile/protocol';
+import { keyMatchesUserId, sign, verifyPayload } from '@crocodile/crypto';
+import {
+  FedFrameSchema,
+  SIG_DOMAIN,
+  presenceSigned,
+  type FedPresence,
+  type PresenceEntry,
+  type Platform,
+  type ServerEvents,
+} from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 
 export type OwnStatus = 'online' | 'idle' | 'dnd' | 'invisible';
 type FedEntry = FedPresence['entries'][number];
+
+/** A server's sequence numbers are its clock; news dated further ahead than this is refused. */
+const SEQ_AHEAD_MS = 5 * 60_000;
 
 /** One authenticated client WebSocket (one device of one user). */
 export interface ClientHandle {
@@ -47,12 +59,20 @@ export class PresenceService {
     string,
     Map<
       string,
-      { status: FedEntry['status']; text?: string; since: number; devices: string[]; seq: number }
+      {
+        status: FedEntry['status'];
+        text?: string;
+        since: number;
+        devices: string[];
+        seq: number;
+      }
     >
   >();
   /** `${origin}|${userId}` -> seq of the latest news applied (also for users who left). */
   private seqs = new Map<string, number>();
   private ownSeq = 0;
+  /** Our signed full state at `ownSeq`, so a burst of requests signs it once. */
+  private fullCache?: FedPresence;
   /** origin -> the newest seq we have applied from it. */
   private originSeq = new Map<string, number>();
   /** origin -> when we last asked it for its full presence. */
@@ -204,7 +224,10 @@ export class PresenceService {
     this.hub.mesh
       .request<FedPresence>(origin, 'presence_state', {})
       .then((frame) => {
-        if (frame?.origin === origin) this.applyRemote(frame);
+        // A response is checked like a flooded frame.
+        const checked = FedFrameSchema.safeParse(frame);
+        if (checked.success && checked.data.t === 'presence' && checked.data.origin === origin)
+          this.applyRemote(checked.data);
       })
       .catch(() => {});
   }
@@ -213,12 +236,19 @@ export class PresenceService {
   fullState(): FedPresence {
     // Not a new seq: a snapshot isn't news, and a new seq here would make
     // every server that didn't get the snapshot ask us for it.
+    if (this.fullCache?.seq !== this.ownSeq) {
+      this.fullCache = this.signed(this.ownSeq, true, this.localEntries());
+    }
+    return this.fullCache;
+  }
+
+  private signed(seq: number, full: boolean, entries: FedEntry[]): FedPresence {
+    const parts = { origin: this.hub.info.id, seq, full, entries };
     return {
       t: 'presence',
-      origin: this.hub.info.id,
-      seq: this.ownSeq,
-      full: true,
-      entries: this.localEntries(),
+      ...parts,
+      key: this.hub.info.key,
+      sig: sign(this.hub.identity, SIG_DOMAIN.presence, presenceSigned(parts)),
     };
   }
 
@@ -227,25 +257,47 @@ export class PresenceService {
     return this.ownSeq;
   }
 
-  /** News from another server. Returns true if any of it was new (so it travels on). */
+  /**
+   * News from another server, which must be signed by the server it names.
+   * Returns true if any of it was new (so it travels on).
+   */
   applyRemote(frame: FedPresence): boolean {
     const origin = frame.origin;
     if (!origin || origin === this.hub.info.id || typeof frame.seq !== 'number') return false;
-    if (frame.seq > (this.originSeq.get(origin) ?? 0)) this.originSeq.set(origin, frame.seq);
-    const touched = new Set<string>();
+    // Sequence numbers are timestamps: one far ahead would outrank everything
+    // the origin says afterwards.
+    if (!(frame.seq <= Date.now() + SEQ_AHEAD_MS)) return false;
     const isNew = (userId: string) => (this.seqs.get(`${origin}|${userId}`) ?? 0) < frame.seq;
     const listed = new Set(frame.entries.map((e) => e.userId));
+    const dropped: string[] = [];
     if (frame.full) {
       for (const [userId, entries] of this.remote) {
-        if (!entries.has(origin) || listed.has(userId) || !isNew(userId)) continue;
-        entries.delete(origin);
-        if (entries.size === 0) this.remote.delete(userId);
-        this.seqs.set(`${origin}|${userId}`, frame.seq);
-        touched.add(userId);
+        if (entries.has(origin) && !listed.has(userId) && isNew(userId)) dropped.push(userId);
       }
     }
-    for (const e of frame.entries) {
-      if (!isNew(e.userId)) continue;
+    const fresh = frame.entries.filter((e) => isNew(e.userId));
+    // Old news is not worth checking a signature for.
+    if (
+      frame.seq <= (this.originSeq.get(origin) ?? 0) &&
+      fresh.length === 0 &&
+      dropped.length === 0
+    )
+      return false;
+    if (
+      !keyMatchesUserId(frame.key, origin) ||
+      !verifyPayload(frame.key, SIG_DOMAIN.presence, presenceSigned(frame), frame.sig)
+    )
+      return false;
+    if (frame.seq > (this.originSeq.get(origin) ?? 0)) this.originSeq.set(origin, frame.seq);
+    const touched = new Set<string>();
+    for (const userId of dropped) {
+      const entries = this.remote.get(userId)!;
+      entries.delete(origin);
+      if (entries.size === 0) this.remote.delete(userId);
+      this.seqs.set(`${origin}|${userId}`, frame.seq);
+      touched.add(userId);
+    }
+    for (const e of fresh) {
       this.seqs.set(`${origin}|${e.userId}`, frame.seq);
       let entries = this.remote.get(e.userId);
       if (!entries) this.remote.set(e.userId, (entries = new Map()));
@@ -274,39 +326,21 @@ export class PresenceService {
     }
   }
 
-  /** Everything we know, for a server that just linked to us. */
+  /**
+   * What a server that just linked to us is told: our own users, signed. What
+   * we know of other servers' users is not repeated, because we can't sign it
+   * and a signed frame we kept would bring back users who have since left. The
+   * newcomer hears every server's beacon, sees that its presence is ahead of
+   * what it has, and fetches that server's current picture itself.
+   */
   snapshot(): FedPresence[] {
-    const out: FedPresence[] = [this.fullState()];
-    const byFrame = new Map<string, FedPresence>();
-    for (const [userId, entries] of this.remote) {
-      for (const [origin, e] of entries) {
-        const k = `${origin}|${e.seq}`;
-        let f = byFrame.get(k);
-        if (!f)
-          byFrame.set(k, (f = { t: 'presence', origin, seq: e.seq, full: false, entries: [] }));
-        f.entries.push({
-          userId,
-          status: e.status,
-          ...(e.text ? { text: e.text } : {}),
-          since: e.since,
-          devices: e.devices,
-        });
-      }
-    }
-    return [...out, ...byFrame.values()];
+    return [this.fullState()];
   }
 
   private lastPublished = new Map<string, string>();
 
   private changed(userId: string, local: boolean) {
-    if (local)
-      this.hub.mesh.forward({
-        t: 'presence',
-        origin: this.hub.info.id,
-        seq: this.nextSeq(),
-        full: false,
-        entries: [this.fedEntry(userId)],
-      });
+    if (local) this.hub.mesh.forward(this.signed(this.nextSeq(), false, [this.fedEntry(userId)]));
     const entry = this.publicEntry(userId);
     const fingerprint = `${entry.status}|${entry.text ?? ''}`;
     if ((this.lastPublished.get(userId) ?? 'offline|') === fingerprint) return;
