@@ -28,7 +28,7 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
-import { RateLimiter, RpcFailure, sendJson } from './util';
+import { RateLimiter, RpcFailure, sendJson, withinBytes } from './util';
 
 /** Record prefixes, and users' presence, one connection may follow. */
 const MAX_SUBSCRIPTIONS = 20_000;
@@ -269,12 +269,24 @@ export class ClientConnection implements ClientHandle {
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
         const found = await hub.dist.get(keys.filter((k) => this.mayReadKey(k)));
-        return { records: found.filter((r) => this.mayRead(r)) };
+        // As many as fit in one frame; the asker comes back for the rest.
+        const readable = found.filter((r) => this.mayRead(r));
+        const records = withinBytes(readable);
+        return records.length < readable.length ? { records, more: true } : { records };
       }
       case 'records.list': {
-        const { prefix, limit } = p as unknown as { prefix: string; limit?: number };
+        const { prefix, limit, after } = p as unknown as {
+          prefix: string;
+          limit?: number;
+          after?: string;
+        };
         const found = await hub.dist.list(prefix, limit ?? 1000);
-        return { records: found.filter((r) => this.mayRead(r)) };
+        // In key order, so that `after` names where to go on from.
+        const readable = found
+          .filter((r) => this.mayRead(r) && (after === undefined || r.key > after))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+        const records = withinBytes(readable);
+        return records.length < readable.length ? { records, more: true } : { records };
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };

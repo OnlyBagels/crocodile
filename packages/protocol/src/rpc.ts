@@ -253,6 +253,8 @@ export const RpcParams = {
   'records.list': z.object({
     prefix: z.string().min(3).max(200),
     limit: z.number().int().min(1).max(5000).optional(),
+    /** Continue after this key, when the previous answer said there is more. */
+    after: z.string().max(200).optional(),
   }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),
@@ -305,8 +307,10 @@ export const RpcParams = {
 
 export interface RpcMethods {
   'records.put': { accepted: boolean; current: SignedRecord | null; reason?: string };
-  'records.get': { records: SignedRecord[] };
-  'records.list': { records: SignedRecord[] };
+  /** `more`: the answer was cut to fit one frame; ask again for the keys not yet returned. */
+  'records.get': { records: SignedRecord[]; more?: boolean };
+  /** `more`: the answer was cut to fit one frame; ask again with `after` the last key returned. */
+  'records.list': { records: SignedRecord[]; more?: boolean };
   'records.subscribe': Record<string, never>;
   'users.search': { profiles: SignedRecord<'profile'>[] };
   'friends.incoming': { records: SignedRecord<'friends'>[] };
