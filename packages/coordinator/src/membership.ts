@@ -27,6 +27,8 @@ export const defaultMembershipTiming: MembershipTiming = {
 const NEW_SERVERS_BURST = 1000;
 const NEW_SERVERS_PER_SECOND = 5;
 const MAX_TRACKED_SERVERS = 5000;
+/** Links whose spent allowance is remembered. */
+const MAX_LIMITERS = 2000;
 /** A beacon is forgotten when it is this many times older than a live one could be. */
 const FORGET_AFTER_LIVE = 10;
 
@@ -49,7 +51,9 @@ export class Membership {
   private fullSet = new Set<string>();
   /** How many unknown servers each link may still introduce. */
   private introductions = new Map<string, RateLimiter>();
-  private currentView: View;
+  private latestView: View;
+  /** The live set has moved since `latestView` was built. */
+  private viewDirty = false;
   private settledView: View;
   private settledSince = Date.now();
   private settleTimer?: ReturnType<typeof setTimeout>;
@@ -63,8 +67,8 @@ export class Membership {
     readonly timing: MembershipTiming,
   ) {
     this.liveSet.add(this.selfId);
-    this.currentView = this.buildView();
-    this.settledView = this.currentView;
+    this.latestView = this.buildView();
+    this.settledView = this.latestView;
   }
 
   private get selfId() {
@@ -91,7 +95,12 @@ export class Membership {
 
   /** Who owns what, as of now. */
   get view() {
-    return this.currentView;
+    // Built when someone looks, not for every server that joins in a burst.
+    if (this.viewDirty) {
+      this.latestView = this.buildView();
+      this.viewDirty = false;
+    }
+    return this.latestView;
   }
 
   /** The view once the live set had stopped changing; records are moved by it. */
@@ -150,8 +159,9 @@ export class Membership {
     if (frame.seq < now - this.timing.liveMs) return false;
     const known = this.beacons.get(id);
     if (known && known.frame.seq >= frame.seq) return false;
-    // Before checking a signature, see whether we would take the server at all.
-    if (!known && !this.mayIntroduce(from)) return false;
+    // Before checking a signature, see whether we would take the server at all. (One we are
+    // linked to is the peer itself, and always has a place.)
+    if (!known && !this.linked.has(id) && !this.mayIntroduce(from)) return false;
     if (
       !verifyPayload(
         key,
@@ -161,23 +171,37 @@ export class Membership {
       )
     )
       return false;
+    const moved = !this.liveSet.has(id) || known?.frame.full !== frame.full;
     this.beacons.set(id, { frame: { ...frame, server: parsed.data }, at: now });
     this.hub.mesh.addKnown([parsed.data]);
-    this.recompute();
+    // A server we already count as live, saying the same as before, changes nothing.
+    if (moved) this.recompute();
     if (typeof frame.presence === 'number') this.hub.presence.checkOrigin(id, frame.presence);
     return true;
   }
 
   /** Whether the link `from` may tell us of one more server we do not know. */
   private mayIntroduce(from?: string): boolean {
-    if (this.beacons.size >= MAX_TRACKED_SERVERS) return false;
+    if (this.beacons.size >= MAX_TRACKED_SERVERS && !this.makeRoom()) return false;
     if (from === undefined) return true;
     let limiter = this.introductions.get(from);
     if (!limiter) {
+      // A link that drops and comes back keeps what it has spent.
+      if (this.introductions.size >= MAX_LIMITERS)
+        this.introductions.delete(this.introductions.keys().next().value!);
       limiter = new RateLimiter(NEW_SERVERS_PER_SECOND, NEW_SERVERS_BURST);
       this.introductions.set(from, limiter);
     }
     return limiter.take();
+  }
+
+  /** Drops the longest-silent server that is no longer live, if there is one. */
+  private makeRoom(): boolean {
+    let oldest: string | undefined;
+    for (const [id, b] of this.beacons)
+      if (!this.liveSet.has(id) && (oldest === undefined || b.at < this.beacons.get(oldest)!.at))
+        oldest = id;
+    return oldest !== undefined && this.beacons.delete(oldest);
   }
 
   linkUp(id: string) {
@@ -191,7 +215,6 @@ export class Membership {
    */
   linkDown(id: string, broke: boolean) {
     this.linked.delete(id);
-    this.introductions.delete(id);
     const b = this.beacons.get(id);
     if (broke && b) b.at = 0;
     this.recompute();
@@ -216,7 +239,11 @@ export class Membership {
     const next = new Set<string>([this.selfId, ...this.linked]);
     for (const [id, b] of this.beacons) {
       if (now - b.at < this.timing.liveMs) next.add(id);
-      else if (!this.linked.has(id) && now - b.at > this.timing.liveMs * FORGET_AFTER_LIVE)
+      else if (
+        !this.linked.has(id) &&
+        // Long enough that its beacon could no longer be replayed as fresh.
+        now - Math.max(b.at, b.frame.seq) > this.timing.liveMs * FORGET_AFTER_LIVE
+      )
         this.beacons.delete(id);
     }
     const up = [...next].filter((id) => !this.liveSet.has(id));
@@ -227,9 +254,8 @@ export class Membership {
     const fullMoved =
       full.size !== this.fullSet.size || [...full].some((id) => !this.fullSet.has(id));
     this.fullSet = full;
-    const view = up.length || down.length || fullMoved ? this.buildView() : undefined;
-    if (view && !view.equals(this.currentView)) {
-      this.currentView = view;
+    if (up.length || down.length || fullMoved) {
+      this.viewDirty = true;
       clearTimeout(this.settleTimer);
       this.settleTimer = setTimeout(() => this.settle(), this.timing.settleMs);
       this.settleTimer.unref?.();
@@ -239,9 +265,10 @@ export class Membership {
   }
 
   private settle() {
-    if (this.currentView.equals(this.settledView)) return;
+    const current = this.view;
+    if (current.equals(this.settledView)) return;
     const before = this.settledView;
-    this.settledView = this.currentView;
+    this.settledView = current;
     this.settledSince = Date.now();
     for (const l of this.listeners) l.settled?.(before, this.settledView);
   }

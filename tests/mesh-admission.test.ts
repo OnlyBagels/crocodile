@@ -11,8 +11,11 @@ afterEach(async () => {
 /** What a server's membership sees of the rest, reached without a mesh. */
 type Members = {
   onBeacon(frame: FedBeacon, from?: string): boolean;
+  linkUp(id: string): void;
+  linkDown(id: string, broke: boolean): void;
   beacons: Map<string, unknown>;
-  isLive(id: string): boolean;
+  view: unknown;
+  recompute(): void;
 };
 
 async function server(overrides = {}) {
@@ -40,39 +43,68 @@ function beacon(who: Identity, seq = Date.now(), full = false): FedBeacon {
 }
 
 describe('servers made up out of nothing', () => {
-  it('rebuilds the ring only when the live servers change', async () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('builds the ring only when someone looks, and only if the live servers changed', async () => {
     const { c, members } = await server();
-    const rebuilt = vi.spyOn(c.membership as never as { buildView(): unknown }, 'buildView');
+    const built = vi.spyOn(c.membership as never as { buildView(): unknown }, 'buildView');
     const fakes = Array.from({ length: 3 }, () => createIdentity());
     for (const f of fakes) expect(members.onBeacon(beacon(f), 'link')).toBe(true);
-    expect(rebuilt.mock.calls.length).toBeGreaterThanOrEqual(1);
-    const before = rebuilt.mock.calls.length;
+    // Three servers joined, and nobody asked who owns what: no ring yet. Then one, for all three.
+    expect(built.mock.calls.length).toBe(0);
+    void members.view;
+    expect(built.mock.calls.length).toBe(1);
     // The same servers again, with newer beacons: nothing moved.
     const now = Date.now() + 1;
     for (const f of fakes) expect(members.onBeacon(beacon(f, now), 'link')).toBe(true);
-    expect(rebuilt.mock.calls.length).toBe(before);
+    void members.view;
+    expect(built.mock.calls.length).toBe(1);
     // One that now keeps a full copy does change who owns what.
     expect(members.onBeacon(beacon(fakes[0]!, now + 1, true), 'link')).toBe(true);
-    expect(rebuilt.mock.calls.length).toBe(before + 1);
+    void members.view;
+    expect(built.mock.calls.length).toBe(2);
   });
 
   it('lets a link introduce a network at once, then only a few new servers a second', async () => {
     const { members } = await server();
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
     const fakes = Array.from({ length: 1100 }, () => createIdentity());
     const taken = fakes.filter((f) => members.onBeacon(beacon(f), 'chatty'));
-    // The burst, and a few that arrived while it ran.
-    expect(taken.length).toBeGreaterThanOrEqual(1000);
-    expect(taken.length).toBeLessThan(1050);
+    expect(taken.length).toBe(1000);
     // Another link has its own allowance; servers already known need none.
     expect(members.onBeacon(beacon(createIdentity()), 'quiet')).toBe(true);
     expect(members.onBeacon(beacon(taken[0]!, Date.now() + 10), 'chatty')).toBe(true);
+    // A link that drops and returns has not got its allowance back.
+    members.linkUp('chatty');
+    members.linkDown('chatty', false);
+    expect(members.onBeacon(beacon(createIdentity()), 'chatty')).toBe(false);
+    // But a few a second come back with time.
+    vi.setSystemTime(Date.now() + 2000);
+    expect(members.onBeacon(beacon(createIdentity(), Date.now()), 'chatty')).toBe(true);
   }, 60_000);
 
-  it('forgets servers that have not been heard from for a long time', async () => {
-    const { members } = await server({ membership: { beaconMs: 50, liveMs: 200, settleMs: 50 } });
-    for (let i = 0; i < 5; i++) members.onBeacon(beacon(createIdentity()), 'link');
+  it('forgets servers that have been silent for long, but not one it is linked to', async () => {
+    const { members } = await server();
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() });
+    const linked = createIdentity();
+    for (const f of [linked, ...Array.from({ length: 4 }, () => createIdentity())])
+      members.onBeacon(beacon(f), 'link');
+    members.linkUp(linked.userId);
     expect(members.beacons.size).toBe(5);
-    await new Promise((r) => setTimeout(r, 2800));
-    expect(members.beacons.size).toBe(0);
+    vi.setSystemTime(Date.now() + 20 * 70_000);
+    members.recompute();
+    expect([...members.beacons.keys()]).toEqual([linked.userId]);
+  });
+
+  it('does not take back a beacon of a server whose link broke', async () => {
+    const { members } = await server();
+    const gone = createIdentity();
+    const last = beacon(gone);
+    expect(members.onBeacon(last, 'link')).toBe(true);
+    members.linkUp(gone.userId);
+    members.linkDown(gone.userId, true);
+    // Someone passes the same beacon on: it is not news.
+    expect(members.onBeacon(last, 'other')).toBe(false);
+    expect(members.beacons.has(gone.userId)).toBe(true);
   });
 });

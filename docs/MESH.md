@@ -139,11 +139,16 @@ by name goes to `name:<name>`.
   may join is a separate, open question. Server identities are free, so
   someone can make up as many as a link will let them introduce, and enough of
   them take over the ownership of chosen shards and sessions (placement uses a
-  32-bit hash, so a key can be ground to land where it is wanted). What is
+  32-bit hash, so a key can be ground to land where it is wanted; a
+  cryptographic hash would not stop that, since the attacker only has to try
+  keys until one lands, so it is not used until servers have to be admitted). What is
   limited is the cost: a link may introduce 1000 servers we do not know at
-  once and then 5 a second, at most 5000 servers are tracked, the ring is
-  rebuilt only when the live set really changes, and servers not heard from
-  for ten times the live window are forgotten. Admitting only servers the
+  once and then 5 a second (a link that drops and returns keeps what it
+  spent), at most 5000 servers are admitted to the live set (a flood of made-up
+  ones can fill it and keep real newcomers out, which is why admission control
+  is still needed), the ring is built only when the live set really changes
+  and someone looks, and servers not heard from for ten times the live window
+  are forgotten. Admitting only servers the
   directory has vetted, or that have proved they can be reached, is still to
   do.
 - Signatures stop one server speaking for another, not a server lying about
