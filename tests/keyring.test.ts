@@ -21,7 +21,7 @@ describe('keys from other members', () => {
     vi.setSystemTime(Date.now() + 11_000);
     expect(kids()).toEqual([second.kid]);
     // ...and a copy of the message that carried it, replayed later, doesn't bring it back.
-    expect(bob.addPeerKey('alice.d1', first, 3000)).toBe(false);
+    expect(bob.addPeerKey('alice.d1', first, 1000)).toBe(false);
     expect(kids()).toEqual([second.kid]);
   });
 

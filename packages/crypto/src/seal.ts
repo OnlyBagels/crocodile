@@ -47,8 +47,9 @@ function boxKey(
   kem: Uint8Array,
   to: string,
   pk: number,
-  info: string = SIG_DOMAIN.sealed,
-  binding = '',
+  info: string,
+  /** What else the key is tied to; empty only where the sender is inside the encryption. */
+  binding: string,
 ) {
   const salt = concatBytes(epk, kem, new TextEncoder().encode(`${to}|${pk}${binding}`));
   const okm = hkdfSha256(concatBytes(ssX, ssKem), salt, info, 44);
@@ -202,6 +203,7 @@ export function sealAnonymous(
     recipient.peer,
     recipient.prekey.id,
     SIG_DOMAIN.anon,
+    '',
   );
   const head = {
     v: 3 as const,
@@ -231,7 +233,7 @@ export function openAnonymous(
     const kem = fromB64u(box.kem);
     const ssX = x25519.getSharedSecret(secrets.x25519, epk);
     const ssKem = ml_kem768.decapsulate(kem, secrets.mlkem);
-    const { key, nonce } = boxKey(ssX, ssKem, epk, kem, box.to, box.pk, SIG_DOMAIN.anon);
+    const { key, nonce } = boxKey(ssX, ssKem, epk, kem, box.to, box.pk, SIG_DOMAIN.anon, '');
     const padded = aesGcmDecrypt(key, nonce, fromB64u(box.ct));
     const json = padded && unpad(padded);
     if (!json) return null;

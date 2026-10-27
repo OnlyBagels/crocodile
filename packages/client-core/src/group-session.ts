@@ -1139,7 +1139,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       { kid: payload.kid, text: payload.text, audio: payload.audio },
       payload.at,
     );
-    if (!taken) this.ctx.log('refused sender key', { from, kid: payload.kid });
+    if (!taken) {
+      this.ctx.log('refused sender key', { from, kid: payload.kid });
+      return;
+    }
     await this.flushPending();
     if (first) await this.sendKeyTo(from);
   }
@@ -1150,13 +1153,20 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
   }
 
+  private lastSealedAt = 0;
+  /** Never earlier than the last, even if the clock steps back: receivers refuse older keys. */
+  private sealedAt() {
+    this.lastSealedAt = Math.max(Date.now(), this.lastSealedAt + 1);
+    return this.lastSealedAt;
+  }
+
   private async sendKeyTo(peer: string) {
     const chains = this.keyring.exportMine();
     const payload = {
       type: 'sender_key' as const,
       sessionId: this.sessionId,
       to: peer,
-      at: Date.now(),
+      at: this.sealedAt(),
       ...chains,
     };
     if (await this.sendSealed(peer, payload)) {
@@ -1218,8 +1228,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       case 'sender_key':
         if (payload.sessionId !== this.sessionId) return;
         // Made for this device, and not long ago (the sender's clock is only roughly ours).
-        if (payload.to !== this.me || Math.abs(Date.now() - payload.at) > SENDER_KEY_SKEW_MS)
+        if (payload.to !== this.me) return;
+        if (Math.abs(Date.now() - payload.at) > SENDER_KEY_SKEW_MS) {
+          this.ctx.log('sender key dated far from our clock', {
+            from,
+            off: payload.at - Date.now(),
+          });
           return;
+        }
         if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
           this.parkedKeys.push({ from, payload, at: Date.now() });
           if (this.parkedKeys.length > 100) this.parkedKeys.shift();
