@@ -148,8 +148,8 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
    from then on every frame is AES-256-GCM encrypted and padded, so metadata
    is confidential even over plain `ws://` to a home server: all that shows
    is the server's own hello and the size and timing of the frames.
-   Server-to-server mesh links use the same exchange (their server ids are
-   in the clear).
+   Server-to-server mesh links use the same key exchange but identify
+   themselves in a frame of their own, with the server ids in the clear.
 2. The client can put and get records, subscribe to prefixes, search users,
    watch presence and voice-channel occupancy, join or leave sessions, and
    send signalling messages to other session members.

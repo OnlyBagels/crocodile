@@ -177,6 +177,10 @@ export class ClientConnection implements ClientHandle {
       `${this.challenge}|${this.hub.info.id}|auth`,
       false,
     ).open(sealed);
+    if (inner === undefined) {
+      this.ws.close(4003, 'could not open sign-in');
+      return;
+    }
     const body = ClientAuthBody.safeParse(inner);
     if (!body.success) {
       this.ws.close(4002, 'expected auth');

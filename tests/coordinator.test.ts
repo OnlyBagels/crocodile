@@ -239,6 +239,43 @@ describe('client sign-in', () => {
     expect(result.got.some((f) => (f as { t: string }).t === 'auth_ok')).toBe(false);
   });
 
+  it('closes a sign-in that does not open, that opens to the wrong thing, or whose key exchange is garbage', async () => {
+    const c = await server();
+    const sealedWith = (
+      hello: {
+        challenge: string;
+        server: { id: string };
+        channel: { x25519: string; mlkem: string };
+      },
+      body: unknown,
+    ) => {
+      const res = answerChannel(hello.channel);
+      const auth = new SecureChannel(
+        res.secret,
+        `${hello.challenge}|${hello.server.id}|auth`,
+        true,
+      );
+      const { n, c: ct } = auth.seal(body);
+      return { t: 'auth', channel: res.answer, sealed: { n, c: ct } };
+    };
+    // Sealed under a different key exchange than the one it names.
+    const unopened = await answerWith(c, (hello) => {
+      const other = answerChannel(hello.channel);
+      return { ...sealedWith(hello, { key: 'x' }), channel: other.answer };
+    });
+    expect(unopened.code).toBe(4003);
+    // Opens, but is not a sign-in.
+    const wrong = await answerWith(c, (hello) => sealedWith(hello, { hello: 'world' }));
+    expect(wrong.code).toBe(4002);
+    // A key exchange that is not one.
+    const garbage = await answerWith(c, () => ({
+      t: 'auth',
+      channel: { epk: 'AAAA', kem: 'AAAA' },
+      sealed: { n: 0, c: 'AAAA' },
+    }));
+    expect(garbage.code).toBe(4003);
+  });
+
   it('refuses a sealed sign-in whose signature is not for this connection', async () => {
     const c = await server();
     const identity = createIdentity();
