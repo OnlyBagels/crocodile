@@ -110,23 +110,26 @@ describe('client RPC answers', () => {
       () => carol.conn.close(),
     );
     const sender = createIdentity();
-    const keys: string[] = [];
-    for (let i = 0; i < 5; i++) {
+    const noteFor = async (to: typeof bob, via: typeof bob) => {
       const author = createIdentity();
       const box = sealAnonymous(
         sender,
         randomDeviceId(),
-        { peer: bob.conn.peer, prekey: createPrekey().bundle },
+        { peer: to.conn.peer, prekey: createPrekey().bundle },
         utf8.encode('hi'),
       );
-      const note = signRecord(author, 'note', recordKey.note(bob.identity.userId, author.userId), {
+      const note = signRecord(author, 'note', recordKey.note(to.identity.userId, author.userId), {
         boxes: [box],
       });
-      expectAccepted(await carol.conn.request('records.put', { record: note }));
-      keys.push(note.key);
-    }
-    // Pages of two: three requests reach all five, and the last says nothing more.
-    const pages: string[][] = [];
+      expectAccepted(await via.conn.request('records.put', { record: note }));
+      return note.key;
+    };
+    const keys: string[] = [];
+    for (let i = 0; i < 5; i++) keys.push(await noteFor(bob, carol));
+    // Some for carol too, among them in the prefix and not for bob to read.
+    for (let i = 0; i < 3; i++) await noteFor(carol, bob);
+    // Pages of two reach all five of bob's, however the others fall among them.
+    const seen: string[] = [];
     let after: string | undefined;
     for (let rounds = 0; rounds < 10; rounds++) {
       const res = await bob.conn.request('records.list', {
@@ -134,24 +137,33 @@ describe('client RPC answers', () => {
         limit: 2,
         ...(after ? { after } : {}),
       });
-      pages.push(res.records.map((r) => r.key));
-      after = res.records.at(-1)?.key;
+      expect(res.records.length).toBeLessThanOrEqual(2);
+      seen.push(...res.records.map((r) => r.key));
+      after = res.next ?? res.records.at(-1)?.key;
       if (!res.more) break;
     }
-    expect(pages.map((p) => p.length)).toEqual([2, 2, 1]);
-    expect(pages.flat().sort()).toEqual(keys.sort());
-    // Carol may read none of them: she is told so, not that there is more.
-    const hers = await carol.conn.request('records.list', { prefix: 'note:', limit: 2 });
-    expect(hers).toEqual({ records: [] });
+    expect(seen.sort()).toEqual(keys.sort());
+    // Carol reads her three, and is not told of bob's five.
+    const hers = await carol.conn.request('records.list', { prefix: 'note:', limit: 10 });
+    expect(hers.records).toHaveLength(3);
     // With a page of one, she looks at a few and is told where to go on from.
-    const step = await carol.conn.request('records.list', { prefix: 'note:', limit: 1 });
+    const dave = await connectUser(c, createIdentity(), 'dave');
+    cleanup.push(() => dave.conn.close());
+    const step = await dave.conn.request('records.list', { prefix: 'note:', limit: 1 });
     expect(step).toMatchObject({ records: [], more: true });
     expect(step.next).toBeDefined();
-    const rest = await carol.conn.request('records.list', {
+    let rest = await dave.conn.request('records.list', {
       prefix: 'note:',
       limit: 1,
       after: step.next!,
     });
+    // Eight notes, none his: a few looks at a time, and it ends.
+    for (let rounds = 0; rest.more && rounds < 5; rounds++)
+      rest = await dave.conn.request('records.list', {
+        prefix: 'note:',
+        limit: 1,
+        after: rest.next!,
+      });
     expect(rest).toEqual({ records: [] });
   });
 

@@ -30,10 +30,11 @@ import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
 import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson } from './util';
 
-/** Record prefixes, and users' presence, one connection may follow. */
-/** Keys looked up at a time for `records.get`, and unreadable pages `records.list` looks past. */
+/** Keys `records.get` looks up first (the window doubles). */
 const GET_WINDOW = 20;
+/** Unreadable pages `records.list` looks past before handing back where it got to. */
 const LIST_SKIPS = 4;
+/** Record prefixes, and users' presence, one connection may follow. */
 const MAX_SUBSCRIPTIONS = 20_000;
 
 let nextConnId = 1;
@@ -271,12 +272,12 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
-        // A few keys at a time, in the order asked, until a frame is full: what is not sent is
-        // not looked up, and the asker goes on from `next`.
+        // A few keys at a time (more each time), in the order asked, until a frame is full: what
+        // is not sent is not looked up, and the asker goes on from `next`.
         const records: SignedRecord[] = [];
         let size = 1;
-        for (let i = 0; i < keys.length; i += GET_WINDOW) {
-          const window = keys.slice(i, i + GET_WINDOW);
+        for (let i = 0, step = GET_WINDOW; i < keys.length; i += step, step *= 2) {
+          const window = keys.slice(i, i + step);
           const order = new Map(window.map((k, j) => [k, i + j]));
           const found = (await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
             .filter((r) => this.mayRead(r))
@@ -314,7 +315,13 @@ export class ClientConnection implements ClientHandle {
             continue;
           }
           const cut = cutToFrame(readable);
-          return found.more ? { ...cut, more: true } : cut;
+          if (!found.more) return cut;
+          // Unreadable records after the last one given need not be looked at again.
+          const next =
+            !cut.more && last !== undefined && last > (cut.records.at(-1)?.key ?? '')
+              ? last
+              : undefined;
+          return { ...cut, more: true, ...(next ? { next } : {}) };
         }
       }
       case 'records.subscribe': {

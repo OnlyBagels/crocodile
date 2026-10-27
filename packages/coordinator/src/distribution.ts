@@ -57,15 +57,15 @@ const WATCHES_PER_SERVER = 50_000;
 const RETRY_MS = 1500;
 const RETRY_TRIES = 5;
 
+const greatest = (keys: string[]) =>
+  keys.length ? keys.reduce((a, b) => (b > a ? b : a)) : undefined;
+
 /**
  * Where records are read from and written to (docs/MESH.md). Each record lives
  * on the owners of its shards; this server answers for shards it owns and
  * asks their owners for the rest, keeps watches for its clients on shards it
  * doesn't own, and moves records when the set of live servers changes.
  */
-const greatest = (keys: string[]) =>
-  keys.length ? keys.reduce((a, b) => (b > a ? b : a)) : undefined;
-
 export class Distribution {
   /** Records fetched from other servers for checks and membership tests. */
   private cache = new Map<string, { record: SignedRecord; at: number }>();
@@ -377,16 +377,15 @@ export class Distribution {
     // Only well-signed records count: an owner can't hand us a forged newer copy.
     const { valid } = this.sift(answers.flatMap((a) => a.records ?? []));
     if (more) {
-      // An owner that cut its answer says nothing past the last (well-signed) key it gave.
+      more.value = answers.some((a) => a.more === true);
+      // For lists, in key order: an owner that cut its answer says nothing past the last
+      // well-signed key it gave.
       const good = new Set(valid.map((r) => r.key));
       for (const a of answers) {
         if (!a.more) continue;
-        const keys = (a.records ?? []).map((r) => r.key);
-        // The last well-signed key, or failing that the last one it gave.
-        const bound = greatest(keys.filter((k) => good.has(k))) ?? greatest(keys);
-        if (bound === undefined) continue;
-        more.value = true;
-        if (more.upTo === undefined || bound < more.upTo) more.upTo = bound;
+        const bound = greatest((a.records ?? []).map((r) => r.key).filter((k) => good.has(k)));
+        if (bound !== undefined && (more.upTo === undefined || bound < more.upTo))
+          more.upTo = bound;
       }
     }
     const newest = new Map<string, SignedRecord>();
@@ -481,16 +480,16 @@ export class Distribution {
       cut,
     );
     if (!remote) return page(owned ? local : store.listPrefix(prefix, limit + 1, after));
-    // An owner that ignored `after` (an older server) must not bring back what was already given,
-    // nor cut the page short at a key before it.
-    if (after !== undefined && cut.upTo !== undefined && cut.upTo <= after) cut.upTo = undefined;
+    // An owner that ignored `after` (an older server) cannot be paged through.
+    if (after !== undefined && cut.upTo !== undefined && cut.upTo <= after)
+      throw new RpcFailure('unavailable', 'a server holding these records cannot page them');
     const merged = Distribution.merge(
       local,
       remote.filter((r) => r.key.startsWith(prefix) && (after === undefined || r.key > after)),
     )
       .filter((r) => cut.upTo === undefined || r.key <= cut.upTo)
       .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-    return page(merged, cut.value);
+    return page(merged, cut.upTo !== undefined);
   }
 
   async findByTerm(term: string, limit: number): Promise<SignedRecord[]> {
