@@ -548,6 +548,9 @@ describe('ratcheting sender keys', () => {
       expect(rx.decrypt(frames[0]!)).toBeNull();
       expect(rx.decrypt(frames[100]!)).toEqual(frame);
       expect(rx.decrypt(frames[100]!)).toBeNull();
+      // Right at the edge: 1023 back is still in the window, 1024 back is not.
+      expect(rx.decrypt(frames[1099 - 1023]!)).toEqual(frame);
+      expect(rx.decrypt(frames[1099 - 1024]!)).toBeNull();
     });
 
     it('keeps count when the frame counter wraps around', () => {

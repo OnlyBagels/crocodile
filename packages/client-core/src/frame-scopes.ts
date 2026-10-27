@@ -1,4 +1,5 @@
 import {
+  AUDIO_EPOCH_MS,
   AudioReceiver,
   AudioSender,
   VideoReceiver,
@@ -7,8 +8,12 @@ import {
 } from '@crocodile/crypto';
 import type { FrameKeys } from './keyring';
 
-/** A bit over a generation of the audio chain (`AUDIO_EPOCH_MS`). */
-const KEEP_SENDERS_MS = 45_000;
+/**
+ * How long our senders and the listeners' counters are kept with no connection left: past a
+ * generation of the audio chain they are no use (the chain has moved on), and a key shouldn't
+ * linger once the call is left.
+ */
+const KEEP_IDLE_MS = AUDIO_EPOCH_MS * 1.5;
 
 export interface FrameScope {
   sender: AudioSender | null;
@@ -18,18 +23,24 @@ export interface FrameScope {
 }
 
 /**
- * The frame worker's key state, one scope per connection. Scopes share one
- * sender per sender key (one for audio, one for video): a reconnect gets a
- * new scope, and its frames must continue the same counter rather than start
- * over and reuse nonces. Every stream of a kind shares its sender too (the
- * microphone and a shared screen's sound; the camera and the screen).
+ * The frame worker's key state, one scope per connection. A reconnect gets a new scope, and what
+ * the scopes use outlives them:
+ *
+ * - One sender per sender key of ours (one for audio, one for video): its frames must continue
+ *   the same counter rather than start over, both to not reuse nonces and because listeners
+ *   that stayed refuse a counter they have passed. Every stream of a kind shares its sender too
+ *   (the microphone and a shared screen's sound; the camera and the screen).
+ * - One receiver per sender key of someone else, with the counters it has taken: a host that
+ *   cuts a listener's connection can't have recorded frames taken again.
  */
 export class FrameScopes {
   readonly scopes = new Map<string, FrameScope>();
   private senders = new Map<number, AudioSender>();
   private videoSenders = new Map<number, VideoSender>();
-  private forgetTimer?: ReturnType<typeof setTimeout>;
-  /** Our sender key as of the last update: its senders outlive the connections using them. */
+  private receivers = new Map<number, AudioReceiver>();
+  private videoReceivers = new Map<number, VideoReceiver>();
+  private idleTimer?: ReturnType<typeof setTimeout>;
+  /** Our sender key as of the last update. */
   private mineKid?: number;
 
   get(id: string): FrameScope | undefined {
@@ -43,6 +54,7 @@ export class FrameScopes {
         id,
         (s = { sender: null, receivers: new Map(), video: null, videoReceivers: new Map() }),
       );
+    clearTimeout(this.idleTimer);
     if (keys.mine) {
       this.mineKid = keys.mine.kid;
       const chain = () => importChain({ gen: keys.mine!.gen, key: keys.mine!.key });
@@ -65,36 +77,48 @@ export class FrameScopes {
       const kid = p.kid >>> 0;
       const chain = () => importChain({ gen: p.gen, key: p.key });
       // Keep receivers we already have: they may have ratcheted past the given state.
-      next.set(kid, s.receivers.get(kid) ?? new AudioReceiver(kid, chain()));
-      nextVideo.set(kid, s.videoReceivers.get(kid) ?? new VideoReceiver(kid, chain()));
+      const audio = this.receivers.get(kid) ?? new AudioReceiver(kid, chain());
+      const video = this.videoReceivers.get(kid) ?? new VideoReceiver(kid, chain());
+      this.receivers.set(kid, audio);
+      this.videoReceivers.set(kid, video);
+      next.set(kid, audio);
+      nextVideo.set(kid, video);
     }
     s.receivers = next;
     s.videoReceivers = nextVideo;
-  }
-
-  private forgetIdle() {
-    if (this.scopes.size > 0) return;
-    this.senders.clear();
-    this.videoSenders.clear();
-    this.mineKid = undefined;
+    // Keys that are gone (replaced, or their sender left) are forgotten.
+    for (const kid of this.receivers.keys()) if (!next.has(kid)) this.receivers.delete(kid);
+    for (const kid of this.videoReceivers.keys())
+      if (!nextVideo.has(kid)) this.videoReceivers.delete(kid);
+    this.pruneSenders();
   }
 
   drop(id: string) {
     this.scopes.delete(id);
-    // Forget senders for keys that have been replaced. The current key's stay a little after the
-    // last connection goes: a new one must continue their counters, as listeners that stayed
-    // refuse counters they have already passed. Past the length of a generation they are no
-    // use (the chain has moved on), and the key shouldn't linger once the call is left.
-    clearTimeout(this.forgetTimer);
+    this.pruneSenders();
+    clearTimeout(this.idleTimer);
     if (this.scopes.size === 0) {
-      this.forgetTimer = setTimeout(() => this.forgetIdle(), KEEP_SENDERS_MS);
-      (this.forgetTimer as { unref?: () => void }).unref?.();
+      this.idleTimer = setTimeout(() => this.forgetAll(), KEEP_IDLE_MS);
+      (this.idleTimer as { unref?: () => void }).unref?.();
     }
+  }
+
+  /** Senders for keys that have been replaced go; the current key's stay while a reconnect may come. */
+  private pruneSenders() {
     const inUse = new Set([...this.scopes.values()].flatMap((s) => [s.sender, s.video]));
     for (const [kid, sender] of this.senders)
       if (!inUse.has(sender) && kid !== this.mineKid) this.senders.delete(kid);
     for (const [kid, sender] of this.videoSenders)
       if (!inUse.has(sender) && kid !== this.mineKid) this.videoSenders.delete(kid);
+  }
+
+  private forgetAll() {
+    if (this.scopes.size > 0) return;
+    this.senders.clear();
+    this.videoSenders.clear();
+    this.receivers.clear();
+    this.videoReceivers.clear();
+    this.mineKid = undefined;
   }
 }
 

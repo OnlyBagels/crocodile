@@ -51,6 +51,36 @@ describe('voice frame keys in the worker', () => {
     keyring.dispose();
   });
 
+  it('refuses a recorded frame again after the listener reconnects, and hears the sender after a reconnect', () => {
+    vi.useFakeTimers();
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    const scopes = new FrameScopes();
+    const frame = new Uint8Array(60).fill(7);
+    scopes.update('alice-1', alice.frameKeys());
+    scopes.update('bob-1', bob.frameKeys());
+    const recorded = scopes.get('alice-1')!.sender!.encrypt(frame);
+    expect(scopes.get('bob-1')!.receivers.get(alice.kid)!.decrypt(recorded)).toEqual(frame);
+    // The host cuts Bob's connection and he reconnects: the frame it recorded is still refused.
+    scopes.drop('bob-1');
+    scopes.update('bob-2', bob.frameKeys());
+    const bobHears = (f: Uint8Array) => scopes.get('bob-2')!.receivers.get(alice.kid)!.decrypt(f);
+    expect(bobHears(recorded)).toBeNull();
+    // Alice reconnects too, and Bob (who stayed) still hears her.
+    scopes.drop('alice-1');
+    scopes.update('alice-2', alice.frameKeys());
+    expect(bobHears(scopes.get('alice-2')!.sender!.encrypt(frame))).toEqual(frame);
+    // Left for longer than a generation, the counters are forgotten with the rest.
+    scopes.drop('bob-2');
+    scopes.drop('alice-2');
+    vi.advanceTimersByTime(60_000);
+    scopes.update('bob-3', bob.frameKeys());
+    expect(scopes.get('bob-3')!.receivers.get(alice.kid)!.decrypt(recorded)).toEqual(frame);
+    alice.dispose();
+    bob.dispose();
+  });
+
   it('forgets our key once the call has been left, or the key replaced', () => {
     vi.useFakeTimers();
     const keyring = new GroupKeyring({ autoRatchet: false });
