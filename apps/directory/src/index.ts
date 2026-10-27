@@ -108,9 +108,8 @@ export class Directory {
       return { ok: false, status: 503, error: 'the directory is full' };
     let verifiedAt = previous && previous.server.url === entry.server.url ? previous.verifiedAt : 0;
     if (this.config.verifyReachability && now - verifiedAt > REVERIFY_MS) {
-      const reachable = await this.probe(entry.server.url, entry.server.id);
-      if (!reachable)
-        return { ok: false, status: 422, error: `could not reach ${entry.server.url}/health` };
+      const problem = await this.probe(entry.server.url, entry.server.id);
+      if (problem) return { ok: false, status: 422, error: problem };
       verifiedAt = now;
     }
     // One URL belongs to one server; a re-keyed server replaces its old entry.
@@ -191,23 +190,36 @@ export class Directory {
   }
 
   /**
-   * Whether `baseUrl`'s /health answers as `expectedId`. The name is resolved here and the
-   * connection pinned to that answer, so it cannot be pointed elsewhere between the check and the
-   * request; redirects are not followed.
+   * Why `baseUrl`'s /health does not answer as `expectedId`, or null if it does. The name is
+   * resolved here and each connection pinned to one of the addresses checked, so it cannot be
+   * pointed elsewhere between the check and the request; redirects are not followed. The whole
+   * probe, name lookup included, gets five seconds.
    */
-  private async probe(baseUrl: string, expectedId: string): Promise<boolean> {
+  private async probe(baseUrl: string, expectedId: string): Promise<string | null> {
+    const unreachable = `could not reach ${baseUrl}/health`;
+    const signal = AbortSignal.timeout(5000);
     try {
       const url = new URL(`${baseUrl.replace(/\/$/, '')}/health`);
+      if (url.username || url.password) return unreachable;
       const host = url.hostname.replace(/^\[|\]$/g, '');
-      const addresses = isIP(host) ? [host] : await (this.config.resolve ?? resolveAll)(host);
-      const address = addresses[0];
-      if (!address) return false;
-      if (!this.config.allowPrivateUrls && addresses.some((a) => isPrivateHost(a))) return false;
-      const body = await get(url, address);
-      return (JSON.parse(body) as { id?: string }).id === expectedId;
+      const addresses = isIP(host)
+        ? [host]
+        : await abortable(signal, (this.config.resolve ?? resolveAll)(host));
+      if (!this.config.allowPrivateUrls && addresses.some((a) => isPrivateHost(a)))
+        return `${url.hostname} resolves to a private address`;
+      // Like a browser, fall back to the next address when one does not connect.
+      for (const address of addresses.slice(0, 4)) {
+        try {
+          const body = await get(url, address, signal);
+          if ((JSON.parse(body) as { id?: string }).id === expectedId) return null;
+        } catch {
+          // try the next
+        }
+      }
     } catch {
-      return false;
+      // fall through
     }
+    return unreachable;
   }
 
   async stop() {
@@ -217,16 +229,27 @@ export class Directory {
   }
 }
 
+/** `work`, unless `signal` fires first. */
+const abortable = <T>(signal: AbortSignal, work: Promise<T>) =>
+  Promise.race([
+    work,
+    new Promise<never>((_, reject) =>
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+    ),
+  ]);
+
 const resolveAll = async (host: string) =>
   (await dnsLookup(host, { all: true })).map((r) => r.address);
 
 /** GETs `url` from `address` (whatever its name says), answering with a short 200 body. */
-function get(url: URL, address: string): Promise<string> {
+function get(url: URL, address: string, signal: AbortSignal): Promise<string> {
   return new Promise((resolve, reject) => {
     const req = (url.protocol === 'https:' ? https : http).request(
       url,
       {
-        timeout: 5000,
+        signal,
+        // Its own connection: a pooled one would be to whatever address an earlier probe checked.
+        agent: false,
         lookup: (_host, options, cb) => {
           const family = isIP(address);
           if (options.all) cb(null, [{ address, family }]);
@@ -243,13 +266,15 @@ function get(url: URL, address: string): Promise<string> {
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
           body += chunk;
-          if (body.length > 4096) req.destroy(new Error('too long'));
+          if (body.length > 4096) {
+            reject(new Error('too long'));
+            req.destroy();
+          }
         });
         res.on('end', () => resolve(body));
         res.on('error', reject);
       },
     );
-    req.on('timeout', () => req.destroy(new Error('timeout')));
     req.on('error', reject);
     req.end();
   });
