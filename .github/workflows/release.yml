@@ -1,28 +1,26 @@
 name: Release
 
-# Push a tag like beta-v0.2.0 (during the beta) or v1.0.0 — or publish a
-# release with such a tag in the GitHub UI — to build installers for every
-# platform, attach them (plus auto-update metadata) to the release, and push
-# server images to GHCR. The app's version is the tag without its prefix.
+# Push a tag like beta-v0.2.0 (during the beta) or v1.0.0 to build installers
+# for every platform, attach them (plus auto-update metadata) to a draft
+# release, publish it, and push server images to GHCR. Releases are immutable
+# once published, so they always start from a tag push (a release published
+# by hand in the GitHub UI could not have its installers added). The app's
+# version is the tag without its prefix.
 # Keep beta releases as normal releases, not pre-releases: the apps' updater,
 # the website and the install scripts all look at the latest release.
 on:
   push:
     tags: ['v*', 'beta-v*']
-  release:
-    types: [published]
 
 # Read-only by default; each job asks only for what it writes.
 permissions:
   contents: read
 
 env:
-  TAG: ${{ github.event.release.tag_name || github.ref_name }}
+  TAG: ${{ github.ref_name }}
 
-# Publishing a release in the UI fires both a tag push and a release event;
-# the push run skips itself (see prepare), so each tag builds once.
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -40,7 +38,6 @@ jobs:
       - id: check
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          EVENT: ${{ github.event_name }}
         run: |
           n='(0|[1-9][0-9]*)'
           if ! [[ "$TAG" =~ ^(beta-)?v$n\.$n\.$n$ ]]; then
@@ -51,8 +48,11 @@ jobs:
           title="Crocodile $version"
           if [[ "$TAG" == beta-* ]]; then title="$title beta"; fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # Published in the UI: its own 'release' run does the work.
-            if [ "$EVENT" = push ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
+            # A draft left by an earlier run is reused. A published release is
+            # immutable, so there is nothing left to build into.
+            if [ "$(gh release view "$TAG" --json isDraft -q .isDraft)" != true ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+            fi
           else
             # Plain tag push: create a draft that every platform uploads into.
             notes="docs/releases/${TAG}.md"
@@ -223,8 +223,7 @@ jobs:
           cp ../../LICENSE ../../NOTICE .
           pnpm publish --access public --no-git-checks --provenance
 
-  # Make a draft (tag-push) release public once every platform is in; keep
-  # whatever title, notes and pre-release choice a UI-published release has.
+  # Make the draft release public once every platform is in.
   publish:
     name: Publish release
     needs: [prepare, installers, cli]

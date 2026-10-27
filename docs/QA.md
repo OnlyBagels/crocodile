@@ -105,8 +105,10 @@ hotspot, a captive/office network that blocks UDP, and packet loss
    whatever branch is checked out (tags can't be moved or deleted):
    `git fetch origin && git tag beta-vX.Y.Z origin/main && git push origin beta-vX.Y.Z`.
    The Release workflow creates a draft with the notes from step 3, uploads
-   every platform's files and publishes it once all are in. (Publishing a release
-   with a new tag in the GitHub UI works too.) It must be a normal release,
+   every platform's files and publishes it once all are in. Releases are
+   immutable once published, so don't publish one by hand in the GitHub UI:
+   its files could not be added. If a release is wrong, fix `main` and tag a
+   new version. It must be a normal release,
    not a pre-release: the apps' updater, the website and the install scripts
    only look at the latest release. Only repository admins can create
    release tags. Watch the workflow and

@@ -152,3 +152,23 @@ export function lastSession(user: TestUser, sessionId: string) {
 }
 
 export type { SignedRecord };
+
+/**
+ * A hostile mesh peer: the authenticated link from `from` to the server
+ * `toId`, to which a test can write any frame, sealed like the real ones.
+ */
+export function meshLinkTo(from: Coordinator, toId: string) {
+  type Internals = {
+    links: Map<string, { ws: { readyState: number } }>;
+    send(link: unknown, frame: unknown): boolean;
+  };
+  const mesh = from.mesh as unknown as Internals;
+  const link = mesh.links.get(toId);
+  if (!link) throw new Error(`no mesh link to ${toId}`);
+  return {
+    send: (frame: unknown) => mesh.send(link, frame),
+    get open() {
+      return link.ws.readyState === 1;
+    },
+  };
+}

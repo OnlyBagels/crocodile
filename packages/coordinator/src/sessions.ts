@@ -1,9 +1,11 @@
-import { isSpaceMember, randomId } from '@crocodile/crypto';
+import { isSpaceMember, keyMatchesUserId, randomId, sign, verifyPayload } from '@crocodile/crypto';
 import {
   DEFAULT_RELAY_SLOTS,
   LIMITS,
+  SIG_DOMAIN,
   parseSessionId,
   peerIds,
+  voiceSigned,
   type FedSessionOp,
   type FedVoice,
   type HostCaps,
@@ -35,6 +37,23 @@ const OP_TIMEOUT_MS = 8000;
 const MEMBER_RECONNECT_GRACE_MS = 10_000;
 /** A member server re-joins a session whose new owner it could not reach this soon. */
 const REJOIN_RETRY_MS = 1000;
+/**
+ * The owner repeats what it says about an occupied room this often, and a
+ * server believes an announcement for this long: an old one that someone
+ * replays does not bring a long-empty room back.
+ */
+const VOICE_REFRESH_MS = 5 * 60_000;
+const VOICE_MAX_AGE_MS = 15 * 60_000;
+/** An announcement dated further ahead than this is refused. */
+const VOICE_AHEAD_MS = 5 * 60_000;
+/**
+ * How long an operation from a server waits for news that the member is connected
+ * to it (the news may still be on its way), and how many may wait at once.
+ */
+const HOSTING_GRACE_MS = 1500;
+const HOSTING_WAITERS_MAX = 200;
+/** A new owner adopts the epoch a member saw; no honest session has changed host this often. */
+const HINT_EPOCH_MAX = 1_000_000;
 
 /**
  * Sessions and host election.
@@ -52,7 +71,8 @@ export class SessionService {
   private lastOwner = new Map<string, string>();
   private lastKnown = new Map<string, Hint>();
   private owned = new Map<string, OwnedSession>();
-  private occupancy = new Map<string, { occ: VoiceOccupancy; owner: string }>();
+  /** `frame` is what the owner signed, kept to hand on as it was (none if we made the entry up). */
+  private occupancy = new Map<string, { occ: VoiceOccupancy; owner: string; frame?: FedVoice }>();
   private pendingOps = new Map<
     string,
     {
@@ -63,7 +83,12 @@ export class SessionService {
     }
   >();
 
-  constructor(private readonly hub: Coordinator) {}
+  private voiceRefresh: ReturnType<typeof setInterval>;
+
+  constructor(private readonly hub: Coordinator) {
+    this.voiceRefresh = setInterval(() => this.refreshVoice(), VOICE_REFRESH_MS);
+    this.voiceRefresh.unref?.();
+  }
 
   get selfId() {
     return this.hub.info.id;
@@ -221,17 +246,90 @@ export class SessionService {
     });
   }
 
+  /** Operations on one session are applied one at a time, in the order they arrived. */
+  private opChains = new Map<string, Promise<void>>();
+  private hostingWaiters = 0;
+
   handleRemoteOp(fromServer: string, frame: FedSessionOp) {
-    try {
-      const ok = this.apply(frame.sessionId, frame.peer, fromServer, frame.op);
-      this.hub.mesh.sendTo(fromServer, { t: 'session_op_res', opId: frame.opId, ok });
-    } catch (err) {
-      const code = err instanceof RpcFailure ? err.code : 'internal';
-      this.hub.mesh.sendTo(fromServer, {
-        t: 'session_op_res',
-        opId: frame.opId,
-        err: { code, message: err instanceof Error ? err.message : String(err) },
+    const reply = (res: { ok: unknown } | { err: unknown }) =>
+      this.hub.mesh.sendTo(fromServer, { t: 'session_op_res', opId: frame.opId, ...res } as never);
+    const fail = (err: unknown) =>
+      reply({
+        err: {
+          code: err instanceof RpcFailure ? err.code : 'internal',
+          message: err instanceof Error ? err.message : String(err),
+        },
       });
+    // Only a join has to be vouched for by presence: whoever else speaks for a
+    // member must be the server it joined from, which `apply` checks. (A member
+    // who disconnects is already gone from the presence when its leave arrives.)
+    const vouched =
+      frame.op.op === 'join' ? this.connectedTo(fromServer, frame.peer) : Promise.resolve(true);
+    void vouched.then((connected) => {
+      if (!connected) {
+        fail(new RpcFailure('forbidden', 'that device is not connected to the sending server'));
+        return;
+      }
+      const previous = this.opChains.get(frame.sessionId) ?? Promise.resolve();
+      const run: Promise<void> = previous.then(async () => {
+        try {
+          reply({ ok: await this.runRemoteOp(fromServer, frame) });
+        } catch (err) {
+          fail(err);
+        }
+      });
+      this.opChains.set(frame.sessionId, run);
+      void run.then(() => {
+        if (this.opChains.get(frame.sessionId) === run) this.opChains.delete(frame.sessionId);
+      });
+    });
+  }
+
+  /**
+   * Whether the server may add this device to a session: it has told the mesh
+   * the device is connected to it. News of a device that has only just connected
+   * can still be on its way, so it is waited for briefly.
+   */
+  private async connectedTo(server: string, peer: string): Promise<boolean> {
+    const presence = this.hub.presence;
+    if (presence.hosts(server, peer)) return true;
+    if (this.hostingWaiters >= HOSTING_WAITERS_MAX) return false;
+    this.hostingWaiters += 1;
+    try {
+      const until = Date.now() + HOSTING_GRACE_MS;
+      while (Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 50));
+        if (presence.hosts(server, peer)) return true;
+      }
+      return false;
+    } finally {
+      this.hostingWaiters -= 1;
+    }
+  }
+
+  /** The owner's side of an operation: whoever joins must still be allowed, and so must the host they name. */
+  private async runRemoteOp(fromServer: string, frame: FedSessionOp): Promise<unknown> {
+    let op = frame.op;
+    if (op.op === 'join') {
+      await this.checkAccess(peerIds.user(frame.peer), frame.sessionId);
+      if (op.hint) {
+        const { hint, ...rest } = op;
+        op = (await this.hintAllowed(frame.sessionId, hint)) ? op : rest;
+      }
+    }
+    return this.apply(frame.sessionId, frame.peer, fromServer, op);
+  }
+
+  /** A hint is believed only if the host and backup it names may be in the session. */
+  private async hintAllowed(sessionId: string, hint: Hint): Promise<boolean> {
+    if (hint.epoch < 0 || hint.epoch > HINT_EPOCH_MAX) return false;
+    try {
+      for (const peer of [hint.host, hint.backup]) {
+        if (peer) await this.checkAccess(peerIds.user(peer), sessionId);
+      }
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -303,6 +401,8 @@ export class SessionService {
 
     if (!s) return {};
     const member = s.state.members.find((m) => m.peer === peer);
+    // Only the server a member joined from speaks for it afterwards.
+    if (member && s.memberServer.get(peer) !== serverId) return {};
     switch (op.op) {
       case 'update':
         if (member) {
@@ -423,7 +523,10 @@ export class SessionService {
   /** sessionId -> when its latest announcement was made (kept after it empties). */
   private voiceAt = new Map<string, number>();
   /** Rooms that emptied in the last hour, so a server that missed it hears it in a snapshot. */
-  private emptied = new Map<string, { occ: VoiceOccupancy; owner: string; at: number }>();
+  private emptied = new Map<
+    string,
+    { occ: VoiceOccupancy; owner: string; at: number; frame?: FedVoice }
+  >();
   private voiceSeq = 0;
 
   private announceVoice(state: SessionState) {
@@ -438,25 +541,56 @@ export class SessionService {
     this.voiceSeq = Math.max(Date.now(), this.voiceSeq + 1);
     const at = this.voiceSeq;
     this.voiceAt.set(state.id, at);
-    this.setOccupancy(state.id, occ, this.selfId);
-    this.hub.mesh.forward({ t: 'voice', sessionId: state.id, occ, owner: this.selfId, at });
+    const parts = { sessionId: state.id, occ, owner: this.selfId, at };
+    const frame: FedVoice = {
+      t: 'voice',
+      ...parts,
+      key: this.hub.info.key,
+      sig: sign(this.hub.identity, SIG_DOMAIN.voice, voiceSigned(parts)),
+    };
+    this.setOccupancy(state.id, occ, this.selfId, frame);
+    this.hub.mesh.forward(frame);
   }
 
-  /** An announcement from another server. Returns true if it was news. */
+  /** Say again what we have said about the rooms we own that are occupied. */
+  private refreshVoice() {
+    for (const s of this.owned.values())
+      if (s.state.members.length > 0) this.announceVoice(s.state);
+  }
+
+  /**
+   * An announcement from another server: signed by the owner of the room, which
+   * is the server we also take to own it, and recent. Returns true if it was news.
+   */
   applyRemoteVoice(frame: FedVoice): boolean {
     if (frame.owner === this.selfId || typeof frame.at !== 'number') return false;
+    const now = Date.now();
+    if (!(frame.at <= now + VOICE_AHEAD_MS) || !(frame.at >= now - VOICE_MAX_AGE_MS)) return false;
     if ((this.voiceAt.get(frame.sessionId) ?? 0) >= frame.at) return false;
+    const scope = parseSessionId(frame.sessionId);
+    if (
+      scope?.kind !== 'voice' ||
+      scope.spaceId !== frame.occ.spaceId ||
+      scope.channelId !== frame.occ.channelId ||
+      this.ownerOf(frame.sessionId) !== frame.owner
+    )
+      return false;
+    if (
+      !keyMatchesUserId(frame.key, frame.owner) ||
+      !verifyPayload(frame.key, SIG_DOMAIN.voice, voiceSigned(frame), frame.sig)
+    )
+      return false;
     this.voiceAt.set(frame.sessionId, frame.at);
-    this.setOccupancy(frame.sessionId, frame.occ, frame.owner);
+    this.setOccupancy(frame.sessionId, frame.occ, frame.owner, frame);
     return true;
   }
 
-  private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string) {
+  private setOccupancy(sessionId: string, occ: VoiceOccupancy, owner: string, frame?: FedVoice) {
     if (occ.members.length === 0) {
       this.occupancy.delete(sessionId);
-      this.emptied.set(sessionId, { occ, owner, at: Date.now() });
+      this.emptied.set(sessionId, { occ, owner, at: Date.now(), frame });
     } else {
-      this.occupancy.set(sessionId, { occ, owner });
+      this.occupancy.set(sessionId, { occ, owner, frame });
       this.emptied.delete(sessionId);
     }
     if (this.voiceAt.size > 100_000) {
@@ -472,17 +606,13 @@ export class SessionService {
     return [...this.occupancy.values()].map((o) => o.occ).filter((o) => wanted.has(o.spaceId));
   }
 
-  /** Every room we know is occupied, for a server that just linked to us. */
+  /** Every room we know is occupied, as its owner announced it, for a server that just linked to us. */
   voiceFrames(): FedVoice[] {
-    const hourAgo = Date.now() - 3600_000;
-    for (const [id, e] of this.emptied) if (e.at < hourAgo) this.emptied.delete(id);
-    return [...this.occupancy, ...this.emptied].map(([sessionId, o]) => ({
-      t: 'voice',
-      sessionId,
-      occ: o.occ,
-      owner: o.owner,
-      at: this.voiceAt.get(sessionId) ?? 0,
-    }));
+    const now = Date.now();
+    for (const [id, e] of this.emptied) if (e.at < now - 3600_000) this.emptied.delete(id);
+    return [...this.occupancy.values(), ...this.emptied.values()]
+      .map((o) => o.frame)
+      .filter((f): f is FedVoice => !!f && f.at >= now - VOICE_MAX_AGE_MS);
   }
 
   // -------------------------------------------------------------------------
@@ -556,6 +686,7 @@ export class SessionService {
 
   close() {
     clearTimeout(this.rebalanceTimer);
+    clearInterval(this.voiceRefresh);
     for (const t of this.pendingLeaves.values()) clearTimeout(t);
     for (const t of this.orphanTimers.values()) clearTimeout(t);
     for (const s of this.owned.values()) if (s.timer) clearTimeout(s.timer);

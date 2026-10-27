@@ -64,6 +64,17 @@ export interface TurnLimits {
   bytesPerSecond: number;
   /** Longest a single grant may last. */
   maxGrantMs: number;
+  /**
+   * Peer addresses one allocation may hold permissions for. A call has a few
+   * peers, each with a few candidate addresses.
+   */
+  maxPermissions: number;
+  /** Channel bindings one allocation may hold. */
+  maxChannels: number;
+  /** Refresh, CreatePermission and ChannelBind requests one allocation may make at once… */
+  controlBurst: number;
+  /** …and per second after that. Requests over it go unanswered. */
+  controlPerSecond: number;
 }
 
 export const defaultTurnLimits: TurnLimits = {
@@ -71,7 +82,15 @@ export const defaultTurnLimits: TurnLimits = {
   maxAllocationsPerUser: 8,
   bytesPerSecond: 96 * 1024,
   maxGrantMs: 60 * 60_000,
+  maxPermissions: 128,
+  maxChannels: 64,
+  controlBurst: 100,
+  controlPerSecond: 20,
 };
+
+/** How long a permission lasts without renewal, and a channel binding (RFC 8656). */
+const PERMISSION_MS = 300_000;
+const CHANNEL_MS = 600_000;
 
 interface Attr {
   type: number;
@@ -271,8 +290,13 @@ interface Allocation {
   permissions: Map<string, number>;
   channels: Map<number, { address: string; port: number }>;
   channelByPeer: Map<string, number>;
+  /** When each channel binding lapses unless it is renewed. */
+  channelUntil: Map<number, number>;
   tokens: number;
   lastRefill: number;
+  /** Token bucket for control requests (see `TurnLimits.controlBurst`). */
+  controlTokens: number;
+  controlRefill: number;
   bytesRelayed: number;
 }
 
@@ -705,8 +729,11 @@ export class TurnServer {
       permissions: new Map(),
       channels: new Map(),
       channelByPeer: new Map(),
+      channelUntil: new Map(),
       tokens: this.limits.bytesPerSecond,
       lastRefill: now,
+      controlTokens: this.limits.controlBurst,
+      controlRefill: now,
       bytesRelayed: 0,
     };
     socket.on('message', (data, from) => this.onPeerPacket(a, data, from));
@@ -741,6 +768,7 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
+    if (!this.takeControl(a)) return;
     a.grantExpiresAt = Math.max(a.grantExpiresAt, auth.grantExpiresAt);
     const lifetime = this.lifetime(m, this.grantEnd(a.userId, a.grantExpiresAt));
     if (lifetime === 0) this.remove(a, 'released');
@@ -763,6 +791,7 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(437, 'Allocation Mismatch')], auth.key);
       return;
     }
+    if (!this.takeControl(a)) return;
     const peers = m.attrs
       .filter((x) => x.type === ATTR.xorPeerAddress)
       .map((x) => parseXorAddress(x.value, m.txId));
@@ -775,7 +804,15 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(403, 'Forbidden')], auth.key);
       return;
     }
-    for (const p of peers) a.permissions.set(addrKey(p!.address), Date.now() + 300_000);
+    // Renewing a permission costs nothing; only addresses not yet held count.
+    const added = new Set(
+      peers.map((p) => addrKey(p!.address)).filter((k) => !a.permissions.has(k)),
+    );
+    if (a.permissions.size + added.size > this.limits.maxPermissions) {
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
+      return;
+    }
+    for (const p of peers) a.permissions.set(addrKey(p!.address), Date.now() + PERMISSION_MS);
     this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
@@ -783,6 +820,7 @@ export class TurnServer {
     const auth = this.authenticate(via, m, rinfo);
     if (!auth) return;
     const a = this.allocations.get(tuple);
+    if (a && !this.takeControl(a)) return;
     const ch = attrOf(m, ATTR.channelNumber);
     const peerAttr = attrOf(m, ATTR.xorPeerAddress);
     const peer = peerAttr && parseXorAddress(peerAttr, m.txId);
@@ -805,9 +843,19 @@ export class TurnServer {
       this.reply(via, m, rinfo, CLASS.error, [errorAttr(400, 'Bad Request')], auth.key);
       return;
     }
+    if (
+      (!existing && a.channels.size >= this.limits.maxChannels) ||
+      (!a.permissions.has(addrKey(peer.address)) &&
+        a.permissions.size >= this.limits.maxPermissions)
+    ) {
+      this.reply(via, m, rinfo, CLASS.error, [errorAttr(508, 'Insufficient Capacity')], auth.key);
+      return;
+    }
+    const now = Date.now();
     a.channels.set(number, peer);
     a.channelByPeer.set(key, number);
-    a.permissions.set(addrKey(peer.address), Date.now() + 300_000);
+    a.channelUntil.set(number, now + CHANNEL_MS);
+    a.permissions.set(addrKey(peer.address), now + PERMISSION_MS);
     this.reply(via, m, rinfo, CLASS.success, [], auth.key);
   }
 
@@ -839,6 +887,19 @@ export class TurnServer {
     return (a.permissions.get(addrKey(address)) ?? 0) > Date.now();
   }
 
+  /** Whether an allocation may make another control request; if not, it goes unanswered. */
+  private takeControl(a: Allocation): boolean {
+    const now = Date.now();
+    a.controlTokens = Math.min(
+      this.limits.controlBurst,
+      a.controlTokens + ((now - a.controlRefill) / 1000) * this.limits.controlPerSecond,
+    );
+    a.controlRefill = now;
+    if (a.controlTokens < 1) return false;
+    a.controlTokens -= 1;
+    return true;
+  }
+
   /** Token bucket shared by both directions of an allocation. */
   private spend(a: Allocation, bytes: number): boolean {
     const now = Date.now();
@@ -856,7 +917,18 @@ export class TurnServer {
   private expire() {
     const now = Date.now();
     for (const a of [...this.allocations.values()]) {
-      if (a.expiresAt < now || this.grantEnd(a.userId, a.grantExpiresAt) < now) this.remove(a);
+      if (a.expiresAt < now || this.grantEnd(a.userId, a.grantExpiresAt) < now) {
+        this.remove(a);
+        continue;
+      }
+      for (const [address, until] of a.permissions) if (until < now) a.permissions.delete(address);
+      for (const [number, until] of a.channelUntil) {
+        if (until >= now) continue;
+        const peer = a.channels.get(number);
+        if (peer) a.channelByPeer.delete(`${addrKey(peer.address)}|${peer.port}`);
+        a.channels.delete(number);
+        a.channelUntil.delete(number);
+      }
     }
   }
 
