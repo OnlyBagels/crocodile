@@ -3,6 +3,7 @@ import {
   E2EEnvelope,
   GroupPayload,
   SealedPayload,
+  messageSession,
   peerIds,
   streamIds,
   utf8,
@@ -1297,7 +1298,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const out: ChatMessage[] = [];
     for (const [ch, after] of Object.entries(since)) {
       if (!allowed.has(ch)) continue;
-      out.push(...(await this.ctx.messages.since(ch, after, 500)));
+      const held = await this.ctx.messages.since(ch, after, 500);
+      out.push(...held.filter((m) => messageSession(m) === this.sessionId));
     }
     await this.sendMessages(to, out);
   }

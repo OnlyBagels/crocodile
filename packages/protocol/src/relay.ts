@@ -139,6 +139,12 @@ export const ChatMessage = z.object({
   id: z.string().min(10).max(40),
   /** Channel id, or the DM session id for direct messages. */
   ch: z.string().max(200),
+  /**
+   * Session the message was written for. Channel ids are only unique within
+   * a space, so a space's messages name it; a direct message leaves this out
+   * because its `ch` is already the session id.
+   */
+  sid: z.string().max(200).optional(),
   author: userId,
   /** Author's Ed25519 key; userId must equal hash(key). */
   key: z.string(),
@@ -153,6 +159,9 @@ export const ChatMessage = z.object({
   sig: z.string(),
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
+
+/** The session a message belongs to: the space's, or for a direct message its own `ch`. */
+export const messageSession = (m: Pick<ChatMessage, 'ch' | 'sid'>): string => m.sid ?? m.ch;
 
 /** Plaintext of a sealed envelope. */
 export const SealedPayload = z.discriminatedUnion('type', [

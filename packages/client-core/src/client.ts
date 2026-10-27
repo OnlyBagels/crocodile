@@ -54,6 +54,7 @@ import {
   type LinkBox,
   type MailItem,
   SealedPayload,
+  messageSession,
   utf8,
   type SealedBox,
   type HostCaps,
@@ -1346,7 +1347,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
     if (!changed || changed.kind === 'space' || changed.kind === 'member') {
       const spaces: Record<string, SpaceView> = {};
-      for (const r of this.records.list('space:')) {
+      // A text channel id names the channel everywhere on this device, so two
+      // spaces can't both use one. The space joined first keeps it (the
+      // member record is signed by this user, so it can't be moved), and one
+      // this user owns comes before any other.
+      const joinedAt = (r: { key: string; body: unknown }) => {
+        const id = r.key.slice('space:'.length);
+        if ((r.body as SpaceBody).owner === me) return 0;
+        return this.records.get(recordKey.member(id, me))?.version ?? Infinity;
+      };
+      const claimed = new Set<string>();
+      const ordered = this.records
+        .list('space:')
+        .sort((a, b) => joinedAt(a) - joinedAt(b) || (a.key < b.key ? -1 : 1));
+      for (const r of ordered) {
         const id = r.key.slice('space:'.length);
         const body = r.body as SpaceBody;
         if (body.deleted || !isSpaceMember(this.records, id, me)) continue;
@@ -1360,7 +1374,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           name: body.name,
           icon: body.icon,
           owner: body.owner,
-          channels: body.channels,
+          channels: body.channels.filter((c) => {
+            if (c.kind !== 'text') return true;
+            if (claimed.has(c.id)) return false;
+            claimed.add(c.id);
+            return true;
+          }),
           members: [...members],
           bans: body.bans,
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
@@ -2820,7 +2839,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...(this.state.messages[channel] ?? []).map((m) => m.ts),
     );
     const ts = latest + 1 > now && latest + 1 <= now + MAX_AHEAD_MS - 60_000 ? latest + 1 : now;
-    const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
+    const message = createChatMessage(
+      this.identity!,
+      { ch: channel, ...(sessionId === channel ? {} : { sid: sessionId }), body: text, ...opts },
+      ts,
+    );
     await created?.(message, sessionId);
     await this.platform.messages.put(message);
     if (opts.deleted && opts.edits) await this.files?.forgetMessage(opts.edits, this.userId);
@@ -2971,6 +2994,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean> {
     if (!verifyChatMessage(message)) return false;
     if (!this.historyChannels(sessionId).includes(message.ch)) return false;
+    // Channel ids are only unique within a space: a message written for another
+    // space does not belong here, even under the same channel id.
+    if (messageSession(message) !== sessionId) return false;
     if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author))
       return false;
     if (message.ts > (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS) return false;

@@ -361,8 +361,10 @@ effort. Everything below is automatic.
   find key frames:
   `header ‖ ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ headerLen ‖ 0xC9`.
 - **Text.** Messages are signed by their author (so history can be re-shared
-  verifiably), padded (Padmé) to hide their exact length and encrypted with
-  the text chain.
+  verifiably) together with the space they were written in, so one space's
+  message is not taken for another's that reuses a channel id. They are
+  padded (Padmé) to hide their exact length and encrypted with the text chain.
+  A device gives a text channel id to the space it joined first.
 - **At rest.** Identity, prekeys and message history are encrypted in local
   storage with a key protected by the OS keychain.
 - **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC;

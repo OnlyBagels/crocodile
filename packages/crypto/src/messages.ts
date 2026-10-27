@@ -12,6 +12,8 @@ export function createChatMessage(
   identity: Identity,
   fields: {
     ch: string;
+    /** The space's session id; leave out for a direct message. */
+    sid?: string;
     body: string;
     replyTo?: string;
     edits?: string;
@@ -23,6 +25,7 @@ export function createChatMessage(
   const unsigned = {
     id: timeId(now),
     ch: fields.ch,
+    ...(fields.sid ? { sid: fields.sid } : {}),
     author: identity.userId,
     key: identity.publicKey,
     ts: now,

@@ -15,6 +15,7 @@ import {
   DELETED_PROFILE_NAME,
   recordKey,
   sessionIds,
+  type ChatMessage,
   type DeviceBody,
   type SpaceBody,
 } from '@crocodile/protocol';
@@ -1358,5 +1359,120 @@ describe('leaving', () => {
     });
     expect(bob.records.ingest(marker)).toBe(true);
     expect(bob.state.spaces[space]?.members).not.toContain(alice.userId);
+  });
+});
+
+describe('channel ids belong to one space', () => {
+  /** Mallory's own space, with a text channel that reuses `channelId`. */
+  async function reusing(mallory: CrocodileClient, channelId: string) {
+    const spaceId = await mallory.createSpace('Other');
+    const current = mallory.records.get(recordKey.space(spaceId))!;
+    const body = current.body as SpaceBody;
+    const record = signRecord(
+      mallory.identity!,
+      'space',
+      recordKey.space(spaceId),
+      {
+        ...body,
+        channels: body.channels.map((c) => (c.kind === 'text' ? { ...c, id: channelId } : c)),
+      },
+      current.version + 1,
+    );
+    await mallory.link!.request('records.put', { record });
+    mallory.records.ingest(record);
+    return { spaceId, code: await mallory.createInvite(spaceId) };
+  }
+
+  it("does not hand one space's history to another that reuses a channel id", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const mallory = await signUp(makeClient(net, coord), 'mallory');
+    const carol = await signUp(makeClient(net, coord), 'carol');
+    const spaceA = await alice.createSpace('Private');
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    const ch = channelOf(alice, spaceA);
+    await waitFor(
+      () => alice.state.sessions[sessionIds.space(spaceA)]?.peers.includes(bob.userId),
+      12000,
+    );
+    await bob.openChannel(ch);
+    await alice.sendMessage(ch, 'for the members of A only');
+    await waitFor(() => bodies(bob, ch).length === 1, 12000, 'bob has it');
+
+    // Bob keeps the history but is no longer in A when Mallory's space comes.
+    await bob.leaveSpace(spaceA);
+    const other = await reusing(mallory, ch);
+    await bob.joinWithInvite(other.code);
+    await waitFor(() => bob.sessionOfChannel(ch), 5000, 'bob has the channel');
+    // Mallory goes, so Bob is the one Carol asks.
+    await mallory.shutdown();
+    await bob.sendMessage(ch, 'said in the other space');
+
+    // Carol comes later and asks whoever is there for the channel's history.
+    // Her client would drop what isn't for her; see what is sent to her.
+    const sent: string[] = [];
+    const holder = carol as unknown as Record<string, (s: string, m: ChatMessage) => unknown>;
+    const accept = holder.acceptMessage!.bind(carol);
+    holder.acceptMessage = (sid, m) => (sent.push(m.body), accept(sid, m));
+    await carol.joinWithInvite(other.code);
+    await waitFor(() => sent.includes('said in the other space'), 12000, 'history');
+    await new Promise((r) => setTimeout(r, 500));
+    expect(sent.filter((b) => b !== 'said in the other space')).toEqual([]);
+  });
+
+  it('does not take a message signed for one space as part of another', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const mallory = await signUp(makeClient(net, coord), 'mallory');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('Private');
+    await mallory.joinWithInvite(await alice.createInvite(spaceA));
+    const ch = channelOf(alice, spaceA);
+    await alice.sendMessage(ch, 'said in A');
+    const [said] = await alice.platform.messages.page(ch, { limit: 10 });
+
+    const other = await reusing(mallory, ch);
+    // Alice is in both spaces, so she is a member where it is replayed.
+    await alice.joinWithInvite(other.code);
+    await bob.joinWithInvite(other.code);
+    await waitFor(() => bob.state.spaces[other.spaceId]?.members.includes(alice.userId), 5000);
+    const accept = (
+      bob as unknown as Record<string, (s: string, m: unknown) => Promise<boolean>>
+    ).acceptMessage!.bind(bob);
+    expect(await accept(sessionIds.space(other.spaceId), said)).toBe(false);
+    expect(bodies(bob, ch)).toEqual([]);
+    // In A itself the very same message is fine.
+    expect(said!.sid).toBe(sessionIds.space(spaceA));
+  });
+
+  it('gives a channel id to the space joined first', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const mallory = await signUp(makeClient(net, coord), 'mallory');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('A');
+    const ch = channelOf(alice, spaceA);
+    const other = await reusing(mallory, ch);
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    await bob.joinWithInvite(other.code);
+    const texts = (id: string) =>
+      bob.state.spaces[id]!.channels.filter((c) => c.kind === 'text').map((c) => c.id);
+    expect(texts(spaceA)).toEqual([ch]);
+    expect(texts(other.spaceId)).toEqual([]);
+    expect(bob.sessionOfChannel(ch)).toBe(sessionIds.space(spaceA));
+
+    // What Mallory says in her space doesn't turn up in A's channel.
+    await bob.openChannel(ch);
+    await waitFor(
+      () => mallory.state.sessions[sessionIds.space(other.spaceId)]?.peers.includes(bob.userId),
+      12000,
+    );
+    await mallory.sendMessage(ch, 'from the other space');
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(bodies(bob, ch)).toEqual([]);
   });
 });
