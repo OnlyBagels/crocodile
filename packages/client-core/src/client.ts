@@ -2131,7 +2131,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             (await this.link!.request('relay.request', { sessionId: sid })).grant,
         },
         historyChannels: (sid) => this.historyChannels(sid),
-        acceptMessage: (sid, m) => this.acceptMessage(sid, m),
+        acceptMessage: (sid, m, history) => this.acceptMessage(sid, m, history),
+        admits: (sid, m, history) => this.admits(sid, m, history),
         outbox: {
           pending: (sid) => this.outbox.forSession(sid),
           acked: (ids) => this.onAcked(ids),
@@ -2825,14 +2826,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async loadOlderPage(channel: string): Promise<boolean> {
     const oldest = (this.state.messages[channel] ?? [])[0];
-    const page = this.ofSession(
-      channel,
-      await this.platform.messages.page(channel, {
-        before: oldest?.ts,
-        beforeId: oldest?.id,
+    let before = oldest && { ts: oldest.ts, id: oldest.id };
+    let page: ChatMessage[] = [];
+    // The store is keyed by channel id and may hold another space's messages
+    // under it: read on past a page that is all someone else's.
+    for (let round = 0; round < 20 && page.length === 0; round++) {
+      const raw = await this.platform.messages.page(channel, {
+        before: before?.ts,
+        beforeId: before?.id,
         limit: 100,
-      }),
-    );
+      });
+      if (raw.length === 0) return false;
+      page = this.ofSession(channel, raw);
+      before = { ts: raw[0]!.ts, id: raw[0]!.id };
+    }
     if (page.length === 0) return false;
     this.store.set((s) => {
       const shown = s.messages[channel] ?? [];
@@ -3024,15 +3031,29 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (sessionId) this.sessions.get(sessionId)?.sendGroup({ type: 'typing', ch: channel });
   }
 
-  private async acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean> {
+  /**
+   * Whether a message may be taken in for a session: signed, for one of its
+   * channels, from someone allowed. Channel ids are only unique within a
+   * space, so a message written for another space does not belong here, even
+   * under the same channel id. Messages from before they named their space
+   * are only taken from history another member passes on, never live.
+   */
+  private admits(sessionId: string, message: ChatMessage, history = false): boolean {
     if (!verifyChatMessage(message)) return false;
     if (!this.historyChannels(sessionId).includes(message.ch)) return false;
-    // Channel ids are only unique within a space: a message written for another
-    // space does not belong here, even under the same channel id.
-    if (messageSession(message) !== sessionId) return false;
+    if (messageSession(message) !== sessionId && !(history && message.sid === undefined))
+      return false;
     if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author))
       return false;
-    if (message.ts > (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS) return false;
+    return message.ts <= (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS;
+  }
+
+  private async acceptMessage(
+    sessionId: string,
+    message: ChatMessage,
+    history = false,
+  ): Promise<boolean> {
+    if (!this.admits(sessionId, message, history)) return false;
     const fresh = await this.platform.messages.put(message);
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);

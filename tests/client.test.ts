@@ -1451,7 +1451,7 @@ describe('channel ids belong to one space', () => {
     expect(said!.sid).toBe(sessionIds.space(spaceA));
   });
 
-  it('refuses a space message that names no session', async () => {
+  it('takes a space message that names no session only from history', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();
     const alice = await signUp(makeClient(net, coord), 'alice');
@@ -1461,18 +1461,73 @@ describe('channel ids belong to one space', () => {
     const ch = channelOf(alice, spaceA);
     const session = sessionIds.space(spaceA);
     const accept = (
-      bob as unknown as Record<string, (s: string, m: ChatMessage) => Promise<boolean>>
+      bob as unknown as Record<string, (s: string, m: ChatMessage, h?: boolean) => Promise<boolean>>
     ).acceptMessage!.bind(bob);
     // What older versions wrote: the channel, and no session.
-    expect(await accept(session, createChatMessage(alice.identity!, { ch, body: 'old' }))).toBe(
-      false,
-    );
+    const old = createChatMessage(alice.identity!, { ch, body: 'old' });
+    expect(await accept(session, old)).toBe(false);
+    expect(await accept(session, old, true)).toBe(true);
+    // ...and not as part of another session, history or not.
+    const elsewhere = createChatMessage(alice.identity!, { ch, body: 'elsewhere' });
+    expect(await accept('space:other', elsewhere, true)).toBe(false);
     expect(
       await accept(session, createChatMessage(alice.identity!, { ch, sid: session, body: 'new' })),
     ).toBe(true);
     // The session is signed with the rest.
     const tampered = createChatMessage(alice.identity!, { ch, sid: session, body: 'x' });
     expect(await accept(session, { ...tampered, sid: 'space:other', body: 'x' })).toBe(false);
+  });
+
+  it('does not confirm a message nobody kept', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('A');
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    const ch = channelOf(alice, spaceA);
+    const session = sessionIds.space(spaceA);
+    await waitFor(() => alice.state.sessions[session]?.peers.includes(bob.userId), 12000);
+    await bob.openChannel(ch);
+    await alice.openChannel(ch);
+    const confirmed: string[] = [];
+    const holder = alice as unknown as { onAcked(ids: string[]): void };
+    const onAcked = holder.onAcked.bind(alice);
+    holder.onAcked = (ids) => (confirmed.push(...ids), onAcked(ids));
+    // A message from an older version, sent live: Bob refuses it.
+    const old = createChatMessage(alice.identity!, { ch, body: 'old' });
+    const link = (
+      alice as unknown as { sessions: Map<string, { sendGroup(p: unknown): boolean }> }
+    ).sessions.get(session)!;
+    expect(link.sendGroup({ type: 'message', message: old })).toBe(true);
+    await alice.sendMessage(ch, 'new');
+    await waitFor(() => bodies(bob, ch).includes('new'), 12000, 'bob has the new one');
+    const sent = alice.state.messages[ch]!.find((m) => m.body === 'new')!;
+    await waitFor(() => confirmed.includes(sent.id), 12000, 'confirmed');
+    expect(bodies(bob, ch)).not.toContain('old');
+    expect(confirmed).not.toContain(old.id);
+  });
+
+  it("reads on past a page that is all another space's", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob = await signUp(makeClient(net, coord), 'bob');
+    const spaceA = await alice.createSpace('A');
+    await bob.joinWithInvite(await alice.createInvite(spaceA));
+    const ch = channelOf(alice, spaceA);
+    const session = sessionIds.space(spaceA);
+    const at = 1_700_000_000_000;
+    const put = (sid: string, ts: number, body: string) =>
+      bob.platform.messages.put(createChatMessage(alice.identity!, { ch, sid, body }, ts));
+    await put(session, at, 'oldest');
+    // The store is keyed by channel id: 120 of another space's lie between.
+    for (let i = 0; i < 120; i++) await put('space:other', at + 1000 + i, `foreign ${i}`);
+    await put(session, at + 5000, 'newest');
+    await bob.openChannel(ch);
+    expect(bodies(bob, ch)).toEqual(['newest']);
+    expect(await bob.loadOlder(ch)).toBe(true);
+    expect(bodies(bob, ch)).toEqual(['oldest', 'newest']);
   });
 
   it('gives a channel id to the space joined first', async () => {
