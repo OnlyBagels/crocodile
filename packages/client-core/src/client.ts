@@ -3505,10 +3505,9 @@ async function fetchRecords(link: CoordinatorLink, keys: string[]): Promise<Sign
     const res = await link.request('records.get', { keys: rest });
     out.push(...res.records);
     if (!res.more) return out;
-    // A server that says there is more and gives none would have us ask for ever.
-    if (res.records.length === 0) throw new Error('incomplete answer');
-    const got = new Set(res.records.map((r) => r.key));
-    rest = rest.filter((k) => !got.has(k));
+    // The server says where it got to; one that says none would have us ask for ever.
+    if (!res.next || res.next >= rest.length) throw new Error('incomplete answer');
+    rest = rest.slice(res.next);
   }
 }
 
@@ -3520,7 +3519,7 @@ async function fetchList(link: CoordinatorLink, prefix: string): Promise<SignedR
     const res = await link.request('records.list', { prefix, ...(after ? { after } : {}) });
     out.push(...res.records);
     if (!res.more) return out;
-    const last = res.records.at(-1)?.key;
+    const last = res.next ?? res.records.at(-1)?.key;
     if (last === undefined || (after !== undefined && last <= after))
       throw new Error('incomplete answer');
     after = last;

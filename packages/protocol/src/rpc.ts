@@ -307,10 +307,16 @@ export const RpcParams = {
 
 export interface RpcMethods {
   'records.put': { accepted: boolean; current: SignedRecord | null; reason?: string };
-  /** `more`: the answer was cut to fit one frame; ask again for the keys not yet returned. */
-  'records.get': { records: SignedRecord[]; more?: boolean };
-  /** `more`: the answer was cut to fit one frame; ask again with `after` the last key returned. */
-  'records.list': { records: SignedRecord[]; more?: boolean };
+  /**
+   * `more`: the answer was cut to fit one frame; ask again for the keys from index `next` on.
+   * Keys before it were answered, or have no record to give.
+   */
+  'records.get': { records: SignedRecord[]; more?: boolean; next?: number };
+  /**
+   * `more`: there are records after these. Ask again with `after` the last key returned, or `next`
+   * if given (a page that held nothing to return).
+   */
+  'records.list': { records: SignedRecord[]; more?: boolean; next?: string };
   'records.subscribe': Record<string, never>;
   'users.search': { profiles: SignedRecord<'profile'>[] };
   'friends.incoming': { records: SignedRecord<'friends'>[] };

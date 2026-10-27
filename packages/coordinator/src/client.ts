@@ -28,9 +28,12 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
-import { RateLimiter, RpcFailure, cutToFrame, sendJson } from './util';
+import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson } from './util';
 
 /** Record prefixes, and users' presence, one connection may follow. */
+/** Keys looked up at a time for `records.get`, and unreadable pages `records.list` looks past. */
+const GET_WINDOW = 20;
+const LIST_SKIPS = 4;
 const MAX_SUBSCRIPTIONS = 20_000;
 
 let nextConnId = 1;
@@ -268,9 +271,25 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
-        const found = await hub.dist.get(keys.filter((k) => this.mayReadKey(k)));
-        // As many as fit in one frame; the asker comes back for the rest.
-        return cutToFrame(found.filter((r) => this.mayRead(r)));
+        // A few keys at a time, in the order asked, until a frame is full: what is not sent is
+        // not looked up, and the asker goes on from `next`.
+        const records: SignedRecord[] = [];
+        let size = 1;
+        for (let i = 0; i < keys.length; i += GET_WINDOW) {
+          const window = keys.slice(i, i + GET_WINDOW);
+          const order = new Map(window.map((k, j) => [k, i + j]));
+          const found = (await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
+            .filter((r) => this.mayRead(r))
+            .sort((a, b) => order.get(a.key)! - order.get(b.key)!);
+          for (const r of found) {
+            const cost = jsonBytes(r) + 1;
+            if (records.length && size + cost > FRAME_BUDGET)
+              return { records, more: true, next: order.get(r.key)! };
+            records.push(r);
+            size += cost;
+          }
+        }
+        return { records };
       }
       case 'records.list': {
         const { prefix, limit, after } = p as unknown as {
@@ -279,13 +298,18 @@ export class ClientConnection implements ClientHandle {
           after?: string;
         };
         // In key order, so that `after` names where to go on from. A page may hold nothing this
-        // user may read (another's notes, say) and still have others after it: go on to the next.
+        // user may read (another's notes, say) and still have others after it: look at a few more,
+        // then hand back where we got to.
         let cursor = after;
-        for (let rounds = 0; ; rounds++) {
+        for (let rounds = 1; ; rounds++) {
           const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
           const readable = found.records.filter((r) => this.mayRead(r));
           const last = found.records.at(-1)?.key;
-          if (readable.length === 0 && found.more && last !== undefined && rounds < 20) {
+          if (readable.length === 0 && found.more) {
+            // Nowhere further to go from here.
+            if (last === undefined || (cursor !== undefined && last <= cursor))
+              return { records: [] };
+            if (rounds >= LIST_SKIPS) return { records: [], more: true, next: last };
             cursor = last;
             continue;
           }

@@ -85,7 +85,7 @@ export class RpcFailure extends Error {
  */
 export const FRAME_BUDGET = 512 * 1024;
 
-const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+export const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
 /**
  * Splits items into runs whose JSON fits in `budget` bytes and `max` items.

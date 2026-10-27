@@ -73,8 +73,7 @@ export const FedRequestParams = {
   rec_get: z.object({ keys: z.array(z.string().max(200)).max(1000) }),
   rec_list: z.object({
     prefix: z.string().min(3).max(200),
-    // One more than a client may ask for: a server asks for one extra to see if there is more.
-    limit: z.number().int().min(1).max(5001).optional(),
+    limit: z.number().int().min(1).max(5000).optional(),
     after: z.string().max(200).optional(),
   }),
   rec_term: z.object({

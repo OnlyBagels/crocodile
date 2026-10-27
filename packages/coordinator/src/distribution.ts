@@ -63,6 +63,9 @@ const RETRY_TRIES = 5;
  * asks their owners for the rest, keeps watches for its clients on shards it
  * doesn't own, and moves records when the set of live servers changes.
  */
+const greatest = (keys: string[]) =>
+  keys.length ? keys.reduce((a, b) => (b > a ? b : a)) : undefined;
+
 export class Distribution {
   /** Records fetched from other servers for checks and membership tests. */
   private cache = new Map<string, { record: SignedRecord; at: number }>();
@@ -377,12 +380,13 @@ export class Distribution {
       // An owner that cut its answer says nothing past the last (well-signed) key it gave.
       const good = new Set(valid.map((r) => r.key));
       for (const a of answers) {
-        const last = a.more
-          ? (a.records ?? []).reduce((k, r) => (good.has(r.key) && r.key > k ? r.key : k), '')
-          : '';
-        if (!last) continue;
+        if (!a.more) continue;
+        const keys = (a.records ?? []).map((r) => r.key);
+        // The last well-signed key, or failing that the last one it gave.
+        const bound = greatest(keys.filter((k) => good.has(k))) ?? greatest(keys);
+        if (bound === undefined) continue;
         more.value = true;
-        if (more.upTo === undefined || last < more.upTo) more.upTo = last;
+        if (more.upTo === undefined || bound < more.upTo) more.upTo = bound;
       }
     }
     const newest = new Map<string, SignedRecord>();
@@ -461,7 +465,8 @@ export class Distribution {
     const shard = shardOfPrefix(prefix);
     const store = this.hub.records.store;
     const owned = !shard || this.ownsShard(shard);
-    // One more than asked for, to know whether there is more.
+    // One more than asked for, to know whether there is more (and 5000 is what a peer takes).
+    limit = Math.min(limit, 4999);
     const local = owned ? store.listPrefix(prefix, limit + 1, after) : [];
     const page = (records: SignedRecord[], cut = false) => ({
       records: records.slice(0, limit),
@@ -476,7 +481,9 @@ export class Distribution {
       cut,
     );
     if (!remote) return page(owned ? local : store.listPrefix(prefix, limit + 1, after));
-    // An owner that ignored `after` (an older server) must not bring back what was already given.
+    // An owner that ignored `after` (an older server) must not bring back what was already given,
+    // nor cut the page short at a key before it.
+    if (after !== undefined && cut.upTo !== undefined && cut.upTo <= after) cut.upTo = undefined;
     const merged = Distribution.merge(
       local,
       remote.filter((r) => r.key.startsWith(prefix) && (after === undefined || r.key > after)),

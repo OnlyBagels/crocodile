@@ -55,14 +55,29 @@ describe('client RPC answers', () => {
     expect(first.records.length).toBeLessThan(keys.length);
     expect(Buffer.byteLength(JSON.stringify(first.records))).toBeLessThan(1024 * 1024);
 
-    // Asking again for what is left gets there.
+    // Asking again from where it says it got to reaches the rest, once each.
+    expect(first.next).toBeGreaterThan(0);
     const got = new Set(first.records.map((r) => r.key));
-    const second = await reader.conn.request('records.get', {
-      keys: keys.filter((k) => !got.has(k)),
-    });
+    const second = await reader.conn.request('records.get', { keys: keys.slice(first.next) });
     for (const r of second.records) got.add(r.key);
     expect(second.records.length).toBeGreaterThan(0);
     expect(got.size).toBeGreaterThan(first.records.length);
+  });
+
+  it('are not slowed by keys that have no record', async () => {
+    const { users, reader } = await server(4);
+    const missing = Array.from({ length: 30 }, (_, i) =>
+      recordKey.profile(`${'a'.repeat(25)}${i}`),
+    );
+    const keys = [
+      ...missing,
+      ...users.map((u) => recordKey.profile(u.identity.userId)),
+      ...missing,
+    ];
+    const first = await reader.conn.request('records.get', { keys });
+    // The keys with nothing behind them are over and done with, not asked about again.
+    expect(first.more).toBe(true);
+    expect(first.next).toBeGreaterThanOrEqual(missing.length);
   });
 
   it('page a long list by key, past the most one request may ask for', async () => {
@@ -128,6 +143,16 @@ describe('client RPC answers', () => {
     // Carol may read none of them: she is told so, not that there is more.
     const hers = await carol.conn.request('records.list', { prefix: 'note:', limit: 2 });
     expect(hers).toEqual({ records: [] });
+    // With a page of one, she looks at a few and is told where to go on from.
+    const step = await carol.conn.request('records.list', { prefix: 'note:', limit: 1 });
+    expect(step).toMatchObject({ records: [], more: true });
+    expect(step.next).toBeDefined();
+    const rest = await carol.conn.request('records.list', {
+      prefix: 'note:',
+      limit: 1,
+      after: step.next!,
+    });
+    expect(rest).toEqual({ records: [] });
   });
 
   it('are asked for again by a client until it has every profile', async () => {
