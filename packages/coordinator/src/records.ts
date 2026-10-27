@@ -88,6 +88,11 @@ export class RecordService {
     private readonly quotas: RecordQuotas = defaultRecordQuotas,
   ) {}
 
+  /** Unread notes held for the recipient of a note. */
+  private notesHeld(note: SignedRecord): number {
+    return this.store.countByTerm(`note-to:${note.key.split(':')[1]}`);
+  }
+
   /** Why a new record would exceed its author's quota, if it would. */
   private overQuota(record: SignedRecord): string | undefined {
     const q = this.quotas;
@@ -117,12 +122,10 @@ export class RecordService {
           ? `at most ${q.membershipsPerUser} spaces per account`
           : undefined;
       }
-      case 'note': {
-        const to = record.key.split(':')[1];
-        return this.store.countByTerm(`note-to:${to}`) >= q.notesPerUser
+      case 'note':
+        return this.notesHeld(record) >= q.notesPerUser
           ? `at most ${q.notesPerUser} unread notes per account`
           : undefined;
-      }
       default:
         return undefined;
     }
@@ -185,15 +188,19 @@ export class RecordService {
     }
     // Owners each take a user's notes up to the quota on their own, so a copy from another
     // server is let in past it, but only so far: every server stops at the same ceiling.
-    if (!opts.fresh && grows && record.kind === 'note') {
-      const to = record.key.split(':')[1];
-      if (this.store.countByTerm(`note-to:${to}`) >= this.quotas.notesPerUser * NOTE_COPIES_MAX)
-        return {
-          accepted: false,
-          current,
-          reason: 'quota reached: too many notes for this account',
-        };
-    }
+    // (A deletion marker takes no place in the count, so it is always let in.)
+    if (
+      !opts.fresh &&
+      grows &&
+      record.kind === 'note' &&
+      !(record.body as RecordBodies['note']).deleted &&
+      this.notesHeld(record) >= this.quotas.notesPerUser * NOTE_COPIES_MAX
+    )
+      return {
+        accepted: false,
+        current,
+        reason: 'quota reached: too many notes for this account',
+      };
     const seq = this.store.put(record);
     for (const fn of this.listeners) {
       try {

@@ -143,8 +143,10 @@ picture size.
   keys), but opening many connections gives many accounts, each with a
   profile of up to about 360 KB, and the mailbox quotas are per user id too.
   Servers cap connections per address, which slows this down but does not
-  stop it. Copies of notes from other owners are let in up to twice the
-  per-account quota.
+  stop it. Anyone can also send notes, so a user's quota of unread notes can
+  be filled by others, and their friend requests then wait. Copies of notes
+  from other owners are let in up to twice the per-account quota, so owners
+  can end up holding different notes beyond it.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

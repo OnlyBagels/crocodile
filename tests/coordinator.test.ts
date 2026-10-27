@@ -1188,6 +1188,13 @@ describe('sealed friends lists and notes', () => {
     expect(results.map((r) => r.accepted)).toEqual([true, true, true, true, false, false]);
     expect(results[4]!.reason).toMatch(/quota reached/);
     expect(c.store.countByTerm(`note-to:${bob.identity.userId}`)).toBe(4);
+    // A deletion marker takes no place, so it is let in at the ceiling: for a note that is not
+    // here (or the note would come back), and for one that is.
+    const marker = (n: ReturnType<typeof noteTo>) =>
+      signRecord(bob.identity, 'note', n.key, { boxes: [], deleted: true }, n.version + 1);
+    const unseen = noteTo(bob);
+    expect(c.records.put(marker(unseen), { fresh: false, origin: 'peer' }).accepted).toBe(true);
+    expect(c.records.put(marker(copies[0]!), { fresh: false, origin: 'peer' }).accepted).toBe(true);
   });
 
   it("writes only a user's own records for them, notes apart", async () => {
@@ -1204,6 +1211,30 @@ describe('sealed friends lists and notes', () => {
       /written by their author/,
     );
     expect(c.records.get(profile.key)).toBeUndefined();
+    // Nor a device, nor a space, signed by someone else.
+    const device = signRecord(stranger, 'device', recordKey.device(stranger.userId, 'dev1'), {
+      userId: stranger.userId,
+      deviceId: 'dev1',
+      name: 'x',
+      platform: 'bot',
+      prekey: createPrekey().bundle,
+    });
+    await expect(mallory.conn.request('records.put', { record: device })).rejects.toThrow(
+      /written by their author/,
+    );
+    const nonce = randomId(8);
+    const spaceId = spaceIdFor(stranger.publicKey, nonce);
+    const space = signRecord(stranger, 'space', recordKey.space(spaceId), {
+      name: 'x',
+      owner: stranger.userId,
+      nonce,
+      admins: [],
+      bans: [],
+      channels: [],
+    });
+    await expect(mallory.conn.request('records.put', { record: space })).rejects.toThrow(
+      /written by their author/,
+    );
     // A note is signed by a key of its own and may come from anyone.
     expectAccepted(await mallory.conn.request('records.put', { record: noteTo(alice) }));
     // And a user's own go in as before.
