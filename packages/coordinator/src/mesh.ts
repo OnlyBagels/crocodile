@@ -181,6 +181,13 @@ export class Mesh {
     if (added) this.scheduleMaintain();
   }
 
+  /** A server not heard from in long: stop dialling it, unless it is linked or one we were told of. */
+  forgetKnown(id: string) {
+    const url = this.known.get(id)?.url;
+    if (this.links.has(id) || (url && this.staticUrls.includes(url))) return;
+    this.known.delete(id);
+  }
+
   // -------------------------------------------------------------------------
   // Overlay
   // -------------------------------------------------------------------------
@@ -699,7 +706,7 @@ export class Mesh {
         void this.hub.dist.onPush(frame.record);
         return;
       case 'beacon':
-        if (this.hub.membership.onBeacon(frame)) this.forward(frame, peerId);
+        if (this.hub.membership.onBeacon(frame, peerId)) this.forward(frame, peerId);
         return;
       case 'presence':
         if (this.hub.presence.applyRemote(frame)) this.forward(frame, peerId);

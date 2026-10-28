@@ -60,6 +60,7 @@ import {
   type LinkBox,
   type MailItem,
   SealedPayload,
+  messageSession,
   utf8,
   type SealedBox,
   type HostCaps,
@@ -115,6 +116,7 @@ import type { ConnectionRoute, LinkStats } from './relay-link';
 import { Outbox } from './outbox';
 import { RecordCache } from './records-cache';
 import type { RankedServer } from './server-selection';
+import { messageKey } from './message-key';
 import { StateStore } from './store';
 import type { OutgoingVideo, ScreenQuality, ScreenRequest, VoiceEngine } from './voice';
 
@@ -348,6 +350,8 @@ export interface ClientState {
   voice: Record<string, VoiceOccupancy>;
   sessions: Record<string, SessionView>;
   dms: string[];
+  /** People we don't know who started a conversation: nothing is shared until we accept. */
+  dmRequests: string[];
   messages: Record<string, MessageView[]>;
   unread: Record<string, number>;
   typing: Record<string, Record<string, number>>;
@@ -391,6 +395,10 @@ export interface ClientState {
   files: Record<string, FileView>;
 }
 
+/** People waiting on us: friend requests and message requests, each person once. */
+export const pendingRequests = (s: Pick<ClientState, 'friends' | 'dmRequests'>) =>
+  new Set([...s.friends.incoming, ...s.dmRequests]).size;
+
 export type ClientEvents = {
   /** `update`: an edit or deletion of an earlier message, not a new one. */
   message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
@@ -404,6 +412,8 @@ export type ClientEvents = {
 const APP_VERSION_FALLBACK = '0.1.0';
 /** How far ahead of our clock a message's time may be before it is refused. */
 const MAX_AHEAD_MS = 5 * 60_000;
+/** Conversations from people we don't know that wait for an answer (the newest are kept). */
+const DM_REQUESTS_MAX = 50;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
@@ -490,6 +500,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       voice: {},
       sessions: {},
       dms: [],
+      dmRequests: [],
       messages: {},
       unread: {},
       typing: {},
@@ -572,10 +583,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}),
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
+    const dmRequests = (await this.platform.kv.get<string[]>('dm-requests')) ?? [];
     await this.loadDevice();
     await this.outbox.load();
     await this.files?.load();
-    this.store.set({ settings, dms, deviceId: this.deviceId });
+    this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
@@ -768,6 +780,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('device-id');
     await this.platform.kv.delete('outbox');
     await this.platform.kv.delete('friend-list');
+    await this.platform.kv.delete('dms');
+    await this.platform.kv.delete('dm-requests');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
@@ -788,6 +802,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       sessions: {},
       messages: {},
       dms: [],
+      dmRequests: [],
       devices: [],
       voiceSession: null,
       outgoingCall: null,
@@ -944,12 +959,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const [mine, incoming, own] = await Promise.all([
       link.request('spaces.mine', {}),
       link.request('friends.incoming', {}),
-      link.request('records.get', { keys: [recordKey.profile(me), recordKey.friends(me)] }),
+      fetchRecords(link, [recordKey.profile(me), recordKey.friends(me)]),
     ]);
-    const myDevices = await link.request('records.list', { prefix: recordKey.devicePrefix(me) });
+    const myDevices = await fetchList(link, recordKey.devicePrefix(me));
     this.records.ingestAll([
-      ...own.records,
-      ...myDevices.records,
+      ...own,
+      ...myDevices,
       ...mine.spaces,
       ...mine.members,
       // Requests from apps that still write readable lists.
@@ -958,8 +973,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     // Notes that came while we were away, then whatever our list still owes
     // the server (a change made offline, or moving an old readable list over)
     // and our friends (notes not sent yet).
-    const notes = await link.request('records.list', { prefix: recordKey.notePrefix(me) });
-    await this.readNotes(notes.records);
+    await this.readNotes(await fetchList(link, recordKey.notePrefix(me)));
     await this.queueFriends(() => this.syncFriendList()).catch((err) =>
       this.log('friends list not saved', { err: String(err) }),
     );
@@ -968,8 +982,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const spaceIds = mine.spaces.map((s) => s.key.slice('space:'.length));
     // Members of our spaces, so we can verify peers and show member lists.
     for (const id of spaceIds) {
-      const members = await link.request('records.list', { prefix: recordKey.memberPrefix(id) });
-      this.records.ingestAll(members.records);
+      this.records.ingestAll(await fetchList(link, recordKey.memberPrefix(id)));
     }
     await this.subscribe([
       recordKey.profile(me),
@@ -993,19 +1006,37 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (this.outbox.forSession(sid).length) this.ensureSession(sid);
     }
     for (const s of this.sessions.values())
-      void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
-    // Mail held for this device while it was offline, anywhere in the mesh.
-    // Signed for this server, so the others send their mail for us here too.
+      void s
+        .join({ fresh: true })
+        .catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+    this.fetchMail();
+    this.scheduleMail();
+  }
+
+  /**
+   * Mail held for this device while it was offline, anywhere in the mesh. Signed for this
+   * server, so the others send their mail for us here too.
+   */
+  private fetchMail() {
     const server = this.state.server?.info.id;
-    void link
-      .request(
+    void this.link
+      ?.request(
         'mail.fetch',
         server
           ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
           : {},
       )
       .catch(() => {});
-    this.scheduleMail();
+  }
+
+  private ackMail(ids: string[]) {
+    if (!ids.length) return;
+    void this.link
+      ?.request('mail.ack', {
+        ids,
+        proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids }),
+      })
+      .catch(() => {});
   }
 
   // ===========================================================================
@@ -1014,16 +1045,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Newest message of a channel that did not come from our own offline queue. */
   private async syncCursor(channel: string): Promise<number> {
-    const page = await this.platform.messages.page(channel, { limit: 200 });
+    const page = this.ofSession(
+      channel,
+      await this.platform.messages.page(channel, { limit: 200 }),
+    );
     for (let i = page.length - 1; i >= 0; i--) {
-      if (!this.outbox.has(page[i]!.id)) return page[i]!.ts;
+      const m = page[i]!;
+      if (!(m.author === this.userId && this.outbox.has(m.id))) return m.ts;
     }
     return 0;
   }
 
+  /**
+   * What the store holds for a channel that was written for its session. The
+   * store is keyed by channel id, so it can still hold another space's
+   * messages under an id this space now uses (after leaving that space).
+   * Messages from before they named their session are kept.
+   */
+  private ofSession(channel: string, messages: ChatMessage[]) {
+    const session = this.sessionOfChannel(channel);
+    return messages.filter((m) => !m.sid || m.sid === session);
+  }
+
   private withDelivery(page: ChatMessage[]): MessageView[] {
     return page.map((m) => {
-      const e = this.outbox.get(m.id);
+      const e = m.author === this.userId ? this.outbox.get(m.id) : undefined;
       return e ? { ...m, pending: true, mailed: !!e.mailed } : m;
     });
   }
@@ -1035,10 +1081,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       const messages = { ...s.messages };
       let changed = false;
       for (const [ch, list] of Object.entries(messages)) {
-        if (!list.some((m) => done.has(m.id))) continue;
-        messages[ch] = list.map((m) =>
-          done.has(m.id) ? { ...m, pending: false, mailed: false } : m,
-        );
+        const mine = (m: MessageView) => m.author === this.userId && done.has(m.id);
+        if (!list.some(mine)) continue;
+        messages[ch] = list.map((m) => (mine(m) ? { ...m, pending: false, mailed: false } : m));
         changed = true;
       }
       return changed ? { messages } : {};
@@ -1109,7 +1154,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           return {
             messages: {
               ...s.messages,
-              [sessionId]: list.map((m) => (mailed.has(m.id) ? { ...m, mailed: true } : m)),
+              [sessionId]: list.map((m) =>
+                mailed.has(m.id) && m.author === this.userId ? { ...m, mailed: true } : m,
+              ),
             },
           };
         });
@@ -1124,11 +1171,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private async mailTargets(userIds: string[], max = 20) {
     const out: { peer: string; prekey: DeviceBody['prekey'] }[] = [];
     for (const userId of new Set(userIds)) {
-      const res = await this.link!.request('records.list', {
-        prefix: recordKey.devicePrefix(userId),
-      });
-      this.records.ingestAll(res.records);
-      for (const r of res.records as SignedRecord<'device'>[]) {
+      const found = await fetchList(this.link!, recordKey.devicePrefix(userId));
+      this.records.ingestAll(found);
+      for (const r of found as SignedRecord<'device'>[]) {
         const verified = this.records.get(r.key) as SignedRecord<'device'> | undefined;
         if (!verified || verified.sig !== r.sig || verified.body.revoked) continue;
         const peer = peerIds.make(userId, verified.body.deviceId);
@@ -1163,16 +1208,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
         const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
         if (this.state.friends.blocked.includes(other)) continue;
+        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+        // queue still holds it, and goes through once we accept). Only the sender can ask.
+        // What another device of ours sent is our own conversation, whoever it was to.
+        if (sender !== this.userId && !this.knowsForDm(other)) {
+          if (other === sender) this.addDmRequest(other);
+          continue;
+        }
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length)
-      await this.link
-        ?.request('mail.ack', {
-          ids: done,
-          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
-        })
-        .catch(() => {});
+    this.ackMail(done);
   }
 
   private async ensureProfilePublished() {
@@ -1191,8 +1237,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const missing = ids.filter((id) => id !== this.userId);
     for (const part of chunks(missing, 400)) {
       const keys = part.map((id) => recordKey.profile(id));
-      const res = await this.link!.request('records.get', { keys });
-      this.records.ingestAll(res.records);
+      this.records.ingestAll(await fetchRecords(this.link!, keys));
     }
     await this.subscribe(missing.map((id) => recordKey.profile(id)));
     const presence: PresenceEntry[] = [];
@@ -1214,6 +1259,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...s.friends.incoming,
       ...s.friends.outgoing,
       ...s.dms,
+      ...s.dmRequests,
     ]);
     for (const space of Object.values(s.spaces)) for (const m of space.members) set.add(m);
     return [...set];
@@ -1244,10 +1290,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const missing = userIds.filter((id) => !this.records.get(recordKey.profile(id)));
     if (!missing.length || !link) return;
     for (const part of chunks(missing, 400)) {
-      const res = await link
-        .request('records.get', { keys: part.map((id) => recordKey.profile(id)) })
-        .catch(() => null);
-      if (res) this.records.ingestAll(res.records);
+      const found = await fetchRecords(
+        link,
+        part.map((id) => recordKey.profile(id)),
+      ).catch(() => null);
+      if (found) this.records.ingestAll(found);
     }
     for (const part of chunks(missing, 2000))
       await link
@@ -1353,7 +1400,20 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
     if (!changed || changed.kind === 'space' || changed.kind === 'member') {
       const spaces: Record<string, SpaceView> = {};
-      for (const r of this.records.list('space:')) {
+      // A text channel id names the channel everywhere on this device, so two
+      // spaces can't both use one. The space joined first keeps it (the
+      // member record is signed by this user, so it can't be moved), and one
+      // this user owns comes before any other.
+      const joinedAt = (r: { key: string; body: unknown }) => {
+        const id = r.key.slice('space:'.length);
+        if ((r.body as SpaceBody).owner === me) return 0;
+        return this.records.get(recordKey.member(id, me))?.version ?? Infinity;
+      };
+      const claimed = new Set<string>();
+      const ordered = this.records
+        .list('space:')
+        .sort((a, b) => joinedAt(a) - joinedAt(b) || (a.key < b.key ? -1 : 1));
+      for (const r of ordered) {
         const id = r.key.slice('space:'.length);
         const body = r.body as SpaceBody;
         if (body.deleted || !isSpaceMember(this.records, id, me)) continue;
@@ -1367,13 +1427,31 @@ export class CrocodileClient extends Emitter<ClientEvents> {
           name: body.name,
           icon: body.icon,
           owner: body.owner,
-          channels: body.channels,
+          channels: body.channels.filter((c) => {
+            if (c.kind !== 'text') return true;
+            if (claimed.has(c.id)) return false;
+            claimed.add(c.id);
+            return true;
+          }),
           members: [...members],
           bans: body.bans,
           admins: spaceAuthorityValid(id, body) ? body.admins : [],
         };
       }
       patch.spaces = spaces;
+      // A channel that is no longer this space's (it left, or another space
+      // has the id now) must not keep showing what was loaded for it.
+      const own = new Map<string, string>();
+      for (const sp of Object.values(spaces)) for (const c of sp.channels) own.set(c.id, sp.id);
+      const stale = Object.values(this.state.spaces)
+        .flatMap((sp) => sp.channels.filter((c) => c.kind === 'text').map((c) => [c.id, sp.id]))
+        .filter(([ch, sp]) => own.get(ch!) !== sp)
+        .map(([ch]) => ch!)
+        .filter((ch) => this.state.messages[ch]);
+      if (stale.length > 0)
+        patch.messages = Object.fromEntries(
+          Object.entries(this.state.messages).filter(([ch]) => !stale.includes(ch)),
+        );
       // Leave sessions of spaces we no longer belong to.
       for (const [sid, session] of this.sessions) {
         const scope = parseSessionId(sid);
@@ -1473,6 +1551,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private refreshFriends() {
     void this.platform.kv.set('friend-list', toB64u(encodeFriendList(this.friendList)));
     this.store.set({ friends: this.friendsView() });
+    // A request from someone we blocked is gone; from someone we now know, taken up.
+    for (const u of this.state.dmRequests) {
+      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u);
+      else if (this.knowsForDm(u)) {
+        // Joined now if we can; otherwise it is ours, and their invite or our opening it joins.
+        if (this.state.link === 'connected') void this.acceptDmRequest(u).catch(() => {});
+        else this.addDm(u);
+      }
+    }
     for (const s of this.sessions.values()) s.recheckPeers();
     void this.fetchProfiles(this.relevantUsers()).catch(() => {});
   }
@@ -1817,10 +1904,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       this.wantedTimer = undefined;
       const batch = [...this.wanted].slice(0, 400);
       for (const k of batch) this.wanted.delete(k);
-      void this.link
-        ?.request('records.get', { keys: batch })
-        .then((res) => this.records.ingestAll(res.records))
-        .catch(() => {});
+      if (this.link)
+        void fetchRecords(this.link, batch)
+          .then((found) => this.records.ingestAll(found))
+          .catch(() => {});
     }, 20);
   }
 
@@ -1844,10 +1931,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.link!.request('records.subscribe', {
       prefixes: [recordKey.space(spaceId), recordKey.memberPrefix(spaceId)],
     });
-    const members = await this.link!.request('records.list', {
-      prefix: recordKey.memberPrefix(spaceId),
-    });
-    this.records.ingestAll(members.records);
+    this.records.ingestAll(await fetchList(this.link!, recordKey.memberPrefix(spaceId)));
     const spaceIds = Object.keys(this.state.spaces);
     const { voice } = await this.link!.request('voice.watch', { spaceIds });
     for (const v of voice) this.setOccupancy(v);
@@ -2085,6 +2169,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         seal: (to, pt) => this.sealTo(to, pt),
         open: (box) => this.openBox(box),
         isAllowedPeer: (sid, p) => this.isAllowedPeer(sid, p),
+        isMemberPeer: (sid, p) => this.isMemberPeer(sid, p),
         refreshPeer: (sid, p) => this.refreshPeer(sid, p),
         relay: {
           allowed: () => this.state.settings.allowServerRelay,
@@ -2092,7 +2177,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
             (await this.link!.request('relay.request', { sessionId: sid })).grant,
         },
         historyChannels: (sid) => this.historyChannels(sid),
-        acceptMessage: (sid, m) => this.acceptMessage(sid, m),
+        acceptMessage: (sid, m, history) => this.acceptMessage(sid, m, history),
+        admits: (sid, m, history) => this.admits(sid, m, history),
         outbox: {
           pending: (sid) => this.outbox.forSession(sid),
           acked: (ids) => this.onAcked(ids),
@@ -2462,17 +2548,21 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async refreshPeer(sessionId: string, peer: string) {
     const scope = parseSessionId(sessionId);
-    if (!scope || !this.link) return;
+    if (!scope) return;
+    if (!this.link) throw new Error('not connected');
     const userId = peerIds.user(peer);
     const keys = [recordKey.device(userId, peerIds.device(peer))];
     if (scope.kind !== 'dm')
       keys.push(recordKey.member(scope.spaceId, userId), recordKey.space(scope.spaceId));
-    const res = await this.link.request('records.get', { keys });
-    this.records.ingestAll(res.records);
+    this.records.ingestAll(await fetchRecords(this.link, keys));
   }
 
-  /** `peer` is `<userId>.<deviceId>`; bare user ids are accepted too. */
-  isAllowedPeer(sessionId: string, peer: string): boolean {
+  /**
+   * Whether `peer` belongs in the session: a member of the space (not banned), or one of the two
+   * in a direct conversation, on a device that has not been removed. `peer` is
+   * `<userId>.<deviceId>`; bare user ids are accepted too.
+   */
+  isMemberPeer(sessionId: string, peer: string): boolean {
     const scope = parseSessionId(sessionId);
     if (!scope) return false;
     const userId = peerIds.user(peer);
@@ -2481,11 +2571,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         SignedRecord<'device'> | undefined;
       if (device?.body.revoked) return false;
     }
-    if (scope.kind === 'dm') {
-      if (!scope.users.includes(userId)) return false;
-      return !this.state.friends.blocked.includes(userId);
-    }
+    if (scope.kind === 'dm') return scope.users.includes(userId);
     return isSpaceMember(this.records, scope.spaceId, userId);
+  }
+
+  /**
+   * Whether we deal with `peer` in the session: a member we have not blocked. Their keys are
+   * taken and ours are given, their messages are kept and files are served to them only then.
+   */
+  isAllowedPeer(sessionId: string, peer: string): boolean {
+    return (
+      this.isMemberPeer(sessionId, peer) && !this.state.friends.blocked.includes(peerIds.user(peer))
+    );
   }
 
   // ===========================================================================
@@ -2824,12 +2921,54 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const scope = parseSessionId(sessionId);
     if (!scope || scope.kind !== 'dm' || !scope.users.includes(this.userId)) return;
     if (this.state.friends.blocked.includes(from)) return;
+    // Someone we don't know waits as a request: we don't join, so they learn nothing of us.
+    if (!this.knowsForDm(from)) return this.addDmRequest(from);
     this.addDm(from);
     const session = this.ensureSession(sessionId);
     if (!session.state) await session.join().catch(() => {});
   }
 
+  /**
+   * Whether a conversation with them is ours to join: a friend, someone we asked to be friends
+   * with, or one we already have.
+   */
+  private knowsForDm(userId: string) {
+    const f = this.state.friends;
+    return (
+      userId === this.userId ||
+      f.friends.includes(userId) ||
+      f.outgoing.includes(userId) ||
+      this.state.dms.includes(userId)
+    );
+  }
+
+  private addDmRequest(userId: string) {
+    if (this.state.dmRequests.includes(userId)) return;
+    const dmRequests = [userId, ...this.state.dmRequests].slice(0, DM_REQUESTS_MAX);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+    void this.fetchProfiles([userId]).catch(() => {});
+  }
+
+  private dropDmRequest(userId: string) {
+    if (!this.state.dmRequests.includes(userId)) return;
+    const dmRequests = this.state.dmRequests.filter((u) => u !== userId);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+  }
+
+  /** Takes up a conversation someone started: from now on we join it and they can reach us. */
+  async acceptDmRequest(userId: string) {
+    await this.openDm(userId);
+  }
+
+  declineDmRequest(userId: string) {
+    this.dropDmRequest(userId);
+  }
+
   private addDm(userId: string) {
+    // Opening a conversation, however it came about, answers a request.
+    this.dropDmRequest(userId);
     if (this.state.dms.includes(userId)) return;
     const dms = [userId, ...this.state.dms];
     this.store.set({ dms });
@@ -2875,7 +3014,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   async openChannel(channel: string) {
     this.store.set((s) => ({ activeChannel: channel, unread: { ...s.unread, [channel]: 0 } }));
     if (!this.state.messages[channel]) {
-      const page = await this.platform.messages.page(channel, { limit: 100 });
+      const page = this.ofSession(
+        channel,
+        await this.platform.messages.page(channel, { limit: 100 }),
+      );
       this.store.set((s) => ({
         messages: { ...s.messages, [channel]: foldEdits(this.withDelivery(page)) },
       }));
@@ -2896,16 +3038,25 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async loadOlderPage(channel: string): Promise<boolean> {
     const oldest = (this.state.messages[channel] ?? [])[0];
-    const page = await this.platform.messages.page(channel, {
-      before: oldest?.ts,
-      beforeId: oldest?.id,
-      limit: 100,
-    });
+    let before = oldest && { ts: oldest.ts, id: oldest.id };
+    let page: ChatMessage[] = [];
+    // The store is keyed by channel id and may hold another space's messages
+    // under it: read on past a page that is all someone else's.
+    for (let round = 0; round < 20 && page.length === 0; round++) {
+      const raw = await this.platform.messages.page(channel, {
+        before: before?.ts,
+        beforeId: before?.id,
+        limit: 100,
+      });
+      if (raw.length === 0) return false;
+      page = this.ofSession(channel, raw);
+      before = { ts: raw[0]!.ts, id: raw[0]!.id };
+    }
     if (page.length === 0) return false;
     this.store.set((s) => {
       const shown = s.messages[channel] ?? [];
-      const have = new Set(shown.map((m) => m.id));
-      const older = this.withDelivery(page.filter((m) => !have.has(m.id)));
+      const have = new Set(shown.map(messageKey));
+      const older = this.withDelivery(page.filter((m) => !have.has(messageKey(m))));
       return { messages: { ...s.messages, [channel]: foldEdits([...older, ...shown]) } };
     });
     return true;
@@ -2940,7 +3091,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...(this.state.messages[channel] ?? []).map((m) => m.ts),
     );
     const ts = latest + 1 > now && latest + 1 <= now + MAX_AHEAD_MS - 60_000 ? latest + 1 : now;
-    const message = createChatMessage(this.identity!, { ch: channel, body: text, ...opts }, ts);
+    const message = createChatMessage(
+      this.identity!,
+      { ch: channel, ...(sessionId === channel ? {} : { sid: sessionId }), body: text, ...opts },
+      ts,
+    );
     await created?.(message, sessionId);
     await this.platform.messages.put(message);
     if (opts.deleted && opts.edits) await this.files?.forgetMessage(opts.edits, this.userId);
@@ -3088,12 +3243,29 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     if (sessionId) this.sessions.get(sessionId)?.sendGroup({ type: 'typing', ch: channel });
   }
 
-  private async acceptMessage(sessionId: string, message: ChatMessage): Promise<boolean> {
+  /**
+   * Whether a message may be taken in for a session: signed, for one of its
+   * channels, from someone allowed. Channel ids are only unique within a
+   * space, so a message written for another space does not belong here, even
+   * under the same channel id. Messages from before they named their space
+   * are only taken from history another member passes on, never live.
+   */
+  private admits(sessionId: string, message: ChatMessage, history = false): boolean {
     if (!verifyChatMessage(message)) return false;
     if (!this.historyChannels(sessionId).includes(message.ch)) return false;
+    if (messageSession(message) !== sessionId && !(history && message.sid === undefined))
+      return false;
     if (message.author !== this.userId && !this.isAllowedPeer(sessionId, message.author))
       return false;
-    if (message.ts > (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS) return false;
+    return message.ts <= (this.config.now?.() ?? Date.now()) + MAX_AHEAD_MS;
+  }
+
+  private async acceptMessage(
+    sessionId: string,
+    message: ChatMessage,
+    history = false,
+  ): Promise<boolean> {
+    if (!this.admits(sessionId, message, history)) return false;
     const fresh = await this.platform.messages.put(message);
     if (!fresh) return false;
     this.addToTimeline(message.ch, message);
@@ -3137,7 +3309,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       return {
         messages: {
           ...s.messages,
-          [channel]: foldEdits([...list.filter((m) => m.id !== message.id), message]),
+          [channel]: foldEdits([
+            ...list.filter((m) => messageKey(m) !== messageKey(message)),
+            message,
+          ]),
         },
       };
     });
@@ -3509,13 +3684,18 @@ export function defaultDeviceName(platform: string): string {
 
 /** Applies edit/delete messages onto the originals they reference. */
 export function foldEdits(messages: MessageView[]): MessageView[] {
-  const sorted = [...messages].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1));
+  const sorted = [...messages].sort(
+    (a, b) =>
+      a.ts - b.ts ||
+      (a.id === b.id ? 0 : a.id < b.id ? -1 : 1) ||
+      (a.author === b.author ? 0 : a.author < b.author ? -1 : 1),
+  );
   const byId = new Map<string, MessageView>();
   const out: MessageView[] = [];
   for (const m of sorted) {
     if (m.edits) {
-      const original = byId.get(m.edits);
-      if (original && original.author === m.author) {
+      const original = byId.get(messageKey({ author: m.author, id: m.edits }));
+      if (original) {
         const updated: MessageView = {
           ...original,
           body: m.deleted ? '' : m.body,
@@ -3523,15 +3703,44 @@ export function foldEdits(messages: MessageView[]): MessageView[] {
           deleted: m.deleted,
         };
         if (m.deleted) delete updated.file;
-        byId.set(original.id, updated);
+        byId.set(messageKey(original), updated);
         out[out.indexOf(original)] = updated;
       }
       continue;
     }
-    byId.set(m.id, m);
+    byId.set(messageKey(m), m);
     out.push(m);
   }
   return out;
+}
+
+/** Records by key. A server cuts a long answer to fit one frame, so ask again for what is left. */
+async function fetchRecords(link: CoordinatorLink, keys: string[]): Promise<SignedRecord[]> {
+  const out: SignedRecord[] = [];
+  let rest = keys;
+  for (;;) {
+    const res = await link.request('records.get', { keys: rest });
+    out.push(...res.records);
+    if (!res.more) return out;
+    // The server says where it got to; one that says none would have us ask for ever.
+    if (!res.next || res.next >= rest.length) throw new Error('incomplete answer');
+    rest = rest.slice(res.next);
+  }
+}
+
+/** The records under a prefix, going on after the last key for as long as the server says more. */
+async function fetchList(link: CoordinatorLink, prefix: string): Promise<SignedRecord[]> {
+  const out: SignedRecord[] = [];
+  let after: string | undefined;
+  for (;;) {
+    const res = await link.request('records.list', { prefix, ...(after ? { after } : {}) });
+    out.push(...res.records);
+    if (!res.more) return out;
+    const last = res.next ?? res.records.at(-1)?.key;
+    if (last === undefined || (after !== undefined && last <= after))
+      throw new Error('incomplete answer');
+    after = last;
+  }
 }
 
 function chunks<T>(items: T[], size: number): T[][] {

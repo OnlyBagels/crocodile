@@ -59,6 +59,18 @@ that setting, and then only from the friend who posted it (or another
 friend), so a stranger in a big space can't learn your IP address by posting
 a picture or by fetching a friend's picture first and offering it.
 
+A conversation started by someone you don't know (not a friend, not someone you
+asked to be friends with, not one you already have) does not connect: the app
+keeps it as a **request** and joins nothing, so the sender learns nothing about
+you and none of their messages are kept, until you accept it. Declining drops
+it (they can ask again); blocking the sender stops that and hides their requests. Mail they left for you is
+dropped, not kept (it would crowd out friends' mail on the server); their app
+still holds the messages and delivers them once you accept and both are
+online. At most 50 requests are kept, the newest first, so a flood can push a
+real one out. The command line `get --from <name>` takes up
+that person's request while it runs, because naming them is asking to receive;
+without `--from` it only says who is waiting.
+
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the
 RFC 6464 audio-level header). It holds the same keys as every other member
@@ -84,7 +96,7 @@ picture size.
 | Mailbox operator (opt-in mailbox)  | See who left how many messages for whom, and when; drop them.                          | Read, alter or forge them (sealed to the recipient's device, signed by the sender).                                                                                          |
 | Relay operator (opt-in relay)      | See relayed packet sizes and timing while the relay is in use.                         | Read or alter content.                                                                                                                                                       |
 | Non-member who learns a session id | Nothing: members only share keys with devices whose membership they verify themselves. |                                                                                                                                                                              |
-| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted in a space or DM they aren't in, even by learning its id.                      |
+| Member sharing a file with you     | See your IP address while you fetch it; send you a harmful file.                       | Pass off altered blocks (each is checked against hashes its author signed); get a file posted where they aren't, even by learning its id; take another's file id.            |
 | Former member                      | Keep what they already saw.                                                            | Decrypt anything after they left: sender keys are replaced on leave.                                                                                                         |
 | Someone who steals a key later     | Decrypt at most the current 30-minute key period of a session.                         | Decrypt earlier messages (hash ratchets, deleted prekeys) or later ones (periodic fresh keys).                                                                               |
 | Removed device                     | Keep what it already had.                                                              | Receive new keys or messages. (It still knows the account seed; see below.)                                                                                                  |
@@ -97,17 +109,30 @@ picture size.
   `@noble/ciphers`). All audited, pure-TypeScript implementations.
 - Sealed boxes to a device: X25519 and ML-KEM-768 against the device's
   current prekey (rotated weekly, secret deleted after a grace period), HKDF,
-  AES-GCM; signed by the sender and bound to sender and recipient devices.
+  AES-GCM; signed by the sender, and the sender's key and device and the
+  recipient's prekey go into the key derivation, so whoever carries a box
+  can't put their own signature on it.
 - Sender keys with a per-message text ratchet and a 30-second audio ratchet,
-  replaced every 30 minutes and on leave.
+  replaced every 30 minutes and on leave. A key is sealed with its
+  recipient device and the time; a member takes it only if it is for them,
+  within ten minutes of their clock, not older than the newest key from
+  that sender and not one the sender has since replaced.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
+  A listener takes each counter once per key (a window of the last 1024), so
+  a frame it took can't be played again, not even by cutting its connection
+  first. The counters are forgotten 45 seconds after the last connection that
+  had the key ends; coming back later, a listener starts from the sender's
+  key as last sent, so frames recorded in the minutes after that can be
+  played once. A host can still hold back frames, and deliver one late.
 - Video: per-frame AES-GCM with keys from the audio chain under a separate
   label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
   and is authenticated with the trailer.
 - Text: author-signed, Padmé-padded, encrypted with the text chain.
-- Files: a random key per file; 1 MiB blocks encrypted with AES-256-GCM
-  (index as nonce; file id, index and a last-block flag as associated data);
+- Files: a random key per file, and an id that is a hash of the author and
+  that key (a message with any other id is refused); 1 MiB blocks encrypted
+  with AES-256-GCM (index as nonce; file id, index and a last-block flag as
+  associated data);
   the hash of the encrypted blocks' SHA-256 list is in the author-signed
   manifest. Stored encrypted as received.
 - Device linking: short one-time code plus a 6-digit security code compared
@@ -133,7 +158,28 @@ picture size.
   reaches a server can stay on that server until the owner's next change
   (versions are last-writer-wins, and a record may be dated up to 5 minutes
   ahead). Servers that already hold the removal refuse it.
-
+- Text channel ids are only unique within a space. A device gives an id to
+  the space it joined first (leaving and rejoining counts as joining again),
+  so a space that reuses another's channel id and is joined first hides the
+  later space's channel on that device (messages are accepted and served only
+  in the space they were written in).
+- Messages written before they named their space carry only a channel id.
+  They are accepted from history another member passes on, not live, and an
+  updated device does not serve them (it can't tell which space they belong
+  to). A member of two spaces can therefore still be shown such an old message
+  in the other space's channel if it reuses the id, and a member can replay
+  one into the other space's history. Updated peers don't write these, and
+  old peers' new messages are refused until they update.
+- Storage limits are per account, and accounts are free. A connection can only
+  write its own account's records (plus notes, which are signed by one-time
+  keys), but opening many connections gives many accounts, each with a
+  profile of up to about 360 KB, and the mailbox quotas are per user id too.
+  Servers cap connections per address, which slows this down but does not
+  stop it. Anyone can also send notes, so a user's quota of unread notes can
+  be filled by others, and their friend requests then wait. Copies of notes
+  from other owners are let in up to twice the per-account quota, so owners
+  can end up holding different notes beyond it (the servers then keep
+  trying to reconcile them, which costs bandwidth until the notes expire).
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

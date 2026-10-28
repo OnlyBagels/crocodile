@@ -82,7 +82,11 @@ can't be fetched after that).`,
 Waits for a file sent to you in a direct conversation (including ones sent
 while this computer was off, if the sender is still online), downloads it
 straight from the sender and saves it. Prints the saved path. With --keep
-it goes on receiving until you stop it.`,
+it goes on receiving until you stop it.
+
+With --from it also takes up a conversation that person starts while it
+runs, even if they aren't a friend yet (the app would show a request to
+accept). Without --from, only friends and existing conversations are heard.`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -464,11 +468,35 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     const file = client.files!.manifest(f.id);
     if (file && !f.complete && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
   }
-  // Conversations with something waiting are joined as the senders invite us.
+  // Naming the sender is asking to hear from them: a conversation they start is taken up while
+  // this runs (the app would wait for an answer). Without a name, only people already known.
+  const told = new Set<string>();
+  const takeRequests = () => {
+    if (from && client.state.dmRequests.includes(from))
+      void client
+        .acceptDmRequest(from)
+        .catch((e) => io.err(`Could not take up the conversation: ${e.message}`));
+    for (const u of client.state.dmRequests) {
+      const p = client.state.profiles[u];
+      if (u === from || told.has(u) || !p) continue;
+      told.add(u);
+      io.err(
+        `${p.username}#${p.tag} wants to send you something. Run: get --from ${p.username}#${p.tag}`,
+      );
+    }
+  };
+  takeRequests();
   io.err(`Waiting for files${opts.from ? ` from ${opts.from}` : ''} (Ctrl+C to stop)…`);
   let received = 0;
   for (;;) {
-    const next = await until(ctx, () => queue[0], Number.POSITIVE_INFINITY);
+    const next = await until(
+      ctx,
+      () => {
+        takeRequests();
+        return queue[0];
+      },
+      Number.POSITIVE_INFINITY,
+    );
     if (!next) break;
     const m = queue.shift()!;
     const file = m.file;

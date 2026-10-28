@@ -8,7 +8,7 @@ import {
   toB64u,
   utf8,
 } from '@crocodile/protocol';
-import { hkdfSha256, randomBytes } from './primitives';
+import { hkdfSha256, randomBytes, sha256 } from './primitives';
 
 /**
  * Encryption of file contents (ARCHITECTURE.md §8a).
@@ -29,8 +29,18 @@ import { hkdfSha256, randomBytes } from './primitives';
 const subtle = () => globalThis.crypto.subtle;
 const AAD_PREFIX = utf8.encode('croc/v1/file-block');
 
+/** A random id. Not for posting a file: its id must be `fileIdFor` (messages with another are refused). */
 export function newFileId() {
   return toB64u(randomBytes(16));
+}
+
+/**
+ * The id of a file its author posts: a hash of the author and the file's key.
+ * Authors can't pass off their file under someone else's id, because the id
+ * would not be the one their own key gives them.
+ */
+export function fileIdFor(author: string, key: string) {
+  return toB64u(sha256(utf8.encode(`croc/v1/file-id\n${author}\n${key}`)).slice(0, 16));
 }
 
 export function newFileKey() {

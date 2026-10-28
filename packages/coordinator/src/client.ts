@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
   acceptChannel,
+  signInChannelContext,
   createChannelKeys,
   randomId,
   SecureChannel,
@@ -12,6 +13,7 @@ import {
 } from '@crocodile/crypto';
 import {
   ClientAuth,
+  ClientAuthBody,
   RpcParams,
   SIG_DOMAIN,
   helloFullPayload,
@@ -28,8 +30,12 @@ import {
 } from '@crocodile/protocol';
 import type { Coordinator } from './coordinator';
 import type { ClientHandle, OwnStatus } from './presence';
-import { RateLimiter, RpcFailure, sendJson } from './util';
+import { FRAME_BUDGET, RateLimiter, RpcFailure, cutToFrame, jsonBytes, sendJson } from './util';
 
+/** Keys `records.get` looks up first (the window doubles). */
+const GET_WINDOW = 20;
+/** Unreadable pages `records.list` looks past before handing back where it got to. */
+const LIST_SKIPS = 4;
 /** Record prefixes, and users' presence, one connection may follow. */
 const MAX_SUBSCRIPTIONS = 20_000;
 
@@ -158,18 +164,7 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4002, 'expected auth');
       return;
     }
-    const { key, sig, client, device, channel } = parsed.data;
-    const ok = verifyPayload(
-      key,
-      SIG_DOMAIN.auth,
-      { challenge: this.challenge, server: this.hub.info.id, device, channel },
-      sig,
-    );
-    if (!ok) {
-      this.frame({ t: 'error', err: { code: 'unauthorized', message: 'bad signature' } });
-      this.ws.close(4003, 'unauthorized');
-      return;
-    }
+    const { channel, sealed } = parsed.data;
     let secret: Uint8Array;
     try {
       secret = acceptChannel(this.channelKeys, channel);
@@ -177,7 +172,42 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4003, 'bad channel');
       return;
     }
+    // Who the client is arrives sealed under the channel it just made.
+    const inner = new SecureChannel(
+      secret,
+      signInChannelContext(this.challenge, this.hub.info.id),
+      false,
+    ).open(sealed);
+    if (inner === undefined) {
+      this.ws.close(4003, 'could not open sign-in');
+      return;
+    }
+    const body = ClientAuthBody.safeParse(inner);
+    if (!body.success) {
+      this.ws.close(4002, 'expected auth');
+      return;
+    }
+    const { key, sig, client, device } = body.data;
+    const ok = verifyPayload(
+      key,
+      SIG_DOMAIN.auth,
+      { challenge: this.challenge, server: this.hub.info.id, device, channel },
+      sig,
+    );
+    if (!ok) {
+      // No frame: before the sign-in is accepted, whatever is sent is in the clear.
+      this.ws.close(4003, 'unauthorized');
+      return;
+    }
     this.userId = userIdFromKey(key);
+    this.deviceId = device;
+    this.peer = peerIds.make(this.userId, device);
+    // From here on what the server says is sealed, an account's deletion included.
+    this.channel = new SecureChannel(
+      secret,
+      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
+      false,
+    );
     const marker = this.hub.deletionMarker(this.userId);
     if (marker) {
       // The signed marker is the proof: clients don't erase anything on a server's word alone.
@@ -188,19 +218,12 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4010, 'account deleted');
       return;
     }
-    this.deviceId = device;
-    this.peer = peerIds.make(this.userId, device);
     if (!this.hub.hasRoomFor(this.peer)) {
       this.ws.close(1013, 'server full; try another');
       return;
     }
     this.publicKey = key;
     this.platform = client.platform;
-    this.channel = new SecureChannel(
-      secret,
-      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
-      false,
-    );
     this.authed = true;
     this.connectedAt = Date.now();
     this.frame({ t: 'auth_ok', userId: this.userId, peer: this.peer });
@@ -257,8 +280,12 @@ export class ClientConnection implements ClientHandle {
     const store = hub.records.store;
     switch (method) {
       case 'records.put': {
-        if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const { record } = p as unknown as { record: SignedRecord };
+        // A user writes their own records. (A note is signed by a key made for it alone, or
+        // by its recipient to say it was read.)
+        if (record.kind !== 'note' && record.author !== this.publicKey)
+          throw new RpcFailure('forbidden', 'records are written by their author');
+        if (!this.writeLimiter.take()) throw new RpcFailure('rate_limited', 'too many writes');
         const r = await hub.dist.putFromClient(record);
         return {
           accepted: r.accepted,
@@ -268,13 +295,57 @@ export class ClientConnection implements ClientHandle {
       }
       case 'records.get': {
         const { keys } = p as unknown as { keys: string[] };
-        const found = await hub.dist.get(keys.filter((k) => this.mayReadKey(k)));
-        return { records: found.filter((r) => this.mayRead(r)) };
+        // A few keys at a time (more each time), in the order asked, until a frame is full: what
+        // is not sent is not looked up, and the asker goes on from `next`.
+        const records: SignedRecord[] = [];
+        let size = 1;
+        for (let i = 0, step = GET_WINDOW; i < keys.length; i += step, step *= 2) {
+          const window = keys.slice(i, i + step);
+          const order = new Map(window.map((k, j) => [k, i + j]));
+          const found = (await hub.dist.get(window.filter((k) => this.mayReadKey(k))))
+            .filter((r) => this.mayRead(r))
+            .sort((a, b) => order.get(a.key)! - order.get(b.key)!);
+          for (const r of found) {
+            const cost = jsonBytes(r) + 1;
+            if (records.length && size + cost > FRAME_BUDGET)
+              return { records, more: true, next: order.get(r.key)! };
+            records.push(r);
+            size += cost;
+          }
+        }
+        return { records };
       }
       case 'records.list': {
-        const { prefix, limit } = p as unknown as { prefix: string; limit?: number };
-        const found = await hub.dist.list(prefix, limit ?? 1000);
-        return { records: found.filter((r) => this.mayRead(r)) };
+        const { prefix, limit, after } = p as unknown as {
+          prefix: string;
+          limit?: number;
+          after?: string;
+        };
+        // In key order, so that `after` names where to go on from. A page may hold nothing this
+        // user may read (another's notes, say) and still have others after it: look at a few more,
+        // then hand back where we got to.
+        let cursor = after;
+        for (let rounds = 1; ; rounds++) {
+          const found = await hub.dist.list(prefix, limit ?? 1000, cursor);
+          const readable = found.records.filter((r) => this.mayRead(r));
+          const last = found.records.at(-1)?.key;
+          if (readable.length === 0 && found.more) {
+            // Nowhere further to go from here.
+            if (last === undefined || (cursor !== undefined && last <= cursor))
+              return { records: [] };
+            if (rounds >= LIST_SKIPS) return { records: [], more: true, next: last };
+            cursor = last;
+            continue;
+          }
+          const cut = cutToFrame(readable);
+          if (!found.more) return cut;
+          // Unreadable records after the last one given need not be looked at again.
+          const next =
+            !cut.more && last !== undefined && last > (cut.records.at(-1)?.key ?? '')
+              ? last
+              : undefined;
+          return { ...cut, more: true, ...(next ? { next } : {}) };
+        }
       }
       case 'records.subscribe': {
         const { prefixes } = p as unknown as { prefixes: string[] };
@@ -338,7 +409,7 @@ export class ClientConnection implements ClientHandle {
       }
       case 'voice.watch': {
         const { spaceIds } = p as unknown as { spaceIds: string[] };
-        const member = await Promise.all(spaceIds.map((id) => hub.isSpaceMember(id, this.userId)));
+        const member = await hub.areSpaceMember(spaceIds, this.userId);
         if (member.includes(false)) throw new RpcFailure('forbidden', 'not a member of that space');
         this.voiceWatch = new Set(spaceIds);
         return { voice: hub.sessions.voiceSnapshot(spaceIds) };

@@ -74,6 +74,7 @@ export const FedRequestParams = {
   rec_list: z.object({
     prefix: z.string().min(3).max(200),
     limit: z.number().int().min(1).max(5000).optional(),
+    after: z.string().max(200).optional(),
   }),
   rec_term: z.object({
     term: z.string().min(3).max(300),

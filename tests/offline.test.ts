@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { sealToDevice } from '@crocodile/crypto';
+import { recordKey, sessionIds, type SignedRecord } from '@crocodile/protocol';
 import {
   CrocodileClient,
   MemoryKeyValueStore,
@@ -140,6 +142,129 @@ describe('offline delivery', () => {
     await bob.openChannel(dm);
     await waitFor(() => bodies(bob, dm).includes('sealed for later'), 15000, 'bob reads mail');
     await waitFor(() => a.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+  });
+
+  async function mailedByStranger() {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob0 = await signUp(makeClient(net, coord), 'bob');
+    await waitFor(() => coord.records.get(`profile:${alice.userId}`), 8000, 'profile');
+    await waitFor(
+      () => coord.store.listPrefix(`device:${bob0.userId}`, 1).length > 0,
+      8000,
+      'bob device',
+    );
+    await alice.updateSettings({ useMailbox: true });
+    const dm = await alice.openDm(bob0.userId);
+    await alice.openChannel(dm);
+    await bob0.shutdown();
+    await alice.sendMessage(dm, 'mailed hello');
+    await waitFor(
+      () => alice.state.messages[dm]!.find((m) => m.body === 'mailed hello')?.mailed,
+      15000,
+      'mailed',
+    );
+    await alice.shutdown();
+    const bob = await restart(net, bob0, coord);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 15000, 'a request');
+    return { coord, net, alice, bob, dm };
+  }
+
+  it('drops mail from someone we do not know and shows a request, which survives a restart', async () => {
+    const { coord, net, alice, bob, dm } = await mailedByStranger();
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+    expect(bob.state.dms).not.toContain(alice.userId);
+    expect(bodies(bob, dm)).toEqual([]);
+    const again = await restart(net, bob, coord);
+    expect(again.state.dmRequests).toContain(alice.userId);
+  });
+
+  it('keeps what one of our devices sent to someone we do not know on our other devices', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice1 = await signUp(makeClient(net, coord), 'alice');
+    const bob0 = await signUp(makeClient(net, coord), 'bob');
+    // A second device of Alice's, which then goes offline.
+    const alice2a = makeClient(net, coord);
+    await alice2a.init();
+    await alice2a.startDeviceLink();
+    const code = await waitFor(
+      () => (alice2a.state.linking?.role === 'new' ? alice2a.state.linking.code : undefined),
+      5000,
+      'code',
+    );
+    await alice1.claimDeviceLink(code);
+    await waitFor(
+      () => alice2a.state.linking?.role === 'new' && alice2a.state.linking.step === 'claimed',
+      5000,
+      'claimed',
+    );
+    await alice1.confirmDeviceLink();
+    await waitFor(
+      () => alice2a.identity?.userId === alice1.userId && alice2a.state.link === 'connected',
+      8000,
+      'second device',
+    );
+    await waitFor(() => alice1.state.devices.length === 2, 8000, 'device list');
+    await waitFor(
+      () => coord.store.listPrefix(`device:${bob0.userId}`, 1).length > 0,
+      8000,
+      'bob device',
+    );
+    await alice1.updateSettings({ useMailbox: true });
+    await alice2a.shutdown();
+    const dm = await alice1.openDm(bob0.userId);
+    await alice1.openChannel(dm);
+    await bob0.shutdown();
+    await alice1.sendMessage(dm, 'to a stranger');
+    await waitFor(
+      () => alice1.state.messages[dm]!.find((m) => m.body === 'to a stranger')?.mailed,
+      15000,
+      'mailed',
+    );
+    const alice2 = await restart(net, alice2a, coord);
+    await alice2.openChannel(dm);
+    await waitFor(() => bodies(alice2, dm).includes('to a stranger'), 15000, 'on the other device');
+    expect(alice2.state.dms).toContain(bob0.userId);
+  });
+
+  it('delivers what the sender still holds once the request is accepted', async () => {
+    const { net, coord, alice: alice0, bob, dm } = await mailedByStranger();
+    await bob.acceptDmRequest(alice0.userId);
+    await bob.openChannel(dm);
+    const alice = await restart(net, alice0, coord);
+    await alice.openChannel(dm);
+    await waitFor(() => bodies(bob, dm).includes('mailed hello'), 20000, 'from the sender');
+  });
+
+  it('does not make a request in someone else’s name from mail a stranger sends', async () => {
+    const { bob, alice, dm } = await mailedByStranger();
+    // A third person, and a conversation of theirs with Bob that Alice names in her mail.
+    const carol = await signUp(makeClient(new FakeRelayNetwork(), await server()), 'carol');
+    const device = bob.records.get(recordKey.device(bob.userId, bob.state.deviceId as string)) as
+      SignedRecord<'device'> | undefined;
+    const ch = sessionIds.dm(bob.userId, carol.userId);
+    const message = {
+      id: 'forged-message-0001',
+      ch,
+      author: alice.userId,
+      key: alice.identity!.publicKey,
+      ts: Date.now(),
+      body: 'from carol, honest',
+      sig: 'x',
+    };
+    const box = sealToDevice(
+      alice.identity!,
+      alice.state.deviceId as string,
+      { peer: `${bob.userId}.${bob.state.deviceId as string}`, prekey: device!.body.prekey },
+      new TextEncoder().encode(JSON.stringify({ type: 'mail', messages: [message] })),
+    );
+    await (bob as unknown as { onMail(items: unknown[]): Promise<void> }).onMail([
+      { id: 'forged', box },
+    ]);
+    expect(bob.state.dmRequests).not.toContain(carol.userId);
+    expect(bodies(bob, dm)).toEqual([]);
   });
 
   it('mails many long messages in boxes and requests the server takes', async () => {

@@ -103,7 +103,7 @@ export type RelayToClient =
  * the device's current prekey, HKDF-SHA256, AES-256-GCM, signed by the sender.
  */
 export const SealedBox = z.object({
-  v: z.literal(2),
+  v: z.literal(3),
   /** Recipient peer id. */
   to: peerId,
   /** Recipient prekey id. */
@@ -139,6 +139,12 @@ export const ChatMessage = z.object({
   id: z.string().min(10).max(40),
   /** Channel id, or the DM session id for direct messages. */
   ch: z.string().max(200),
+  /**
+   * Session the message was written for. Channel ids are only unique within
+   * a space, so a space's messages name it; a direct message leaves this out
+   * because its `ch` is already the session id.
+   */
+  sid: z.string().max(200).optional(),
   author: userId,
   /** Author's Ed25519 key; userId must equal hash(key). */
   key: z.string(),
@@ -154,16 +160,25 @@ export const ChatMessage = z.object({
 });
 export type ChatMessage = z.infer<typeof ChatMessage>;
 
+/** The session a message belongs to: the space's, or for a direct message its own `ch`. */
+export const messageSession = (m: Pick<ChatMessage, 'ch' | 'sid'>): string => m.sid ?? m.ch;
+
 /** Plaintext of a sealed envelope. */
 export const SealedPayload = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('sender_key'),
     /** Session the key belongs to; guards against cross-session replay. */
     sessionId: z.string(),
+    /** Device the key is for: a key sealed to one device is no use to another. */
+    to: peerId,
+    /** When it was sealed (ms). Keys are taken in the order they were made, and not long after. */
+    at: z.number().int().min(0),
     kid: z.number().int().min(0).max(0xffffffff),
     /** Current state of the sender's ratcheting chains (never earlier ones). */
     text: z.object({ gen: z.number().int().min(0), key: z.string() }),
     audio: z.object({ gen: z.number().int().min(0), key: z.string() }),
+    /** The sender holds no key of the receiver's (it let go of it), and asks for it. */
+    want: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('history_req'),

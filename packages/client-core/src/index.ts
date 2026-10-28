@@ -3,6 +3,7 @@ export * from './coordinator-connection';
 export * from './coordinator-link';
 export * from './server-selection';
 export * from './platform';
+export * from './message-key';
 export * from './store';
 export * from './records-cache';
 export * from './keyring';
