@@ -125,7 +125,13 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
 
   /** Stop accepting a peer's keys at once (they were blocked or removed). */
   forgetPeer(peer: string) {
-    for (const [k, p] of this.peers) if (p.peer === peer) this.peers.delete(k);
+    let changed = false;
+    for (const [k, p] of this.peers)
+      if (p.peer === peer) {
+        this.peers.delete(k);
+        changed = true;
+      }
+    if (changed) this.emitChanged();
   }
 
   peerLeft(peer: string) {

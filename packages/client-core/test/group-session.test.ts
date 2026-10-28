@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
+import { GroupKeyring } from '../src/keyring';
 import type { RelayGrant, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
@@ -47,6 +48,7 @@ function session(relayRequest: () => Promise<RelayGrant>) {
     iceServers: () => [],
     relay: { allowed: () => true, request: relayRequest },
     isMemberPeer: () => true,
+    isAllowedPeer: () => true,
     refreshPeer: async () => {},
     log: () => {},
   } as unknown as SessionContext;
@@ -165,5 +167,46 @@ describe('group session', () => {
     it('in a space, a blocked member too: the others are relayed to them', async () => {
       expect(await admitted('space:abc')).toEqual([me, bob]);
     });
+  });
+
+  it('does not connect to the other side of a direct conversation that we blocked', async () => {
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const transports: StuckTransport[] = [];
+    const ctx = {
+      identity: createIdentity(),
+      peer: me,
+      link: () => ({ request: async () => ({}) }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: () => false,
+      refreshPeer: async () => {},
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession('dm:a:b', ctx, () => {
+      const t = new StuckTransport();
+      transports.push(t);
+      return t;
+    });
+    sessions.push(s);
+    s.applyState(state(bob, 1));
+    await wait(20);
+    expect(transports).toHaveLength(0);
+    expect(s.status).toBe('reconnecting');
+  });
+
+  it('stops hearing a peer at once when their key is only in its grace period', () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    bob.peerLeft('alice.d1');
+    expect(bob.hasKeyFrom('alice.d1')).toBe(false);
+    expect(bob.peersWithKeys()).toEqual(['alice.d1']);
+    let latest = bob.frameKeys();
+    bob.on('changed', (k) => (latest = k));
+    bob.forgetPeer('alice.d1');
+    expect(latest.peers).toEqual([]);
+    expect(bob.peersWithKeys()).toEqual([]);
   });
 });

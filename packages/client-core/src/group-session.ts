@@ -319,6 +319,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     clearTimeout(this.renewTimer);
     clearTimeout(this.expiryTimer);
     clearInterval(this.pingTimer);
+    this.vetting = this.refused = this.lastRefused = undefined;
+    this.refusals = 0;
     for (const t of this.wantLater.values()) clearTimeout(t);
     this.wantLater.clear();
     this.closeTransport();
@@ -470,7 +472,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     if (this.left || this.state?.epoch !== epoch || this.state.host !== host || this.transport)
       return;
-    if (this.ctx.isMemberPeer(this.sessionId, host)) {
+    if (this.hostBelongs(host)) {
       this.connectTransport();
       return;
     }
@@ -502,6 +504,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }, wait);
   }
 
+  /** Whether we deal with the host: in a direct conversation, not one we blocked either. */
+  private hostBelongs(host: string) {
+    return this.isDm
+      ? this.ctx.isAllowedPeer(this.sessionId, host)
+      : this.ctx.isMemberPeer(this.sessionId, host);
+  }
+
   /** The host (and epoch) being checked, and the one we refused to connect to. */
   private vetting?: string;
   private refused?: string;
@@ -515,7 +524,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private recheckHost() {
     const host = this.state?.host;
     if (!host || host === this.me || this.left) return;
-    const member = this.ctx.isMemberPeer(this.sessionId, host);
+    const member = this.hostBelongs(host);
     if (!member && this.transport?.host === host) this.connectTransport();
     else if (member && this.refused === `${this.state!.epoch}|${host}`) {
       this.refused = undefined;
@@ -559,7 +568,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.closeTransport();
     this.forgetConnection();
     if (!state?.host || this.left) return;
-    if (state.host !== this.me && !this.ctx.isMemberPeer(this.sessionId, state.host)) {
+    if (state.host !== this.me && !this.hostBelongs(state.host)) {
       this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
       void this.vetHost(state.epoch, state.host);
       return;
@@ -1092,8 +1101,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
 
   private async onPeerPresent(peer: string) {
     if (!this.ctx.isAllowedPeer(this.sessionId, peer)) {
-      // Their membership may simply not have reached us yet.
-      await this.ctx.refreshPeer(this.sessionId, peer).catch(() => {});
+      // Their membership may simply not have reached us yet (unless we blocked them: that is
+      // ours alone).
+      if (!this.ctx.isMemberPeer(this.sessionId, peer))
+        await this.ctx.refreshPeer(this.sessionId, peer).catch(() => {});
       if (!this.ctx.isAllowedPeer(this.sessionId, peer)) {
         this.ctx.log('ignoring peer that is not allowed in this session', { peer });
         return;
@@ -1194,11 +1205,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     // was banned and left themselves off the list still holds it.
     const held = new Set(this.keyring.peersWithKeys());
     const known = new Set([...this.peers.keys(), ...this.keySentTo.keys(), ...held]);
+    const allowed: string[] = [];
     for (const peer of known) {
-      if (this.ctx.isAllowedPeer(this.sessionId, peer)) {
-        if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
-          void this.sendKeyTo(peer);
-      } else if (this.keySentTo.has(peer) || held.has(peer)) {
+      if (this.ctx.isAllowedPeer(this.sessionId, peer)) allowed.push(peer);
+      else if (this.keySentTo.has(peer) || held.has(peer)) {
         // Ours is replaced unless all that is left of them is a key in its grace period, which
         // is just dropped.
         if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) revoked = true;
@@ -1206,8 +1216,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         this.keyring.forgetPeer(peer);
       }
     }
-    // The new key only goes to peers still allowed.
+    // The new key goes only to peers still allowed (rotating sends it), and the old one to none
+    // of them again.
     if (revoked) this.keyring.rotate();
+    else
+      for (const peer of allowed)
+        if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
+          void this.sendKeyTo(peer);
     void this.processParkedKeys();
     this.recheckHost();
   }
@@ -1247,7 +1262,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
     await this.flushPending();
     if (first) {
-      this.wantAnswered.set(from, Date.now());
+      this.noteAnswered(from);
       await this.sendKeyTo(from, false);
     } else if (payload.want) this.answerWant(from);
   }
@@ -1259,6 +1274,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private wantAnswered = new Map<string, number>();
+  /** Remembers when we last sent a key to a peer who asked, and forgets those long ago. */
+  private noteAnswered(peer: string) {
+    const now = Date.now();
+    if (this.wantAnswered.size > 200)
+      for (const [p, at] of this.wantAnswered) if (now - at >= 2000) this.wantAnswered.delete(p);
+    this.wantAnswered.set(peer, now);
+  }
   private wantLater = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * A key is sent on request, and anyone may ask: at most once in a while for each peer. A
@@ -1267,8 +1289,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private answerWant(peer: string) {
     const wait = 2000 - (Date.now() - (this.wantAnswered.get(peer) ?? 0));
     if (wait <= 0) {
-      if (this.wantAnswered.size > 200) this.wantAnswered.clear();
-      this.wantAnswered.set(peer, Date.now());
+      this.noteAnswered(peer);
       void this.sendKeyTo(peer, false);
       return;
     }
@@ -1276,7 +1297,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const timer = setTimeout(() => {
       this.wantLater.delete(peer);
       if (this.left || !this.ctx.isAllowedPeer(this.sessionId, peer)) return;
-      this.wantAnswered.set(peer, Date.now());
+      this.noteAnswered(peer);
       void this.sendKeyTo(peer, false);
     }, wait);
     timer.unref?.();
