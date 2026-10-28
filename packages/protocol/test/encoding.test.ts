@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  FedFrameSchema,
   canonicalJson,
   isOperatorContact,
   fromB32,
@@ -77,5 +78,21 @@ describe('operator contact', () => {
       `https://example.org/${'a'.repeat(200)}`,
     ])
       expect(isOperatorContact(bad)).toBe(false);
+  });
+});
+
+describe('link lookups between servers', () => {
+  const peer = `${'a'.repeat(52)}.${'b'.repeat(8)}`;
+  const query = {
+    t: 'flood',
+    id: 'q',
+    origin: 's',
+    hops: 0,
+    f: { t: 'link_query', qid: 'q', code: 'ABCD-EFGH' },
+  };
+
+  it('name the claiming device, so a reveal can go only to it', () => {
+    expect(FedFrameSchema.safeParse(query).success).toBe(false);
+    expect(FedFrameSchema.safeParse({ ...query, f: { ...query.f, by: peer } }).success).toBe(true);
   });
 });

@@ -2669,9 +2669,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     conn.on('link_claimed', ({ key, userId, by, nonce: theirNonce }) => {
       // Only the first claim counts: once our nonce is out, a server that
       // could make us take another nonce could choose one to match the codes.
-      if (!this.linkTemp || this.linkTemp.claimedBy || !keyMatchesUserId(key, userId)) return;
+      const t = this.linkTemp;
+      if (!t || t.claimedBy || !keyMatchesUserId(key, userId)) return;
       if (!/^[A-Za-z0-9_-]{43}$/.test(theirNonce ?? '')) return;
-      this.linkTemp.claimedBy = userId;
+      t.claimedBy = userId;
       const securityCode = linkSecurityCode(
         temp.publicKey,
         temp.encPublicKey,
@@ -2682,7 +2683,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       );
       conn
         .request('link.reveal', { code, to: by, nonce })
-        .then(() =>
+        .then(() => {
+          // Cancelled or restarted while the reveal was on its way.
+          if (this.linkTemp !== t) return;
           this.store.set({
             linking: {
               role: 'new',
@@ -2691,9 +2694,10 @@ export class CrocodileClient extends Emitter<ClientEvents> {
               securityCode,
               account: userId,
             },
-          }),
-        )
+          });
+        })
         .catch(() => {
+          if (this.linkTemp !== t) return;
           // This claim is spent (see above), so the link can't go on: a new
           // code is the only way forward, with a fresh nonce.
           this.closeDeviceLink();

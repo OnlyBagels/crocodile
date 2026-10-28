@@ -1379,6 +1379,44 @@ describe('multiple devices', () => {
     fresh.cancelDeviceLink();
   });
 
+  it('a link cancelled while its reveal is on the way stays cancelled', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    const conn = (
+      fresh as unknown as {
+        linkTemp: { conn: { request: (m: string, p: unknown) => Promise<unknown> } };
+      }
+    ).linkTemp.conn;
+    const request = conn.request.bind(conn);
+    let release = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let revealing = false;
+    conn.request = async (method, params) => {
+      if (method === 'link.reveal') {
+        revealing = true;
+        await held;
+      }
+      return request(method, params);
+    };
+    const claim = alice.claimDeviceLink(code).catch(() => undefined);
+    await waitFor(() => revealing, 5000, 'reveal under way');
+    fresh.cancelDeviceLink();
+    release();
+    await new Promise((r) => setTimeout(r, 300));
+    // The late answer must not bring a security code back to a closed link.
+    expect(fresh.state.linking).toBeNull();
+    alice.cancelDeviceLink();
+    await claim;
+  });
+
   it('the new device takes only the first claim', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

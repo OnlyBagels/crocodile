@@ -729,7 +729,7 @@ export class Coordinator {
     const link = this.links.get(cleanLinkCode(code));
     if (!link || link.peer !== client.peer || link.expiresAt < Date.now() || !link.claimedBy)
       throw new RpcFailure('not_found', 'no claimed link for this code');
-    if (link.claimedBy !== to && !link.claimedBy.startsWith('remote:'))
+    if (link.claimedBy !== to)
       throw new RpcFailure('forbidden', 'the code was claimed by another device');
     if (link.revealed) throw new RpcFailure('conflict', 'nonce already revealed');
     link.revealed = true;

@@ -626,6 +626,10 @@ describe('across servers that are not linked', () => {
     const c = await claimed;
     expect(c).toMatchObject({ by: existing.conn.peer, nonce: theirs });
     const mine = linkNonce();
+    // The nonce goes only to the device that claimed the code, here too.
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: fresh.conn.peer, nonce: mine }),
+    ).rejects.toThrow(/another device/);
     await fresh.conn.request('link.reveal', { code, to: c.by, nonce: mine });
     expect((await revealed).nonce).toBe(mine);
     // One reveal per code.

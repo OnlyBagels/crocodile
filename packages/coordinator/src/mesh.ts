@@ -411,7 +411,7 @@ export class Mesh {
    * that does answers (through the overlay, which is already connected), so
    * an unknown code takes the full wait to come back empty.
    */
-  queryLink(code: string, by?: string): Promise<LinkTarget | undefined> {
+  queryLink(code: string, by: string): Promise<LinkTarget | undefined> {
     if (this.hub.membership.liveIds().length <= 1) return Promise.resolve(undefined);
     const qid = randomId(8);
     return new Promise((resolve) => {
@@ -420,7 +420,7 @@ export class Mesh {
         resolve(undefined);
       }, 5000);
       this.linkQueries.set(qid, { resolve, timer });
-      this.flood({ t: 'link_query', qid, code, ...(by ? { by } : {}) });
+      this.flood({ t: 'link_query', qid, code, by });
     });
   }
 
@@ -797,7 +797,7 @@ export class Mesh {
         if (!this.takeLinkQuery(link)) return;
         const found = this.hub.findLink(f.code);
         if (!found) return;
-        found.claimedBy = f.by ?? `remote:${frame.origin}`;
+        found.claimedBy = f.by;
         this.flood({
           t: 'link_answer',
           qid: f.qid,

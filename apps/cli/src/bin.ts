@@ -36,6 +36,8 @@ void run(process.argv.slice(2), {
             rl.close();
             process.emit('SIGINT');
           });
+          // Ctrl+D closes the prompt without an answer: that is a no.
+          rl.on('close', () => resolve(''));
           rl.question(question, (answer) => {
             rl.close();
             resolve(answer);

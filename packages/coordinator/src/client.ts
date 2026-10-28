@@ -69,7 +69,8 @@ export class ClientConnection implements ClientHandle {
   private readonly challenge = randomId(16);
   private readonly limiter = new RateLimiter(30, 120);
   private readonly writeLimiter = new RateLimiter(5, 40);
-  private readonly linkLimiter = new RateLimiter(0.2, 5);
+  // Claiming costs two (claim, then nonce), so this allows five tries.
+  private readonly linkLimiter = new RateLimiter(0.2, 10);
   private readonly mailLimiter = new RateLimiter(1, 30);
   private alive = true;
   private pingTimer?: ReturnType<typeof setInterval>;

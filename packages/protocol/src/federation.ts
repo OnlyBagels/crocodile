@@ -133,7 +133,7 @@ export interface FedLinkQuery {
   qid: string;
   code: string;
   /** The claiming device, the only one the new device may reveal its nonce to. */
-  by?: string;
+  by: string;
 }
 
 export interface FedLinkAnswer {
@@ -299,7 +299,7 @@ const id = str(200);
 const anyJson = z.unknown();
 
 const FloodBody = z.discriminatedUnion('t', [
-  z.object({ t: z.literal('link_query'), qid: id, code: str(32), by: PeerId.optional() }),
+  z.object({ t: z.literal('link_query'), qid: id, code: str(32), by: PeerId }),
   z.object({
     t: z.literal('link_answer'),
     qid: id,

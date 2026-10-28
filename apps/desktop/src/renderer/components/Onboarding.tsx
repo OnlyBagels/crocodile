@@ -332,6 +332,11 @@ function LinkFromDevice({ go }: { go: (s: Step) => void }) {
           <div className="selectable mt-4 rounded-2xl bg-accent-soft py-6 font-mono text-4xl font-bold tracking-widest text-accent">
             {l.securityCode}
           </div>
+          {l.step === 'confirmed' && (
+            <Button variant="ghost" className="mt-4" onClick={() => go('returning')}>
+              Cancel
+            </Button>
+          )}
           {l.step === 'claimed' && (
             <>
               <p className="mt-3 text-xs text-faint">
