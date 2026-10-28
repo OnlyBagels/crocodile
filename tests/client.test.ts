@@ -614,8 +614,12 @@ describe('relay windows', () => {
     await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'dm invite');
     await alice.openChannel(dm);
     await bob.openChannel(dm);
-    // The server only grants a relay to a member: wait until it has named the host.
-    await waitFor(() => bob.state.sessions[dm]?.host, 12000, 'joined the session');
+    // The server only grants a relay to a member: wait until it lists Bob.
+    await waitFor(
+      () => bob.state.sessions[dm]?.members.includes(bob.userId),
+      12000,
+      'joined the session',
+    );
     await bob.useRelay(dm);
     await waitFor(
       () =>
