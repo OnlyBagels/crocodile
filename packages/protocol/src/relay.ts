@@ -103,7 +103,7 @@ export type RelayToClient =
  * the device's current prekey, HKDF-SHA256, AES-256-GCM, signed by the sender.
  */
 export const SealedBox = z.object({
-  v: z.literal(2),
+  v: z.literal(3),
   /** Recipient peer id. */
   to: peerId,
   /** Recipient prekey id. */
@@ -169,6 +169,10 @@ export const SealedPayload = z.discriminatedUnion('type', [
     type: z.literal('sender_key'),
     /** Session the key belongs to; guards against cross-session replay. */
     sessionId: z.string(),
+    /** Device the key is for: a key sealed to one device is no use to another. */
+    to: peerId,
+    /** When it was sealed (ms). Keys are taken in the order they were made, and not long after. */
+    at: z.number().int().min(0),
     kid: z.number().int().min(0).max(0xffffffff),
     /** Current state of the sender's ratcheting chains (never earlier ones). */
     text: z.object({ gen: z.number().int().min(0), key: z.string() }),

@@ -42,6 +42,8 @@ export const SENDER_KEY_ROTATION_MS = 30 * 60_000;
 export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: ExportedChains }> {
   private mine: SenderKey;
   private peers = new Map<number, PeerKey>();
+  /** When the newest key we took from each peer was sealed. */
+  private newest = new Map<string, number>();
   private audioTimer?: ReturnType<typeof setInterval>;
   private rotateTimer?: ReturnType<typeof setInterval>;
 
@@ -84,10 +86,17 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     this.emitChanged();
   }
 
-  addPeerKey(peer: string, chains: ExportedChains): boolean {
+  /**
+   * `at` is when the peer sealed the key; they never date one earlier than the last. A key older
+   * than the newest we took from them is a replay or a late copy: taking it would bring back keys
+   * they have replaced.
+   */
+  addPeerKey(peer: string, chains: ExportedChains, at = Date.now()): boolean {
     const kid = chains.kid >>> 0;
+    if (at < (this.newest.get(peer) ?? 0)) return false;
     const existing = this.peers.get(kid);
     if (existing && existing.peer !== peer) return false;
+    this.newest.set(peer, at);
     // Re-sent current state for a key we already track: keep our (newer) text
     // receiver, but take a newer audio position. Receivers for a new
     // connection start from it, and can only skip a few generations ahead.

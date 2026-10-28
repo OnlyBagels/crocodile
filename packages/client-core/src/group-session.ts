@@ -180,6 +180,8 @@ export type GroupSessionEvents = {
  */
 const HISTORY_CHUNK_BYTES = 32 * 1024;
 const PENDING_TTL_MS = 15_000;
+/** How far a sealed sender key's date may be from our clock. */
+const SENDER_KEY_SKEW_MS = 10 * 60_000;
 
 /**
  * One live P2P session (a space's text mesh, a voice channel or a DM).
@@ -1257,7 +1259,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     // not have reached them (sent while their side was still connecting, or
     // to an earlier run of their app), so it goes again, once.
     const first = !this.keyring.hasKeyFrom(from);
-    this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
+    const taken = this.keyring.addPeerKey(
+      from,
+      { kid: payload.kid, text: payload.text, audio: payload.audio },
+      payload.at,
+    );
+    if (!taken) {
+      this.ctx.log('refused sender key', { from, kid: payload.kid });
+      return;
+    }
     await this.flushPending();
     if (first) {
       this.noteAnswered(from);
@@ -1269,6 +1279,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     for (const peer of this.peers.keys()) {
       if (this.ctx.isAllowedPeer(this.sessionId, peer)) void this.sendKeyTo(peer);
     }
+  }
+
+  private lastSealedAt = 0;
+  /** Never earlier than the last, even if the clock steps back: receivers refuse older keys. */
+  private sealedAt() {
+    this.lastSealedAt = Math.max(Date.now(), this.lastSealedAt + 1);
+    return this.lastSealedAt;
   }
 
   private wantAnswered = new Map<string, number>();
@@ -1313,6 +1330,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       type: 'sender_key' as const,
       sessionId: this.sessionId,
       ...(want ? { want } : {}),
+      to: peer,
+      at: this.sealedAt(),
       ...chains,
     };
     if (await this.sendSealed(peer, payload)) {
@@ -1373,6 +1392,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     switch (payload.type) {
       case 'sender_key':
         if (payload.sessionId !== this.sessionId) return;
+        // Made for this device, and not long ago (the sender's clock is only roughly ours).
+        if (payload.to !== this.me) return;
+        if (Math.abs(Date.now() - payload.at) > SENDER_KEY_SKEW_MS) {
+          this.ctx.log('sender key dated far from our clock', {
+            from,
+            off: payload.at - Date.now(),
+          });
+          return;
+        }
         if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
           // A member we have blocked is not waiting on records: their key is not taken.
           if (this.ctx.isMemberPeer(this.sessionId, from)) {

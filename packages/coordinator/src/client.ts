@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import {
   acceptChannel,
+  signInChannelContext,
   createChannelKeys,
   randomId,
   SecureChannel,
@@ -12,6 +13,7 @@ import {
 } from '@crocodile/crypto';
 import {
   ClientAuth,
+  ClientAuthBody,
   RpcParams,
   SIG_DOMAIN,
   helloFullPayload,
@@ -162,18 +164,7 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4002, 'expected auth');
       return;
     }
-    const { key, sig, client, device, channel } = parsed.data;
-    const ok = verifyPayload(
-      key,
-      SIG_DOMAIN.auth,
-      { challenge: this.challenge, server: this.hub.info.id, device, channel },
-      sig,
-    );
-    if (!ok) {
-      this.frame({ t: 'error', err: { code: 'unauthorized', message: 'bad signature' } });
-      this.ws.close(4003, 'unauthorized');
-      return;
-    }
+    const { channel, sealed } = parsed.data;
     let secret: Uint8Array;
     try {
       secret = acceptChannel(this.channelKeys, channel);
@@ -181,7 +172,42 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4003, 'bad channel');
       return;
     }
+    // Who the client is arrives sealed under the channel it just made.
+    const inner = new SecureChannel(
+      secret,
+      signInChannelContext(this.challenge, this.hub.info.id),
+      false,
+    ).open(sealed);
+    if (inner === undefined) {
+      this.ws.close(4003, 'could not open sign-in');
+      return;
+    }
+    const body = ClientAuthBody.safeParse(inner);
+    if (!body.success) {
+      this.ws.close(4002, 'expected auth');
+      return;
+    }
+    const { key, sig, client, device } = body.data;
+    const ok = verifyPayload(
+      key,
+      SIG_DOMAIN.auth,
+      { challenge: this.challenge, server: this.hub.info.id, device, channel },
+      sig,
+    );
+    if (!ok) {
+      // No frame: before the sign-in is accepted, whatever is sent is in the clear.
+      this.ws.close(4003, 'unauthorized');
+      return;
+    }
     this.userId = userIdFromKey(key);
+    this.deviceId = device;
+    this.peer = peerIds.make(this.userId, device);
+    // From here on what the server says is sealed, an account's deletion included.
+    this.channel = new SecureChannel(
+      secret,
+      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
+      false,
+    );
     const marker = this.hub.deletionMarker(this.userId);
     if (marker) {
       // The signed marker is the proof: clients don't erase anything on a server's word alone.
@@ -192,19 +218,12 @@ export class ClientConnection implements ClientHandle {
       this.ws.close(4010, 'account deleted');
       return;
     }
-    this.deviceId = device;
-    this.peer = peerIds.make(this.userId, device);
     if (!this.hub.hasRoomFor(this.peer)) {
       this.ws.close(1013, 'server full; try another');
       return;
     }
     this.publicKey = key;
     this.platform = client.platform;
-    this.channel = new SecureChannel(
-      secret,
-      `${this.challenge}|${this.hub.info.id}|${this.peer}`,
-      false,
-    );
     this.authed = true;
     this.connectedAt = Date.now();
     this.frame({ t: 'auth_ok', userId: this.userId, peer: this.peer });

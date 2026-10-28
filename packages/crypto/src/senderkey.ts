@@ -36,6 +36,11 @@ const TAG_BYTES = 16;
 const MAX_TEXT_SKIP = 2000;
 const MAX_SKIPPED_KEYS = 256;
 const MAX_AUDIO_SKIP = 16;
+/**
+ * Frames a receiver remembers having taken, counting back from the newest. The counter is shared
+ * by every stream of a sender (the camera and the screen, say), so this is some seconds of video.
+ */
+const REPLAY_WINDOW = 1024;
 
 export interface ChainState {
   gen: number;
@@ -246,17 +251,125 @@ export function peekFrameKid(data: Uint8Array): number | null {
   return new DataView(data.buffer, data.byteOffset + data.length - trailer, 4).getUint32(0);
 }
 
-export class AudioReceiver {
-  private keys = new Map<number, MessageKey>();
+/**
+ * Which frame counters of one key have been taken, as in SRTP and SFrame: the newest, and a
+ * window of those just before it. A counter is refused if it was taken, or is older than the
+ * window. Counters start anywhere and wrap, so they are compared by distance.
+ */
+class ReplayWindow {
+  private newest: number | null = null;
+  private seen = new Uint8Array(REPLAY_WINDOW);
+
+  /** Whether a frame with this counter may still be taken (call `take` once it is verified). */
+  fresh(counter: number): boolean {
+    if (this.newest === null) return true;
+    const ahead = (counter - this.newest) | 0;
+    return ahead > 0 || (-ahead < REPLAY_WINDOW && !this.seen[counter % REPLAY_WINDOW]);
+  }
+
+  take(counter: number) {
+    if (!this.fresh(counter)) return;
+    const ahead = this.newest === null ? 0 : (counter - this.newest) | 0;
+    if (this.newest === null) {
+      this.newest = counter;
+    } else if (ahead > 0) {
+      for (let i = 1; i <= Math.min(ahead, REPLAY_WINDOW); i++)
+        this.seen[(this.newest + i) % REPLAY_WINDOW] = 0;
+      this.newest = counter;
+    }
+    this.seen[counter % REPLAY_WINDOW] = 1;
+  }
+}
+
+/**
+ * One sender's keys for received frames: the message key and the taken counters of the current
+ * generation of its audio chain and the one before it (frames can be reordered across the
+ * boundary). A frame carries only the low 16 bits of its generation.
+ *
+ * Counters are compared as signed 32-bit distances, so a counter more than 2^31 from the newest
+ * reads as the other way round; a sender counts frames, so it can't get that far in one generation.
+ */
+class GenerationKeys {
+  /** The window is made when the first frame of the generation checks out. */
+  private keys = new Map<number, { mk: MessageKey; window?: ReplayWindow }>();
   constructor(
-    readonly kid: number,
+    private readonly kid: number,
     private chain: ChainState,
+    private readonly label: 'audio' | 'video',
   ) {
-    this.keys.set(chain.gen, messageKey(chain, kid, 'audio'));
+    this.keys.set(chain.gen, { mk: messageKey(chain, kid, label) });
   }
 
   get gen() {
     return this.chain.gen;
+  }
+
+  /**
+   * Moves on to a chain position we are told of, if it is ahead of ours (a sender that was quiet
+   * for long has moved far past where frames could still be followed). Counters taken in the
+   * generation just before it are kept.
+   */
+  catchUp(chain: ChainState) {
+    if (chain.gen <= this.chain.gen) return;
+    this.moveOn(chain);
+    this.keys.set(chain.gen, { mk: messageKey(chain, this.kid, this.label) });
+  }
+
+  /** Follow the chain to a later position, keeping the generation before it if it is the last. */
+  private moveOn(chain: ChainState) {
+    const prev = this.keys.get(this.chain.gen);
+    const adjacent = chain.gen - this.chain.gen === 1;
+    const was = this.chain.gen;
+    this.keys.clear();
+    if (adjacent && prev) this.keys.set(was, prev);
+    this.chain = chain;
+  }
+
+  /** The key for a frame, or null if its generation can't be reached or its counter was taken. */
+  find(gen16: number, counter: number) {
+    const current16 = this.chain.gen & 0xffff;
+    const ahead = (gen16 - current16) & 0xffff;
+    let target: number;
+    if (ahead <= MAX_AUDIO_SKIP) target = this.chain.gen + ahead;
+    else if (((current16 - gen16) & 0xffff) <= 1)
+      target = this.chain.gen - ((current16 - gen16) & 0xffff);
+    else return null;
+    let entry = this.keys.get(target);
+    let chain = this.chain;
+    if (!entry) {
+      if (target < chain.gen) return null;
+      while (chain.gen < target) chain = ratchet(chain);
+      entry = { mk: messageKey(chain, this.kid, this.label) };
+    }
+    if (entry.window && !entry.window.fresh(counter)) return null;
+    return { target, chain, entry };
+  }
+
+  /** The frame found by `find` decrypted: its counter is taken, and the chain may move on. */
+  take(found: NonNullable<ReturnType<GenerationKeys['find']>>, counter: number) {
+    const { target, chain, entry } = found;
+    (entry.window ??= new ReplayWindow()).take(counter);
+    if (target > this.chain.gen) this.moveOn(chain);
+    this.keys.set(target, entry);
+  }
+}
+
+export class AudioReceiver {
+  private frames: GenerationKeys;
+  constructor(
+    readonly kid: number,
+    chain: ChainState,
+  ) {
+    this.frames = new GenerationKeys(kid, chain, 'audio');
+  }
+
+  /** Follow the sender to a chain position we are told of, if ahead of ours. */
+  catchUp(chain: ChainState) {
+    this.frames.catchUp(chain);
+  }
+
+  get gen() {
+    return this.frames.gen;
   }
 
   decrypt(data: Uint8Array): Uint8Array | null {
@@ -265,23 +378,10 @@ export class AudioReceiver {
     const trailer = data.subarray(data.length - FRAME_TRAILER_BYTES);
     const tv = new DataView(trailer.buffer, trailer.byteOffset, FRAME_TRAILER_BYTES);
     if (tv.getUint32(0) !== this.kid) return null;
-    const gen16 = tv.getUint16(4);
     const counter = tv.getUint32(6);
-    // Map the 16-bit generation onto our chain position.
-    const current16 = this.chain.gen & 0xffff;
-    const ahead = (gen16 - current16) & 0xffff;
-    let target: number;
-    if (ahead <= MAX_AUDIO_SKIP) target = this.chain.gen + ahead;
-    else if (((current16 - gen16) & 0xffff) <= 1)
-      target = this.chain.gen - ((current16 - gen16) & 0xffff);
-    else return null;
-    let mk = this.keys.get(target);
-    let chain = this.chain;
-    if (!mk && target > chain.gen) {
-      while (chain.gen < target) chain = ratchet(chain);
-      mk = messageKey(chain, this.kid, 'audio');
-    }
-    if (!mk) return null;
+    const found = this.frames.find(tv.getUint16(4), counter);
+    if (!found) return null;
+    const { mk } = found.entry;
     const plain = aesGcmDecrypt(
       mk.key,
       frameNonce(mk.salt, counter),
@@ -289,14 +389,7 @@ export class AudioReceiver {
       trailer,
     );
     if (!plain) return null;
-    if (target > this.chain.gen) {
-      // Keep only the previous generation for frames reordered across the boundary.
-      const prev = this.keys.get(this.chain.gen);
-      this.keys.clear();
-      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
-      this.chain = chain;
-      this.keys.set(target, mk);
-    }
+    this.frames.take(found, counter);
     return plain;
   }
 }
@@ -361,16 +454,21 @@ export class VideoSender {
 }
 
 export class VideoReceiver {
-  private keys = new Map<number, MessageKey>();
+  private frames: GenerationKeys;
   constructor(
     readonly kid: number,
-    private chain: ChainState,
+    chain: ChainState,
   ) {
-    this.keys.set(chain.gen, messageKey(chain, kid, 'video'));
+    this.frames = new GenerationKeys(kid, chain, 'video');
+  }
+
+  /** Follow the sender to a chain position we are told of, if ahead of ours. */
+  catchUp(chain: ChainState) {
+    this.frames.catchUp(chain);
   }
 
   get gen() {
-    return this.chain.gen;
+    return this.frames.gen;
   }
 
   decrypt(data: Uint8Array): Uint8Array | null {
@@ -382,24 +480,12 @@ export class VideoReceiver {
     const trailer = data.subarray(data.length - VIDEO_FRAME_TRAILER_BYTES);
     const tv = new DataView(trailer.buffer, trailer.byteOffset, VIDEO_FRAME_TRAILER_BYTES);
     if (tv.getUint32(0) !== this.kid) return null;
-    const gen16 = tv.getUint16(4);
     const counter = tv.getUint32(6);
     const n = trailer[10]!;
     if (n > VIDEO_MAX_CLEAR || n + TAG_BYTES + VIDEO_FRAME_TRAILER_BYTES > data.length) return null;
-    const current16 = this.chain.gen & 0xffff;
-    const ahead = (gen16 - current16) & 0xffff;
-    let target: number;
-    if (ahead <= MAX_AUDIO_SKIP) target = this.chain.gen + ahead;
-    else if (((current16 - gen16) & 0xffff) <= 1)
-      target = this.chain.gen - ((current16 - gen16) & 0xffff);
-    else return null;
-    let mk = this.keys.get(target);
-    let chain = this.chain;
-    if (!mk && target > chain.gen) {
-      while (chain.gen < target) chain = ratchet(chain);
-      mk = messageKey(chain, this.kid, 'video');
-    }
-    if (!mk) return null;
+    const found = this.frames.find(tv.getUint16(4), counter);
+    if (!found) return null;
+    const { mk } = found.entry;
     const head = data.subarray(0, n);
     const aad = new Uint8Array(n + VIDEO_FRAME_TRAILER_BYTES);
     aad.set(head, 0);
@@ -411,13 +497,7 @@ export class VideoReceiver {
       aad,
     );
     if (!body) return null;
-    if (target > this.chain.gen) {
-      const prev = this.keys.get(this.chain.gen);
-      this.keys.clear();
-      if (target - this.chain.gen === 1 && prev) this.keys.set(this.chain.gen, prev);
-      this.chain = chain;
-      this.keys.set(target, mk);
-    }
+    this.frames.take(found, counter);
     const out = new Uint8Array(n + body.length);
     out.set(head, 0);
     out.set(body, n);
