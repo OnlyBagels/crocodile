@@ -173,6 +173,8 @@ export const SealedPayload = z.discriminatedUnion('type', [
     /** Current state of the sender's ratcheting chains (never earlier ones). */
     text: z.object({ gen: z.number().int().min(0), key: z.string() }),
     audio: z.object({ gen: z.number().int().min(0), key: z.string() }),
+    /** The sender holds no key of the receiver's (it let go of it), and asks for it. */
+    want: z.boolean().optional(),
   }),
   z.object({
     type: z.literal('history_req'),

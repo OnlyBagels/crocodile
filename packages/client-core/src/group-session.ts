@@ -52,6 +52,8 @@ export interface SessionContext {
   open(box: SealedBox): { from: string; plaintext: Uint8Array } | null;
   /** Whether a peer may take part in the session (membership, blocks, revocation). */
   isAllowedPeer(sessionId: string, peer: string): boolean;
+  /** Whether a peer belongs in the session at all, blocked or not (they are still connected to). */
+  isMemberPeer(sessionId: string, peer: string): boolean;
   /** Fetch the records needed to judge a peer we know nothing about yet. */
   refreshPeer(sessionId: string, peer: string): Promise<void>;
   /** Channels whose history belongs to the session. */
@@ -377,7 +379,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         members: () =>
           (this.state?.members ?? [])
             .map((m) => m.peer)
-            .filter((p) => this.ctx.isAllowedPeer(sessionId, p)),
+            .filter((p) => this.ctx.isMemberPeer(sessionId, p)),
         sendSignal: (to, data) => {
           void this.ctx
             .link()
@@ -440,6 +442,36 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   // Connection to the host relay
   // -------------------------------------------------------------------------
 
+  /**
+   * A host the coordination server names is connected to only if it belongs in the session: it
+   * sees the members' addresses and decides who hears what. Our records of it may just be behind,
+   * so they are fetched first; if it still does not belong, the server is told, and asked for
+   * another host.
+   */
+  private async vetHost(epoch: number, host: string) {
+    await this.ctx.refreshPeer(this.sessionId, host).catch(() => {});
+    if (this.left || this.state?.epoch !== epoch || this.state.host !== host) return;
+    if (this.ctx.isMemberPeer(this.sessionId, host)) {
+      this.connectTransport();
+      return;
+    }
+    this.ctx.log('not connecting to a host that is not a member', { host });
+    this.unreachable = host;
+    this.setStatus('reconnecting');
+    this.emit('update', undefined);
+    if (this.reportedEpoch !== epoch) {
+      this.reportedEpoch = epoch;
+      void this.ctx
+        .link()
+        .request('session.report', { sessionId: this.sessionId, epoch, issue: 'host_unreachable' })
+        .catch(() => {});
+    }
+    clearTimeout(this.retryTimer);
+    this.retryTimer = setTimeout(() => {
+      if (!this.left && !this.transport && this.state?.epoch === epoch) this.connectTransport();
+    }, 10_000);
+  }
+
   /** The host and epoch of the latest connection attempt. */
   private attempted?: { epoch: number; host: string };
 
@@ -449,6 +481,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.closeTransport();
     const state = this.state;
     if (!state?.host || this.left) return;
+    if (state.host !== this.me && !this.ctx.isMemberPeer(this.sessionId, state.host)) {
+      void this.vetHost(state.epoch, state.host);
+      return;
+    }
     this.attempted = { epoch: state.epoch, host: state.host };
     const slots = this.voice && this.isVoice ? state.relaySlots : 0;
     const grant =
@@ -1088,9 +1124,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
    */
   recheckPeers() {
     let revoked = false;
-    for (const peer of this.peers.keys()) {
+    // Everyone we gave our key to, not only those the host lists as connected now: someone who
+    // was banned and left themselves off the list still holds it.
+    const known = new Set([...this.peers.keys(), ...this.keySentTo.keys()]);
+    for (const peer of known) {
       if (this.ctx.isAllowedPeer(this.sessionId, peer)) {
-        if (this.keySentTo.get(peer) !== this.keyring.kid) void this.sendKeyTo(peer);
+        if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
+          void this.sendKeyTo(peer);
       } else if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) {
         this.keySentTo.delete(peer);
         this.keyring.forgetPeer(peer);
@@ -1134,7 +1174,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const first = !this.keyring.hasKeyFrom(from);
     this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
     await this.flushPending();
-    if (first) await this.sendKeyTo(from);
+    if (first || payload.want) await this.sendKeyTo(from);
   }
 
   private distributeKey() {
@@ -1145,7 +1185,15 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
 
   private async sendKeyTo(peer: string) {
     const chains = this.keyring.exportMine();
-    if (await this.sendSealed(peer, { type: 'sender_key', sessionId: this.sessionId, ...chains })) {
+    // Asking for theirs when we hold none (we let go of it, as when someone is unblocked).
+    const want = !this.keyring.hasKeyFrom(peer);
+    const payload = {
+      type: 'sender_key' as const,
+      sessionId: this.sessionId,
+      ...(want ? { want } : {}),
+      ...chains,
+    };
+    if (await this.sendSealed(peer, payload)) {
       this.keySentTo.set(peer, chains.kid);
     }
   }

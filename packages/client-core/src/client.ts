@@ -2120,6 +2120,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         seal: (to, pt) => this.sealTo(to, pt),
         open: (box) => this.openBox(box),
         isAllowedPeer: (sid, p) => this.isAllowedPeer(sid, p),
+        isMemberPeer: (sid, p) => this.isMemberPeer(sid, p),
         refreshPeer: (sid, p) => this.refreshPeer(sid, p),
         relay: {
           allowed: () => this.state.settings.allowServerRelay,
@@ -2506,8 +2507,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.records.ingestAll(await fetchRecords(this.link, keys));
   }
 
-  /** `peer` is `<userId>.<deviceId>`; bare user ids are accepted too. */
-  isAllowedPeer(sessionId: string, peer: string): boolean {
+  /**
+   * Whether `peer` belongs in the session: a member of the space (not banned), or one of the two
+   * in a direct conversation, on a device that has not been removed. `peer` is
+   * `<userId>.<deviceId>`; bare user ids are accepted too.
+   */
+  isMemberPeer(sessionId: string, peer: string): boolean {
     const scope = parseSessionId(sessionId);
     if (!scope) return false;
     const userId = peerIds.user(peer);
@@ -2516,11 +2521,18 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         SignedRecord<'device'> | undefined;
       if (device?.body.revoked) return false;
     }
-    if (scope.kind === 'dm') {
-      if (!scope.users.includes(userId)) return false;
-      return !this.state.friends.blocked.includes(userId);
-    }
+    if (scope.kind === 'dm') return scope.users.includes(userId);
     return isSpaceMember(this.records, scope.spaceId, userId);
+  }
+
+  /**
+   * Whether we deal with `peer` in the session: a member we have not blocked. Their keys are
+   * taken and ours are given, their messages are kept and files are served to them only then.
+   */
+  isAllowedPeer(sessionId: string, peer: string): boolean {
+    return (
+      this.isMemberPeer(sessionId, peer) && !this.state.friends.blocked.includes(peerIds.user(peer))
+    );
   }
 
   // ===========================================================================

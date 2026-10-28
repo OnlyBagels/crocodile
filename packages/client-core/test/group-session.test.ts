@@ -46,6 +46,8 @@ function session(relayRequest: () => Promise<RelayGrant>) {
     platform: {},
     iceServers: () => [],
     relay: { allowed: () => true, request: relayRequest },
+    isMemberPeer: () => true,
+    refreshPeer: async () => {},
     log: () => {},
   } as unknown as SessionContext;
   const s = new GroupSession('dm:a:b', ctx, factory);
