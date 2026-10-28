@@ -89,21 +89,58 @@ describe('group session', () => {
     expect(s.attempts[1]!.end).toBeUndefined();
   });
 
-  it('joins the session first when asked for a relay before it has', async () => {
+  /** A server that refuses a relay until it has seen the join, and counts the joins. */
+  function joinFirst() {
+    const sent: string[] = [];
     let joined = false;
-    const { s } = session(
+    const made = session(
       async () => {
         if (!joined) throw new Error('join the session first');
         return grant(60_000);
       },
       async (type) => {
+        sent.push(type);
         if (type !== 'session.join') return {};
+        await wait(20);
         joined = true;
         return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
       },
     );
+    return { ...made, joins: () => sent.filter((t) => t === 'session.join').length };
+  }
+
+  it('joins the session first when asked for a relay before it has', async () => {
+    const { s, joins } = joinFirst();
     await s.useServerRelay();
     expect(s.relayGrant).not.toBeNull();
+    expect(joins()).toBe(1);
+  });
+
+  it('shares a join that is already under way, and does not join again once joined', async () => {
+    const { s, joins } = joinFirst();
+    const joining = s.join();
+    await s.useServerRelay();
+    await joining;
+    expect(s.relayGrant).not.toBeNull();
+    expect(joins()).toBe(1);
+    await s.useServerRelay();
+    expect(joins()).toBe(1);
+  });
+
+  it('does not bring back a session that was left', async () => {
+    const { s, joins } = joinFirst();
+    await s.leave();
+    await s.useServerRelay();
+    expect(s.relayGrant).toBeNull();
+    expect(joins()).toBe(0);
+  });
+
+  it('does not take a relay when it was left while joining', async () => {
+    const { s } = joinFirst();
+    const asking = s.useServerRelay();
+    await s.leave();
+    await asking;
+    expect(s.relayGrant).toBeNull();
   });
 
   it('tries a failed relay renewal again before the grant runs out', async () => {

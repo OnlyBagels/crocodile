@@ -290,8 +290,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     return this.sessionId.startsWith('dm:');
   }
 
-  async join() {
+  private joining?: Promise<void>;
+
+  /** Callers that join while a join is in flight share it. */
+  join(): Promise<void> {
     this.left = false;
+    this.joining ??= this.sendJoin().finally(() => (this.joining = undefined));
+    return this.joining;
+  }
+
+  private async sendJoin() {
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
     const { state } = await this.ctx.link().request('session.join', {
@@ -634,8 +642,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async useServerRelay() {
     this.relayRequested = true;
     try {
-      // The server only grants a relay to a member.
-      if (!this.state) await this.join();
+      // The server only grants a relay to a member, and a session we left stays left.
+      if (!this.state) {
+        if (this.left) return;
+        await this.join();
+        if (this.left) return;
+      }
       this.relayGrant = await this.ctx.relay.request(this.sessionId);
       this.ctx.log('using server relay', {
         server: this.relayGrant.server,
