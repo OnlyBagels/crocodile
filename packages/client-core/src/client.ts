@@ -986,7 +986,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       if (this.outbox.forSession(sid).length) this.ensureSession(sid);
     }
     for (const s of this.sessions.values())
-      void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
+      void s
+        .join({ fresh: true })
+        .catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
     // Mail held for this device while it was offline, anywhere in the mesh.
     // Signed for this server, so the others send their mail for us here too.
     const server = this.state.server?.info.id;

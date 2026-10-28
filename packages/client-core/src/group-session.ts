@@ -293,13 +293,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private joining?: Promise<void>;
 
   /**
-   * Callers that join while a join is in flight share it, unless the session
-   * was left since: that join was sent before the leave, so the server may
-   * have dropped us again, and this one has to come after it.
+   * Callers that join while a join is in flight share it. A join that has to
+   * go out on a new connection (`fresh`) doesn't: the one in flight was sent
+   * on the old one. Leaving drops it too, so a join after a leave comes after it.
    */
-  join(): Promise<void> {
-    if (this.left) this.joining = undefined;
+  join(opts: { fresh?: boolean } = {}): Promise<void> {
     this.left = false;
+    if (opts.fresh) this.joining = undefined;
     const sent: Promise<void> = (this.joining ??= this.sendJoin().finally(() => {
       if (this.joining === sent) this.joining = undefined;
     }));
@@ -328,6 +328,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
+    this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
     clearTimeout(this.expiryTimer);
@@ -650,12 +651,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.relayRequested = true;
     try {
       // The server only grants a relay to a member, and a session we left stays left.
-      if (this.left) return;
+      if (this.left) return this.ctx.log('relay not used: the session was left', {});
       if (!this.state) {
         await this.join();
         if (this.left) return;
       }
-      this.relayGrant = await this.ctx.relay.request(this.sessionId);
+      const granted = await this.ctx.relay.request(this.sessionId);
+      if (this.left) return;
+      this.relayGrant = granted;
       this.ctx.log('using server relay', {
         server: this.relayGrant.server,
         until: this.relayGrant.expiresAt,

@@ -155,6 +155,43 @@ describe('group session', () => {
     expect(s.relayGrant).not.toBeNull();
   });
 
+  it('does not keep a grant that arrives after the session was left', async () => {
+    const { s } = session(async () => {
+      await wait(30);
+      return grant(60_000);
+    });
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1));
+    const asking = s.useServerRelay();
+    await s.leave();
+    await asking;
+    expect(s.relayGrant).toBeNull();
+  });
+
+  it('sends a join on a new connection even while one sent on the old one is in flight', async () => {
+    const { s, joins } = joinFirst();
+    const old = s.join();
+    await Promise.all([old, s.join({ fresh: true })]);
+    expect(joins()).toBe(2);
+  });
+
+  it('lets every caller see a failed join, and sends the next one anew', async () => {
+    let joins = 0;
+    const { s } = session(
+      async () => grant(60_000),
+      async (type) => {
+        if (type !== 'session.join') return {};
+        if (joins++ > 0) return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+        await wait(10);
+        throw new Error('link down');
+      },
+    );
+    const results = await Promise.allSettled([s.join(), s.join()]);
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected']);
+    expect(joins).toBe(1);
+    await s.join();
+    expect(joins).toBe(2);
+  });
+
   it('does not take a relay when it was left while joining', async () => {
     const { s } = joinFirst();
     const asking = s.useServerRelay();
