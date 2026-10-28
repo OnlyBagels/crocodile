@@ -266,7 +266,7 @@ function AccountMenu() {
           {requests > 0 && (
             <MenuItem
               icon={<Bell size={16} />}
-              label={`${requests} friend request${requests === 1 ? '' : 's'}`}
+              label={`${requests} request${requests === 1 ? '' : 's'}`}
               onClick={() => {
                 close();
                 navigate({ kind: 'friends' });

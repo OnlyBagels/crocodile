@@ -385,9 +385,9 @@ function useStore<S extends object, T>(store: StateStore<S>, selector: (s: S) =>
   });
 }
 
-/** Subscribe to a slice of client state; re-renders only when it changes (shallowly). */
 export { pendingRequests };
 
+/** Subscribe to a slice of client state; re-renders only when it changes (shallowly). */
 export function useCroc<T>(selector: (s: ClientState) => T): T {
   return useStore(client.store, selector);
 }
