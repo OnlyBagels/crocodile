@@ -319,6 +319,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     clearTimeout(this.renewTimer);
     clearTimeout(this.expiryTimer);
     clearInterval(this.pingTimer);
+    for (const t of this.wantLater.values()) clearTimeout(t);
+    this.wantLater.clear();
     this.closeTransport();
     this.stopHosting();
     this.keyring.dispose();
@@ -452,10 +454,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const key = `${epoch}|${host}`;
     if (this.vetting === key) return;
     this.vetting = key;
+    let fetched = true;
     try {
-      await this.ctx.refreshPeer(this.sessionId, host).catch(() => {});
+      await this.ctx.refreshPeer(this.sessionId, host).catch(() => {
+        fetched = false;
+      });
     } finally {
-      this.vetting = undefined;
+      if (this.vetting === key) this.vetting = undefined;
     }
     if (this.left || this.state?.epoch !== epoch || this.state.host !== host || this.transport)
       return;
@@ -468,7 +473,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.unreachable = host;
     this.setStatus('reconnecting');
     this.emit('update', undefined);
-    if (this.reportedEpoch !== epoch) {
+    // Told only when our records of it are as new as the fetch could make them: a fetch that
+    // failed says nothing about the host.
+    if (fetched && this.reportedEpoch !== epoch) {
       this.reportedEpoch = epoch;
       void this.ctx
         .link()
@@ -477,7 +484,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     clearTimeout(this.retryTimer);
     this.retryTimer = setTimeout(() => {
-      if (!this.left && !this.transport && this.state?.epoch === epoch) this.connectTransport();
+      if (this.left || this.transport || this.state?.epoch !== epoch) return;
+      this.refused = undefined;
+      this.connectTransport();
     }, 10_000);
   }
 
@@ -500,14 +509,40 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
   }
 
+  /** What belonged to the connection just closed. */
+  private forgetConnection() {
+    this.connectedAt = null;
+    this.peers.clear();
+    this.welcomed = false;
+    this.slots = [];
+    this.speaking = [];
+    this.hostMedia = null;
+    this.mediaReady = false;
+    this.videoSlots = [];
+    this.screenAudioSlots = [];
+    this.pausedStreams = [];
+    this.videoTracks = [];
+    this.videoStreams.clear();
+    this.videoShowing.clear();
+    this.sentWatch = null;
+    this.route = null;
+  }
+
   /** The host and epoch of the latest connection attempt. */
   private attempted?: { epoch: number; host: string };
 
   private connectTransport() {
+    const state = this.state;
+    // A host being checked, or refused, is not checked again by every state push: the retry
+    // timer and a change in our records do that.
+    if (state?.host && !this.transport) {
+      const key = `${state.epoch}|${state.host}`;
+      if (this.vetting === key || this.refused === key) return;
+    }
     // A retry scheduled for an earlier attempt must not tear this one down.
     clearTimeout(this.retryTimer);
     this.closeTransport();
-    const state = this.state;
+    this.forgetConnection();
     if (!state?.host || this.left) return;
     if (state.host !== this.me && !this.ctx.isMemberPeer(this.sessionId, state.host)) {
       void this.vetHost(state.epoch, state.host);
@@ -548,28 +583,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const entry = { epoch: state.epoch, host: state.host, t, attempt };
     this.transport = entry;
     this.attempts = [...this.attempts, attempt].slice(-ATTEMPTS_KEPT);
-    this.connectedAt = null;
     t.on('progress', ({ step }) => {
       if (this.transport !== entry || attempt.steps.some((s) => s.step === step)) return;
       attempt.steps.push({ step, at: Date.now() });
       this.emit('update', undefined);
     });
-    this.peers.clear();
-    this.welcomed = false;
-    this.slots = [];
-    this.speaking = [];
-    this.hostMedia = null;
-    this.mediaReady = false;
-    this.videoSlots = [];
-    this.screenAudioSlots = [];
-    this.pausedStreams = [];
-    this.videoTracks = [];
-    this.videoStreams.clear();
-    this.videoShowing.clear();
-    this.sentWatch = null;
     this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
 
-    this.route = null;
     t.on('open', () => {
       if (this.transport !== entry) return;
       if (!attempt.steps.some((s) => s.step === 'open'))
@@ -1155,16 +1175,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     let revoked = false;
     // Everyone we gave our key to, not only those the host lists as connected now: someone who
     // was banned and left themselves off the list still holds it.
-    const known = new Set([
-      ...this.peers.keys(),
-      ...this.keySentTo.keys(),
-      ...this.keyring.peersWithKeys(),
-    ]);
+    const held = new Set(this.keyring.peersWithKeys());
+    const known = new Set([...this.peers.keys(), ...this.keySentTo.keys(), ...held]);
     for (const peer of known) {
       if (this.ctx.isAllowedPeer(this.sessionId, peer)) {
         if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
           void this.sendKeyTo(peer);
-      } else if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) {
+      } else if (this.keySentTo.has(peer) || held.has(peer)) {
         this.keySentTo.delete(peer);
         this.keyring.forgetPeer(peer);
         revoked = true;
@@ -1208,8 +1225,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const first = !this.keyring.hasKeyFrom(from);
     this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
     await this.flushPending();
-    if (first) await this.sendKeyTo(from, false);
-    else if (payload.want) this.answerWant(from);
+    if (first) {
+      this.wantAnswered.set(from, Date.now());
+      await this.sendKeyTo(from, false);
+    } else if (payload.want) this.answerWant(from);
   }
 
   private distributeKey() {
@@ -1219,7 +1238,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   }
 
   private wantAnswered = new Map<string, number>();
-  private wantLater = new Set<string>();
+  private wantLater = new Map<string, ReturnType<typeof setTimeout>>();
   /**
    * A key is sent on request, and anyone may ask: at most once in a while for each peer. A
    * request that comes too soon is answered when the wait is over, once, however many came.
@@ -1232,13 +1251,14 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       return;
     }
     if (this.wantLater.has(peer)) return;
-    this.wantLater.add(peer);
-    setTimeout(() => {
+    const timer = setTimeout(() => {
       this.wantLater.delete(peer);
       if (this.left || !this.ctx.isAllowedPeer(this.sessionId, peer)) return;
       this.wantAnswered.set(peer, Date.now());
       void this.sendKeyTo(peer, false);
     }, wait);
+    timer.unref?.();
+    this.wantLater.set(peer, timer);
   }
 
   /**
@@ -1312,13 +1332,9 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     switch (payload.type) {
       case 'sender_key':
         if (payload.sessionId !== this.sessionId) return;
-        // A member we have blocked is not waiting on records: their key is not taken.
-        if (
-          this.ctx.isMemberPeer(this.sessionId, from) &&
-          !this.ctx.isAllowedPeer(this.sessionId, from)
-        )
-          return;
         if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
+          // A member we have blocked is not waiting on records: their key is not taken.
+          if (this.ctx.isMemberPeer(this.sessionId, from)) return;
           this.parkedKeys.push({ from, payload, at: Date.now() });
           if (this.parkedKeys.length > 100) this.parkedKeys.shift();
           await this.ctx.refreshPeer(this.sessionId, from).catch(() => {});

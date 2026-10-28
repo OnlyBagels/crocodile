@@ -1775,6 +1775,11 @@ describe('blocks and hosts in spaces', () => {
     await alice.block(bob.userId);
     await bob.sendMessage(ch, 'bob to carol');
     await waitFor(() => bodies(carol, ch).includes('bob to carol'), 5000, 'carol hears bob');
+    // And Bob was not given her new key: what she writes now reaches Carol only.
+    await alice.sendMessage(ch, 'alice after block');
+    await waitFor(() => bodies(carol, ch).includes('alice after block'), 5000, 'carol hears alice');
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bodies(bob, ch)).not.toContain('alice after block');
   });
 
   it('replaces our key when a member who left themselves off the host’s list is banned', async () => {
@@ -1825,7 +1830,6 @@ describe('blocks and hosts in spaces', () => {
     await new Promise((r) => setTimeout(r, 3000));
     expect(bob.state.sessions[sid]?.status).not.toBe('connected');
     expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
-    expect(bob.state.sessions[sid]?.status).not.toBe('connected');
   });
 
   it('lets go of a host that is banned while we are connected, and takes it back when the ban is lifted', async () => {
@@ -1855,6 +1859,8 @@ describe('blocks and hosts in spaces', () => {
       .get(sid)!
       .recheckPeers();
     await waitFor(() => bob.state.sessions[sid]?.status !== 'connected', 3000, 'let go');
+    // Nothing of the connection we let go of is shown.
+    expect(bob.state.sessions[sid]?.peers).toEqual([]);
     expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
     // The ban is lifted (a newer record without it): the host is tried again at once.
     const lifted = signRecord(
