@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SecureChannel,
   answerChannel,
@@ -1635,6 +1635,34 @@ describe('device linking', () => {
       {},
     );
     expect(looked).toBe(before + 1);
+  });
+
+  it('forgets the claims of links that ended without sending the account', async () => {
+    const c = await server();
+    const claims = (c as unknown as { claims: Map<string, unknown> }).claims;
+    const kemKey = createLinkKem().publicKey;
+    const fresh = await user(c);
+    const { code } = await fresh.conn.request('link.open', {
+      encKey: fresh.identity.encPublicKey,
+      kemKey,
+      commit: linkNonce(),
+    });
+    const existing = await user(c);
+    await existing.conn.request('link.claim', { code });
+    expect(claims.size).toBe(1);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 11 * 60_000);
+      const other = await user(c);
+      await other.conn.request('link.open', {
+        encKey: other.identity.encPublicKey,
+        kemKey,
+        commit: linkNonce(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(claims.size).toBe(0);
   });
 
   it('gives the steps after a claim a budget of their own', async () => {

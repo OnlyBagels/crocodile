@@ -306,10 +306,14 @@ async function link(ctx: Ctx) {
         );
         // This computer takes the account only once someone here has compared
         // the codes: a server could send a claim and an account of its own.
-        void ask('Does it match? Type "yes" to link this computer: ').then((answer) => {
-          if (answer.trim().toLowerCase() === 'yes') void ctx.client.confirmDeviceLink();
-          else refused = 'The security codes were not confirmed, so nothing was linked.';
-        });
+        void ask('Does it match? Type "yes" to link this computer: ')
+          .then((answer) => {
+            if (answer.trim().toLowerCase() === 'yes') void ctx.client.confirmDeviceLink();
+            else refused = 'The security codes were not confirmed, so nothing was linked.';
+          })
+          .catch(() => {
+            refused = 'The security codes were not confirmed, so nothing was linked.';
+          });
       }
       if (refused) return { ok: false, error: refused };
       if (l.step === 'error') return { ok: false, error: l.error ?? 'Linking failed' };

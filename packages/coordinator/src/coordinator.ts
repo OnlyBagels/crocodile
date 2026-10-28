@@ -661,6 +661,8 @@ export class Coordinator {
     const now = Date.now();
     for (const [c, l] of this.links)
       if (l.expiresAt < now || l.peer === client.peer) this.links.delete(c);
+    // Claims of links that ended without sending the account (declined, timed out).
+    for (const [c, claim] of this.claims) if (claim.expiresAt < now) this.claims.delete(c);
     const code = randomId(5); // 40 bits; claims are rate limited
     const expiresAt = now + 10 * 60_000;
     this.links.set(code, {
