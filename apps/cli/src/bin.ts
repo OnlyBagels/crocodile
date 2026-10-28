@@ -39,8 +39,9 @@ void run(process.argv.slice(2), {
           // Ctrl+D closes the prompt without an answer: that is a no.
           rl.on('close', () => resolve(''));
           rl.question(question, (answer) => {
-            rl.close();
+            // Resolve first: closing the prompt emits 'close', which means no answer.
             resolve(answer);
+            rl.close();
           });
         })
     : undefined,

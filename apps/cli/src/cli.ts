@@ -282,6 +282,9 @@ async function link(ctx: Ctx) {
   if (ctx.client.state.phase === 'ready')
     throw new UsageError(`This computer already uses ${me(ctx)}.`);
   const io = ctx.io;
+  // Checked before a code goes out: nobody should enter one only to be refused.
+  const ask = io.ask;
+  if (!ask) throw new UsageError('Linking needs a terminal, to confirm the security code here.');
   void ctx.client.startDeviceLink();
   let shown = '';
   let refused = '';
@@ -303,12 +306,10 @@ async function link(ctx: Ctx) {
         );
         // This computer takes the account only once someone here has compared
         // the codes: a server could send a claim and an account of its own.
-        if (!io.ask) refused = 'Linking needs a terminal, to confirm the security code here.';
-        else
-          void io.ask('Does it match? Type "yes" to link this computer: ').then((answer) => {
-            if (answer.trim().toLowerCase() === 'yes') void ctx.client.confirmDeviceLink();
-            else refused = 'The security codes were not confirmed, so nothing was linked.';
-          });
+        void ask('Does it match? Type "yes" to link this computer: ').then((answer) => {
+          if (answer.trim().toLowerCase() === 'yes') void ctx.client.confirmDeviceLink();
+          else refused = 'The security codes were not confirmed, so nothing was linked.';
+        });
       }
       if (refused) return { ok: false, error: refused };
       if (l.step === 'error') return { ok: false, error: l.error ?? 'Linking failed' };

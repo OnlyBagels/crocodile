@@ -1637,7 +1637,7 @@ describe('device linking', () => {
     expect(looked).toBe(before + 1);
   });
 
-  it('gives each connection one budget for all the link steps', async () => {
+  it('gives the steps after a claim a budget of their own', async () => {
     const c = await server();
     const fresh = await user(c);
     const kemKey = createLinkKem().publicKey;
@@ -1647,7 +1647,7 @@ describe('device linking', () => {
       commit: linkNonce(),
     });
     const existing = await user(c);
-    // Steps that fail still cost: the tries can't be spread over claim, nonce and reveal.
+    // Steps that fail still cost, and they don't draw on the budget for guessing codes.
     const tries = [];
     for (let i = 0; i < 12; i++) {
       tries.push(
@@ -1665,5 +1665,15 @@ describe('device linking', () => {
     }
     const results = await Promise.all(tries);
     expect(results.filter((m) => /too many attempts/.test(m)).length).toBeGreaterThan(0);
+    // Guesses at codes are still five a burst.
+    const guesses = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        existing.conn.request('link.claim', { code: 'WRONGCODE' }).then(
+          () => 'ok',
+          (e: Error) => e.message,
+        ),
+      ),
+    );
+    expect(guesses.filter((m) => /too many attempts/.test(m))).toHaveLength(3);
   });
 });

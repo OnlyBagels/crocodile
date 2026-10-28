@@ -202,16 +202,10 @@ describe('crocodile (command line)', () => {
     expect(await laptop.cmd('whoami')).not.toBe(0);
 
     const server = person('fred-server', coord.url);
-    const linking = server.cmd('link');
-    const code = await waitFor(
-      () => server.err.join('\n').match(/\b[A-Z2-7]{8}\b/)?.[0],
-      15_000,
-      'link code',
-    );
-    await app.claimDeviceLink(code);
-    await app.confirmDeviceLink();
-    expect(await linking).toBe(1);
-    expect(server.err.at(-1)).toMatch(/needs a terminal/);
+    // Without a terminal it says so before showing a code anyone could type in.
+    expect(await server.cmd('link')).not.toBe(0);
+    expect(server.err.join('\n')).toMatch(/needs a terminal/);
+    expect(server.err.join('\n')).not.toMatch(/\b[A-Z2-7]{8}\b/);
     expect(await server.cmd('whoami')).not.toBe(0);
   }, 90_000);
 
