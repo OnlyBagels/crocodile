@@ -118,4 +118,52 @@ describe('group session', () => {
     // The connection, which depended on the relay, was set up again without it.
     expect(transports.length).toBe(before + 1);
   });
+
+  describe('who the relay we host admits', () => {
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    async function admitted(sessionId: string) {
+      let members: (() => string[]) | undefined;
+      const ctx = {
+        identity: createIdentity(),
+        peer: me,
+        link: () => ({ request: async () => ({}) }),
+        platform: {
+          relay: {
+            start: async (opts: { members: () => string[] }) => {
+              members = opts.members;
+              return { handleSignal() {}, close() {} };
+            },
+          },
+        },
+        iceServers: () => [],
+        relay: { allowed: () => false, request: async () => grant(1000) },
+        // Bob belongs but we have blocked him.
+        isMemberPeer: () => true,
+        isAllowedPeer: (_: string, peer: string) => peer !== bob,
+        refreshPeer: async () => {},
+        log: () => {},
+      } as unknown as SessionContext;
+      const s = new GroupSession(sessionId, ctx, () => new StuckTransport());
+      sessions.push(s);
+      const caps = { nat: 'open' as const, canHost: true };
+      s.applyState({
+        ...state(me, 1),
+        id: sessionId,
+        members: [
+          { peer: me, caps },
+          { peer: bob, caps },
+        ],
+      } as unknown as SessionState);
+      await wait(20);
+      return members!();
+    }
+
+    it('in a direct conversation, not the one we blocked', async () => {
+      expect(await admitted('dm:a:b')).toEqual([me]);
+    });
+
+    it('in a space, a blocked member too: the others are relayed to them', async () => {
+      expect(await admitted('space:abc')).toEqual([me, bob]);
+    });
+  });
 });

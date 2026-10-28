@@ -381,7 +381,13 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         members: () =>
           (this.state?.members ?? [])
             .map((m) => m.peer)
-            .filter((p) => this.ctx.isMemberPeer(sessionId, p)),
+            // In a space a blocked member is still relayed to the others; in a direct
+            // conversation there are no others.
+            .filter((p) =>
+              this.isDm
+                ? this.ctx.isAllowedPeer(sessionId, p)
+                : this.ctx.isMemberPeer(sessionId, p),
+            ),
         sendSignal: (to, data) => {
           void this.ctx
             .link()
@@ -469,6 +475,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       return;
     }
     this.refused = key;
+    if (this.lastRefused !== host) {
+      this.lastRefused = host;
+      this.refusals = 0;
+    }
     this.ctx.log('not connecting to a host that is not a member', { host });
     this.unreachable = host;
     this.setStatus('reconnecting');
@@ -496,6 +506,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private vetting?: string;
   private refused?: string;
   private refusals = 0;
+  private lastRefused?: string;
 
   /**
    * Records changed: a host we are connected to that no longer belongs is let go (the new
@@ -549,6 +560,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.forgetConnection();
     if (!state?.host || this.left) return;
     if (state.host !== this.me && !this.ctx.isMemberPeer(this.sessionId, state.host)) {
+      this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
       void this.vetHost(state.epoch, state.host);
       return;
     }
@@ -1187,8 +1199,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
           void this.sendKeyTo(peer);
       } else if (this.keySentTo.has(peer) || held.has(peer)) {
-        // Ours is replaced only if they could read it; a key of theirs in its grace period is
-        // just dropped.
+        // Ours is replaced unless all that is left of them is a key in its grace period, which
+        // is just dropped.
         if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) revoked = true;
         this.keySentTo.delete(peer);
         this.keyring.forgetPeer(peer);
@@ -1203,6 +1215,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   /** Whether a peer may be heard, after fetching their records once if not. */
   private async mayHear(peer: string) {
     if (this.ctx.isAllowedPeer(this.sessionId, peer)) return true;
+    // A block is ours alone: fetching their records changes nothing.
+    if (this.ctx.isMemberPeer(this.sessionId, peer)) return false;
     await this.ctx.refreshPeer(this.sessionId, peer).catch(() => {});
     return this.ctx.isAllowedPeer(this.sessionId, peer);
   }
