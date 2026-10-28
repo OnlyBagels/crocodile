@@ -135,6 +135,26 @@ describe('group session', () => {
     expect(joins()).toBe(0);
   });
 
+  it('does not take a relay for a joined session that was left', async () => {
+    const { s } = joinFirst();
+    await s.join();
+    await s.leave();
+    await s.useServerRelay();
+    expect(s.relayGrant).toBeNull();
+  });
+
+  it('sends a new join after a leave instead of sharing one sent before it', async () => {
+    const { s, joins } = joinFirst();
+    const before = s.join();
+    await s.leave();
+    const after = s.join();
+    await Promise.all([before, after]);
+    expect(joins()).toBe(2);
+    expect(s.relayGrant).toBeNull();
+    await s.useServerRelay();
+    expect(s.relayGrant).not.toBeNull();
+  });
+
   it('does not take a relay when it was left while joining', async () => {
     const { s } = joinFirst();
     const asking = s.useServerRelay();

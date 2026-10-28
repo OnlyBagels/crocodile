@@ -292,11 +292,18 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
 
   private joining?: Promise<void>;
 
-  /** Callers that join while a join is in flight share it. */
+  /**
+   * Callers that join while a join is in flight share it, unless the session
+   * was left since: that join was sent before the leave, so the server may
+   * have dropped us again, and this one has to come after it.
+   */
   join(): Promise<void> {
+    if (this.left) this.joining = undefined;
     this.left = false;
-    this.joining ??= this.sendJoin().finally(() => (this.joining = undefined));
-    return this.joining;
+    const sent: Promise<void> = (this.joining ??= this.sendJoin().finally(() => {
+      if (this.joining === sent) this.joining = undefined;
+    }));
+    return sent;
   }
 
   private async sendJoin() {
@@ -643,8 +650,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.relayRequested = true;
     try {
       // The server only grants a relay to a member, and a session we left stays left.
+      if (this.left) return;
       if (!this.state) {
-        if (this.left) return;
         await this.join();
         if (this.left) return;
       }
