@@ -122,6 +122,11 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     return true;
   }
 
+  /** Everyone whose key we hold, replaced or about to be dropped included. */
+  peersWithKeys(): string[] {
+    return [...new Set([...this.peers.values()].map((p) => p.peer))];
+  }
+
   hasKeyFrom(peer: string) {
     for (const p of this.peers.values()) if (p.peer === peer && p.expiresAt === null) return true;
     return false;
@@ -129,7 +134,13 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
 
   /** Stop accepting a peer's keys at once (they were blocked or removed). */
   forgetPeer(peer: string) {
-    for (const [k, p] of this.peers) if (p.peer === peer) this.peers.delete(k);
+    let changed = false;
+    for (const [k, p] of this.peers)
+      if (p.peer === peer) {
+        this.peers.delete(k);
+        changed = true;
+      }
+    if (changed) this.emitChanged();
   }
 
   peerLeft(peer: string) {

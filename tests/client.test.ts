@@ -20,6 +20,7 @@ import {
   utf8,
   type ChatMessage,
   type DeviceBody,
+  type SignedRecord,
   type SpaceBody,
 } from '@crocodile/protocol';
 import { FakeRelayNetwork } from './helpers/fake-relay';
@@ -1703,6 +1704,180 @@ describe('message ids', () => {
       limit: 4,
     });
     expect(older).toEqual([]);
+  });
+});
+
+describe('blocks and hosts in spaces', () => {
+  async function trio() {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const carol = await signUp(makeClient(net, coord, { canHost: false }), 'carol');
+    const spaceId = await alice.createSpace('Swamp');
+    const code = await alice.createInvite(spaceId);
+    await bob.joinWithInvite(code);
+    await carol.joinWithInvite(code);
+    const ch = channelOf(alice, spaceId);
+    const sid = sessionIds.space(spaceId);
+    for (const c of [alice, bob, carol]) await c.openChannel(ch);
+    await waitFor(
+      () => [bob, carol].every((c) => c.state.sessions[sid]?.peers.length === 2),
+      12000,
+      'all connected',
+    );
+    return { net, alice, bob, carol, ch, sid, spaceId };
+  }
+  const sessionOf = (c: CrocodileClient, sid: string) =>
+    (
+      c as unknown as {
+        sessions: Map<string, { keyring: GroupKeyring; peers: Map<string, unknown> }>;
+      }
+    ).sessions.get(sid)!;
+
+  it('a blocked member neither reads what we write nor has what they write shown to us', async () => {
+    const { alice, bob, carol, ch } = await trio();
+    await alice.sendMessage(ch, 'before');
+    await waitFor(() => bodies(bob, ch).includes('before'), 5000, 'delivered before the block');
+    await alice.block(bob.userId);
+    await alice.sendMessage(ch, 'after the block');
+    await bob.sendMessage(ch, 'from bob');
+    // Carol, who blocked nobody, is the proof that both reached the room.
+    await waitFor(
+      () => bodies(carol, ch).includes('after the block') && bodies(carol, ch).includes('from bob'),
+      5000,
+      'carol hears both',
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bodies(bob, ch)).not.toContain('after the block');
+    expect(bodies(alice, ch)).not.toContain('from bob');
+  });
+
+  it('hears a member again, and is heard, once they are unblocked', async () => {
+    const { alice, bob, ch, sid } = await trio();
+    await alice.block(bob.userId);
+    expect(sessionOf(alice, sid).keyring.hasKeyFrom(bob.peer)).toBe(false);
+    await alice.unblock(bob.userId);
+    // Keys go both ways again: ours is sent with a request for theirs.
+    await waitFor(() => sessionOf(alice, sid).keyring.hasKeyFrom(bob.peer), 5000, 'their key');
+    await bob.sendMessage(ch, 'bob after unblock');
+    await alice.sendMessage(ch, 'alice after unblock');
+    await waitFor(
+      () =>
+        bodies(alice, ch).includes('bob after unblock') &&
+        bodies(bob, ch).includes('alice after unblock'),
+      8000,
+      'both ways again',
+    );
+  });
+
+  it("a host that blocked someone still relays them to everyone else, and doesn't give them its key", async () => {
+    const { alice, bob, carol, ch } = await trio();
+    await alice.block(bob.userId);
+    await bob.sendMessage(ch, 'bob to carol');
+    await waitFor(() => bodies(carol, ch).includes('bob to carol'), 5000, 'carol hears bob');
+    // And Bob was not given her new key: what she writes now reaches Carol only.
+    await alice.sendMessage(ch, 'alice after block');
+    await waitFor(() => bodies(carol, ch).includes('alice after block'), 5000, 'carol hears alice');
+    await new Promise((r) => setTimeout(r, 500));
+    expect(bodies(bob, ch)).not.toContain('alice after block');
+  });
+
+  it('replaces our key when a member who left themselves off the host’s list is banned', async () => {
+    const { alice, bob, sid, spaceId } = await trio();
+    const session = sessionOf(alice, sid);
+    const before = session.keyring.kid;
+    // Bob is no longer listed as connected, but holds the key he was given. The ban reaches only
+    // Alice's records, so nothing else moves the key.
+    session.peers.delete(bob.peer);
+    const record = alice.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+    alice.records.ingestAll([
+      signRecord(
+        alice.identity!,
+        'space',
+        record.key,
+        { ...record.body, bans: [bob.userId] },
+        record.version + 1,
+      ),
+    ]);
+    (session as unknown as { recheckPeers(): void }).recheckPeers();
+    expect(session.keyring.kid).not.toBe(before);
+  });
+
+  it('does not connect to a host that is not a member', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await bob.createSpace('Mine');
+    await alice.joinWithInvite(await bob.createInvite(spaceId));
+    const ch = channelOf(bob, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    // Bob, the owner, bans Alice, but only on his side: the server has not heard of it, and
+    // still names her. Her relay goes away and Bob must not simply connect to it again.
+    const record = bob.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+    const attempts = bob.state.sessions[sid]!.attempts.length;
+    bob.records.ingestAll([
+      signRecord(
+        bob.identity!,
+        'space',
+        record.key,
+        { ...record.body, bans: [alice.userId] },
+        record.version + 1,
+      ),
+    ]);
+    net.crashRelayProcessOf(alice.userId);
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(bob.state.sessions[sid]?.status).not.toBe('connected');
+    expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
+  });
+
+  it('lets go of a host that is banned while we are connected, and takes it back when the ban is lifted', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await bob.createSpace('Mine');
+    await alice.joinWithInvite(await bob.createInvite(spaceId));
+    const ch = channelOf(bob, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    // Bob, the owner, bans Alice, but only on his side: the server has not heard of it.
+    const record = bob.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+    const banned = signRecord(
+      bob.identity!,
+      'space',
+      record.key,
+      { ...record.body, bans: [alice.userId] },
+      record.version + 1,
+    );
+    const attempts = bob.state.sessions[sid]!.attempts.length;
+    bob.records.ingestAll([banned]);
+    (bob as unknown as { sessions: Map<string, { recheckPeers(): void }> }).sessions
+      .get(sid)!
+      .recheckPeers();
+    await waitFor(() => bob.state.sessions[sid]?.status !== 'connected', 3000, 'let go');
+    // Nothing of the connection we let go of is shown.
+    expect(bob.state.sessions[sid]?.peers).toEqual([]);
+    expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
+    // The ban is lifted (a newer record without it): the host is tried again at once.
+    const lifted = signRecord(
+      bob.identity!,
+      'space',
+      record.key,
+      { ...record.body, bans: [] },
+      record.version + 2,
+    );
+    bob.records.ingestAll([lifted]);
+    (bob as unknown as { sessions: Map<string, { recheckPeers(): void }> }).sessions
+      .get(sid)!
+      .recheckPeers();
+    await waitFor(() => bob.state.sessions[sid]?.status === 'connected', 5000, 'back');
   });
 });
 

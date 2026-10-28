@@ -122,6 +122,14 @@ server learns who lists whom:
 - **Blocks** are enforced by the blocking user's apps (they ignore the
   blocked user's invitations, messages and mail), since no server knows
   about them. The blocked user is only told that they are no longer listed.
+  In a space the blocked member is treated as not there: their sender keys
+  are not taken and ours not given to them (our key is replaced when we
+  block), their messages are not kept, whoever passes them on, and files are
+  not served to them. They still share the room: a host relays them to
+  everyone who has not blocked them, and a blocker who hosts the room is still
+  connected to them. After unblocking, keys go both ways again at once
+  (ours is sent with a request for theirs); what was written in between
+  stays unreadable.
 - Apps that predate sealed lists wrote them in the open. Servers still accept
   such lists, and updated apps read them and move their own into the sealed
   form on first connection, telling everyone they list in a note.
