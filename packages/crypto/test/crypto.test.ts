@@ -4,6 +4,7 @@ import {
   DELETED_PROFILE_NAME,
   NOTE_TTL_MS,
   recordKey,
+  SIG_DOMAIN,
   type SignedRecord,
   utf8,
 } from '@crocodile/protocol';
@@ -48,12 +49,14 @@ import {
   peekFrameKid,
   randomId,
   safetyNumber,
+  sign,
   signRecord,
   signSdp,
   signSpaceAuthority,
   spaceIdFor,
   validateRecord,
   verifyChatMessage,
+  verifyPayload,
   verifySdp,
   type ValidationContext,
 } from '../src';
@@ -376,6 +379,41 @@ describe('hybrid post-quantum sealed boxes', () => {
     expect(small.ct.length).toBe(medium.ct.length);
   });
 
+  it("a box carried to its recipient cannot be signed over as someone else's", () => {
+    const alice = createIdentity();
+    const mallory = createIdentity();
+    const bob = createIdentity();
+    const bobPeer = `${bob.userId}.bobdevice1`;
+    const pk = createPrekey();
+    const lookup = (id: number) => (id === pk.id ? pk : undefined);
+    const box = sealToDevice(
+      alice,
+      'alicedev1',
+      { peer: bobPeer, prekey: pk.bundle },
+      utf8.encode("alice's sender key"),
+    );
+    // Whoever carries the box swaps in their own name and signs it themselves.
+    const unsigned = { ...box, from: mallory.publicKey, fromDevice: 'malloryd1' };
+    const { sig: _, ...rest } = unsigned;
+    const resigned = {
+      ...unsigned,
+      sig: sign(mallory, SIG_DOMAIN.sealed, { ...rest, rx: pk.bundle.x25519 }),
+    };
+    expect(
+      verifyPayload(
+        mallory.publicKey,
+        SIG_DOMAIN.sealed,
+        { ...rest, rx: pk.bundle.x25519 },
+        resigned.sig,
+      ),
+    ).toBe(true);
+    expect(openSealed({ peer: bobPeer }, lookup, resigned, userIdFromKey)).toBeNull();
+    // The one it was sealed by still opens it.
+    expect(openSealed({ peer: bobPeer }, lookup, box, userIdFromKey)?.from).toBe(
+      `${alice.userId}.alicedev1`,
+    );
+  });
+
   it('rotates prekeys and forgets expired secrets', () => {
     const t0 = 1_000_000_000_000;
     const first = rotatePrekeys([], t0);
@@ -500,6 +538,125 @@ describe('ratcheting sender keys', () => {
     // Across generations, like audio.
     sender.update(ratchet(sk.audio));
     expect(rx.decrypt(sender.encrypt(frame, 3))).toEqual(frame);
+  });
+
+  describe.each([
+    {
+      name: 'audio',
+      make: (sk: ReturnType<typeof createSenderKey>) => {
+        const sender = new AudioSender(sk.kid, sk.audio);
+        return {
+          encrypt: (f: Uint8Array) => sender.encrypt(f),
+          update: (c: typeof sk.audio) => sender.update(c),
+          setCounter: (n: number) => ((sender as unknown as { counter: number }).counter = n),
+          receiver: () => new AudioReceiver(sk.kid, importChain(exportChains(sk).audio)),
+        };
+      },
+    },
+    {
+      name: 'video',
+      make: (sk: ReturnType<typeof createSenderKey>) => {
+        const sender = new VideoSender(sk.kid, sk.audio);
+        return {
+          encrypt: (f: Uint8Array) => sender.encrypt(f, 3),
+          update: (c: typeof sk.audio) => sender.update(c),
+          setCounter: (n: number) => ((sender as unknown as { counter: number }).counter = n),
+          receiver: () => new VideoReceiver(sk.kid, importChain(exportChains(sk).audio)),
+        };
+      },
+    },
+  ])('$name frames are taken once', ({ make }) => {
+    const frame = Uint8Array.from({ length: 80 }, (_, i) => i);
+
+    it('refuses a frame played again, and takes frames out of order', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 10 }, () => tx.encrypt(frame));
+      for (const i of [3, 0, 2, 9, 1, 8, 4, 7, 5, 6]) expect(rx.decrypt(frames[i]!)).toEqual(frame);
+      for (const f of frames) expect(rx.decrypt(f)).toBeNull();
+    });
+
+    it('refuses frames older than the window, and takes those just inside it', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 1100 }, () => tx.encrypt(frame));
+      expect(rx.decrypt(frames[1099]!)).toEqual(frame);
+      expect(rx.decrypt(frames[0]!)).toBeNull();
+      expect(rx.decrypt(frames[100]!)).toEqual(frame);
+      expect(rx.decrypt(frames[100]!)).toBeNull();
+      // Right at the edge: 1023 back is still in the window, 1024 back is not.
+      expect(rx.decrypt(frames[1099 - 1023]!)).toEqual(frame);
+      expect(rx.decrypt(frames[1099 - 1024]!)).toBeNull();
+    });
+
+    it('keeps count when the frame counter wraps around', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      tx.setCounter(0xfffffffa);
+      const rx = tx.receiver();
+      const frames = Array.from({ length: 12 }, () => tx.encrypt(frame));
+      for (const i of [0, 1, 9, 11, 5, 10, 2, 3, 4, 6, 7, 8])
+        expect(rx.decrypt(frames[i]!)).toEqual(frame);
+      for (const f of frames) expect(rx.decrypt(f)).toBeNull();
+    });
+
+    it('refuses a frame of the previous generation played again after the next began', () => {
+      const sk = createSenderKey();
+      const tx = make(sk);
+      const rx = tx.receiver();
+      const old = tx.encrypt(frame);
+      expect(rx.decrypt(old)).toEqual(frame);
+      tx.update(ratchet(sk.audio));
+      expect(rx.decrypt(tx.encrypt(frame))).toEqual(frame);
+      expect(rx.decrypt(old)).toBeNull();
+    });
+  });
+
+  it('a receiver told of a later chain position follows it, keeps what it took just before, and ignores an earlier one', () => {
+    const sk = createSenderKey();
+    const sender = new AudioSender(sk.kid, sk.audio);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = new Uint8Array(50).fill(1);
+    const old = sender.encrypt(frame);
+    expect(rx.decrypt(old)).toEqual(frame);
+    // One generation on: the frames of the last one that were taken stay taken.
+    const next = ratchet(sk.audio);
+    rx.catchUp(next);
+    expect(rx.gen).toBe(next.gen);
+    expect(rx.decrypt(old)).toBeNull();
+    sender.update(next);
+    expect(rx.decrypt(sender.encrypt(frame))).toEqual(frame);
+    // Far ahead (a sender quiet for long): follows, so what comes next can be followed.
+    let far = next;
+    for (let i = 0; i < 40; i++) far = ratchet(far);
+    sender.update(far);
+    const spoken = sender.encrypt(frame);
+    expect(rx.decrypt(spoken)).toBeNull();
+    rx.catchUp(far);
+    expect(rx.decrypt(spoken)).toEqual(frame);
+    // An earlier position changes nothing.
+    rx.catchUp(sk.audio);
+    expect(rx.gen).toBe(far.gen);
+  });
+
+  it('counters half the range apart are neither ahead nor behind: refused, and nothing is marked', () => {
+    const sk = createSenderKey();
+    const tx = new AudioSender(sk.kid, sk.audio);
+    const rx = new AudioReceiver(sk.kid, importChain(exportChains(sk).audio));
+    const frame = new Uint8Array(50).fill(1);
+    const first = tx.encrypt(frame);
+    const counterOf = (f: Uint8Array) =>
+      new DataView(f.buffer, f.byteOffset + f.length - 11, 11).getUint32(6);
+    const c0 = counterOf(first);
+    expect(rx.decrypt(first)).toEqual(frame);
+    (tx as unknown as { counter: number }).counter = (c0 + 0x80000000) >>> 0;
+    const far = tx.encrypt(frame);
+    expect(rx.decrypt(far)).toBeNull();
+    // The window is as it was: the next frame in order is taken.
+    (tx as unknown as { counter: number }).counter = c0 + 1;
+    expect(rx.decrypt(tx.encrypt(frame))).toEqual(frame);
   });
 
   it("video and audio frames can't stand in for each other", () => {
