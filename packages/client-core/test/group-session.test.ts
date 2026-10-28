@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createIdentity } from '@crocodile/crypto';
+import { GroupKeyring } from '../src/keyring';
 import type { RelayGrant, SessionState } from '@crocodile/protocol';
 import { Emitter } from '../src/emitter';
 import {
@@ -50,6 +51,9 @@ function session(
     platform: {},
     iceServers: () => [],
     relay: { allowed: () => true, request: relayRequest },
+    isMemberPeer: () => true,
+    isAllowedPeer: () => true,
+    refreshPeer: async () => {},
     log: () => {},
   } as unknown as SessionContext;
   const s = new GroupSession('dm:a:b', ctx, factory);
@@ -248,5 +252,102 @@ describe('group session', () => {
     expect(s.relayGrant).toBeNull();
     // The connection, which depended on the relay, was set up again without it.
     expect(transports.length).toBe(before + 1);
+  });
+
+  describe('who the relay we host admits', () => {
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    async function admitted(sessionId: string) {
+      let members: (() => string[]) | undefined;
+      const ctx = {
+        identity: createIdentity(),
+        peer: me,
+        link: () => ({ request: async () => ({}) }),
+        platform: {
+          relay: {
+            start: async (opts: { members: () => string[] }) => {
+              members = opts.members;
+              return { handleSignal() {}, close() {} };
+            },
+          },
+        },
+        iceServers: () => [],
+        relay: { allowed: () => false, request: async () => grant(1000) },
+        // Bob belongs but we have blocked him.
+        isMemberPeer: () => true,
+        isAllowedPeer: (_: string, peer: string) => peer !== bob,
+        refreshPeer: async () => {},
+        log: () => {},
+      } as unknown as SessionContext;
+      const s = new GroupSession(sessionId, ctx, () => new StuckTransport());
+      sessions.push(s);
+      const caps = { nat: 'open' as const, canHost: true };
+      s.applyState({
+        ...state(me, 1),
+        id: sessionId,
+        members: [
+          { peer: me, caps },
+          { peer: bob, caps },
+        ],
+      } as unknown as SessionState);
+      await wait(20);
+      return members!();
+    }
+
+    it('in a direct conversation, not the one we blocked', async () => {
+      expect(await admitted('dm:a:b')).toEqual([me]);
+    });
+
+    it('in a space, a blocked member too: the others are relayed to them', async () => {
+      expect(await admitted('space:abc')).toEqual([me, bob]);
+    });
+  });
+
+  it('does not connect to the other side of a direct conversation that we blocked', async () => {
+    const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
+    const transports: StuckTransport[] = [];
+    const requests: string[] = [];
+    const ctx = {
+      identity: createIdentity(),
+      peer: me,
+      link: () => ({
+        request: async (m: string) => {
+          requests.push(m);
+          return {};
+        },
+      }),
+      platform: {},
+      iceServers: () => [],
+      relay: { allowed: () => false, request: async () => grant(1000) },
+      isMemberPeer: () => true,
+      isAllowedPeer: () => false,
+      refreshPeer: async () => {},
+      log: () => {},
+    } as unknown as SessionContext;
+    const s = new GroupSession('dm:a:b', ctx, () => {
+      const t = new StuckTransport();
+      transports.push(t);
+      return t;
+    });
+    sessions.push(s);
+    s.applyState(state(bob, 1));
+    await wait(20);
+    expect(transports).toHaveLength(0);
+    expect(s.status).toBe('reconnecting');
+    // The server knows nothing of blocks, so it is not told.
+    expect(requests).not.toContain('session.report');
+  });
+
+  it('stops hearing a peer at once when their key is only in its grace period', () => {
+    const alice = new GroupKeyring({ autoRatchet: false });
+    const bob = new GroupKeyring({ autoRatchet: false });
+    bob.addPeerKey('alice.d1', alice.exportMine());
+    bob.peerLeft('alice.d1');
+    expect(bob.hasKeyFrom('alice.d1')).toBe(false);
+    expect(bob.peersWithKeys()).toEqual(['alice.d1']);
+    let latest = bob.frameKeys();
+    bob.on('changed', (k) => (latest = k));
+    bob.forgetPeer('alice.d1');
+    expect(latest.peers).toEqual([]);
+    expect(bob.peersWithKeys()).toEqual([]);
   });
 });
