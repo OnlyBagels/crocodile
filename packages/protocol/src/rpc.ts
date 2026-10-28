@@ -112,12 +112,23 @@ export function helloFullPayload(h: Omit<ServerHello, 'sig' | 'sigFull'>) {
   };
 }
 
+/**
+ * The client's answer to the hello. Only its half of the channel is in the clear; who it is
+ * travels sealed under that channel (see `ClientAuthBody`), so that someone watching a plain
+ * `ws://` connection learns neither the user nor the device.
+ */
 export const ClientAuth = z.object({
   t: z.literal('auth'),
-  key: z.string(),
-  device: DeviceId,
   /** Client's half of the channel: ephemeral X25519 key and ML-KEM ciphertext. */
   channel: z.object({ epk: z.string().max(64), kem: z.string().max(2000) }),
+  /** A `ClientAuthBody`, sealed as the first frame (`n` 0) of a channel used for it alone. */
+  sealed: z.object({ n: z.literal(0), c: z.string().max(8000) }),
+});
+export type ClientAuth = z.infer<typeof ClientAuth>;
+
+export const ClientAuthBody = z.object({
+  key: z.string(),
+  device: DeviceId,
   /** Signature over (challenge, server.id, device, channel). */
   sig: z.string(),
   client: z.object({
@@ -125,7 +136,7 @@ export const ClientAuth = z.object({
     version: z.string().max(32),
   }),
 });
-export type ClientAuth = z.infer<typeof ClientAuth>;
+export type ClientAuthBody = z.infer<typeof ClientAuthBody>;
 
 export interface AuthOk {
   t: 'auth_ok';

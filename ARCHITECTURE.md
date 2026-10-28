@@ -142,10 +142,15 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
    key-exchange offer (X25519 + ML-KEM-768). A second signature covers the
    rest of the hello (the STUN servers apps use, the operator's contact),
    which apps ignore when it is missing. The client checks the signatures
-   against the key in the directory listing, answers the key exchange and
-   signs the transcript. From then on every frame is AES-256-GCM encrypted
-   and padded, so metadata is confidential even over plain `ws://` to a
-   home server. Server-to-server mesh links use the same handshake.
+   against the key in the directory listing and answers the key exchange.
+   Who the client is (its key, device, app and version, and a signature over
+   the transcript) goes in the first frame sealed under that exchange, and
+   from then on every frame is AES-256-GCM encrypted and padded, so metadata
+   is confidential even over plain `ws://` to a home server: all that shows
+   is the server's own hello, the size and timing of the frames and how a
+   connection ends. Server-to-server mesh links use the same key exchange
+   but identify themselves in a frame of their own, with the server ids in
+   the clear.
 2. The client can put and get records, subscribe to prefixes, search users,
    watch presence and voice-channel occupancy, join or leave sessions, and
    send signalling messages to other session members.
