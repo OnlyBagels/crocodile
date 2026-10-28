@@ -321,6 +321,7 @@ export class ClientConnection implements ClientHandle {
           limit?: number;
           after?: string;
         };
+        if (prefix.startsWith(recordKey.invitePrefix)) return { records: [] };
         // In key order, so that `after` names where to go on from. A page may hold nothing this
         // user may read (another's notes, say) and still have others after it: look at a few more,
         // then hand back where we got to.

@@ -146,8 +146,9 @@ export const RISKY_EXTENSIONS = new Set(
     'docm xlsm pptm iso img html htm xhtml svg ' +
     'msc pif chm hlp inf ins isp scf sct shb ws wsc gadget application appref-ms appx ' +
     'appxbundle msixbundle settingcontent-ms library-ms search-ms searchconnector-ms diagcab ' +
-    'website mht mhtml xbap jnlp vhd vhdx dll ocx sys cpl xll xlam dotm xltm potm ppsm sldm ' +
-    'one pyw pyz desktop terminal webloc inetloc fileloc workflow action'
+    'website mht mhtml xbap jnlp vhd vhdx dll ocx sys xll xlam dotm xltm potm ppsm sldm ' +
+    'one pyw pyz desktop terminal webloc inetloc fileloc workflow action ' +
+    'psc1 ps1xml msh msh1 msh2 mshxml msh1xml msh2xml rdp ade adp mde slk iqy scptd osx tool mjs'
   ).split(' '),
 );
 
@@ -160,10 +161,10 @@ export const RISKY_EXTENSIONS = new Set(
  */
 export function safeFileName(name: unknown): string {
   const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
-  const clean = base
+  const replaced = base
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f<>:"|?*‎‏‪-‮⁦-⁩]/g, '_')
-    .slice(0, 255);
+    .replace(/[\u0000-\u001f\u007f<>:"|?*‎‏‪-‮⁦-⁩]/g, '_');
+  const clean = cut(replaced);
   let start = 0;
   let end = clean.length;
   while (start < end && (clean[start] === '.' || /\s/.test(clean[start]!))) start++;
@@ -174,3 +175,13 @@ export function safeFileName(name: unknown): string {
 
 /** CON, NUL, COM1 and the like are devices on Windows with or without an extension ("nul.txt"). */
 const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\.|$)/i;
+
+/** At most 255 characters, from the front of the name but keeping its ending, whole characters only. */
+function cut(name: string): string {
+  if (name.length <= 255) return name;
+  const dot = name.lastIndexOf('.');
+  const ext = dot > 0 && name.length - dot <= 32 ? name.slice(dot) : '';
+  let stem = name.slice(0, 255 - ext.length);
+  if (/[\ud800-\udbff]$/.test(stem)) stem = stem.slice(0, -1);
+  return stem + ext;
+}

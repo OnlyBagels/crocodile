@@ -173,9 +173,11 @@ picture size.
   from other owners are let in up to twice the per-account quota, so owners
   can end up holding different notes beyond it (the servers then keep
   trying to reconcile them, which costs bandwidth until the notes expire).
-- Invites: clients and peer servers can fetch an invite only by its exact code
-  and can't list or subscribe to them, which stops sweeping a server for
-  codes. A server that stores an invite still sees its code.
+- Invites: a server leaves invites out of the lists and subscriptions it gives
+  clients and out of the list and term answers it gives other servers, so a
+  code has to be asked for by name. That stops a client sweeping a server for
+  codes; it is not a boundary against servers, which replicate invites among
+  themselves and can read the ones they store.
 - Linked devices share the account seed; per-device signing keys certified by
   the identity (so a removed device can no longer sign) are planned.
 - Sender keys rather than MLS: good forward secrecy and 30-minute healing,

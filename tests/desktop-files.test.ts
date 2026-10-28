@@ -112,6 +112,21 @@ describe('saving files', () => {
     expect(safeFileName('x'.repeat(300))).toHaveLength(255);
   });
 
+  it('shortens long names whole-character and keeps the ending', () => {
+    const long = `${'x'.repeat(254)}😀`; // the cut would fall inside the emoji
+    const cut = safeFileName(long);
+    expect(cut.length).toBeLessThanOrEqual(255);
+    expect(cut).not.toMatch(/[\ud800-\udbff]$/);
+    // The extension is what the risky-file check reads, so it survives.
+    expect(safeFileName(`${'a'.repeat(300)}.exe`)).toMatch(/\.exe$/);
+    expect(safeFileName(`${'a'.repeat(300)}.exe`)).toHaveLength(255);
+  });
+
+  it('asks before opening more of what Windows runs on open', () => {
+    for (const ext of ['rdp', 'iqy', 'slk', 'ps1xml', 'mjs'])
+      expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
+  });
+
   it('does not name a file after a Windows device', () => {
     for (const name of [
       'CON',

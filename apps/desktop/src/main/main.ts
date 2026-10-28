@@ -340,6 +340,7 @@ function createWindow() {
   };
   win.webContents.on('will-navigate', guardNavigation);
   win.webContents.on('will-frame-navigate', (e) => guardNavigation(e, e.url));
+  win.webContents.on('will-redirect', (e, url) => guardNavigation(e, url));
   if (isDev) void win.loadURL(process.env.CROC_RENDERER_URL!);
   else void win.loadFile(join(__dirname, '../renderer/index.html'));
 }

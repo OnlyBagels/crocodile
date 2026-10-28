@@ -11,6 +11,16 @@ describe('main-window navigation guard', () => {
     expect(isAllowedNavigation(`${app}?reload=1`, app)).toBe(true);
   });
 
+  it('allows the entry however the system spells its path', () => {
+    const spaced = 'file:///C:/Program Files/Croc/resources/renderer/index.html';
+    const encoded = 'file:///c:/Program%20Files/Croc/resources/renderer/index.html';
+    expect(isAllowedNavigation(encoded, spaced)).toBe(true);
+    expect(isAllowedNavigation(`${encoded}#/settings`, spaced)).toBe(true);
+    expect(
+      isAllowedNavigation('file:///C:/Program%20Files/Croc/resources/renderer/x.html', spaced),
+    ).toBe(false);
+  });
+
   it('blocks a dropped file and other file URLs (the seed-read vector)', () => {
     expect(isAllowedNavigation('file:///C:/Users/me/Downloads/evil.html', app)).toBe(false);
     expect(isAllowedNavigation('file:///etc/passwd', app)).toBe(false);

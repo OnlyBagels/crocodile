@@ -590,6 +590,8 @@ export class Distribution {
         };
         // Invites are join secrets: a peer fetches one by exact key (rec_get)
         // to validate a membership, never by listing. Mirrors the client surface.
+        // No other kind of key starts like an invite and prefixes are at least three characters,
+        // so a list holds invites or none: filtering can't cut a page short.
         return cutToFrame(
           store
             .listPrefix(prefix, limit ?? 1000, after)
