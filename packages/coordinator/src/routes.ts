@@ -35,6 +35,7 @@ const ROUTED = {
   signal: z.object({ from: PeerId, sessionId: SessionId, data: SignalData }),
   session_invite: z.object({ sessionId: SessionId, from: id }),
   link_claimed: z.looseObject({}),
+  link_reveal: z.looseObject({}),
   link_payload: z.looseObject({}),
   mail: z.object({
     items: z

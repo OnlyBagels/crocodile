@@ -147,7 +147,10 @@ picture size.
   match on both devices: the existing device sends the account only then,
   and the new device holds an account that arrives early until then, so a
   server that claims the code with an account of its own can't sign the new
-  device into it.
+  device into it. The code has six digits, so a hostile server has a one in a
+  million chance on each try the user sees fail; it can keep trying only as
+  long as the user keeps starting new links after codes that differ, so a
+  mismatch means stop, and the link on that server shouldn't be retried.
 - Every signature is domain-separated (`SIG_DOMAIN` in `protocol/constants.ts`).
 - Local data (identity, prekeys, history) is encrypted at rest with a key
   kept in the OS keychain (Electron `safeStorage`).

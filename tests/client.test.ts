@@ -1339,6 +1339,46 @@ describe('multiple devices', () => {
     fresh.cancelDeviceLink();
   });
 
+  it("a coordinator that swaps the keys and the new device's nonce cannot make the codes match", async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const fresh = makeClient(net, coord);
+    await fresh.init();
+    await fresh.startDeviceLink();
+    const code = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.code : undefined),
+      5000,
+    );
+    // The same swap as above, done by the server itself: it answers the claim
+    // with its own keys and commitment, and hands alice its own nonce where
+    // the new device's belongs.
+    const mallory = createIdentity();
+    const malloryKem = createLinkKem();
+    const malloryNonce = linkNonce();
+    const claimLink = coord.claimLink.bind(coord);
+    coord.claimLink = async (client, c) => {
+      const real = await claimLink(client, c);
+      return {
+        ...real,
+        encKey: mallory.encPublicKey,
+        kemKey: malloryKem.publicKey,
+        commit: linkCommitment(real.key, mallory.encPublicKey, malloryKem.publicKey, malloryNonce),
+      };
+    };
+    const revealLink = coord.revealLink.bind(coord);
+    coord.revealLink = (client, c, to) => revealLink(client, c, to, malloryNonce);
+
+    const shownOnAlice = await alice.claimDeviceLink(code);
+    const shownOnNew = await waitFor(
+      () => (fresh.state.linking?.role === 'new' ? fresh.state.linking.securityCode : undefined),
+      5000,
+      'claimed',
+    );
+    expect(shownOnAlice).not.toBe(shownOnNew);
+    fresh.cancelDeviceLink();
+  });
+
   it('the new device takes only the first claim', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

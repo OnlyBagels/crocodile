@@ -275,6 +275,12 @@ export class ClientConnection implements ClientHandle {
     }
   }
 
+  /** Every step of linking draws from one budget, so a client can't spread its tries across them. */
+  private takeLink() {
+    if (!this.linkLimiter.take())
+      throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
+  }
+
   private async dispatch(method: RpcMethod, p: Record<string, never>): Promise<unknown> {
     const hub = this.hub;
     const store = hub.records.store;
@@ -436,17 +442,18 @@ export class ClientConnection implements ClientHandle {
         return hub.openLink(this, kemKey, commit);
       }
       case 'link.claim': {
-        if (!this.linkLimiter.take())
-          throw new RpcFailure('rate_limited', 'too many attempts; wait a minute');
+        this.takeLink();
         const { code } = p as unknown as { code: string };
         return hub.claimLink(this, code);
       }
       case 'link.nonce': {
+        this.takeLink();
         const { code, nonce } = p as unknown as { code: string; nonce: string };
         hub.nonceLink(this, code, nonce);
         return {};
       }
       case 'link.reveal': {
+        this.takeLink();
         const { code, to, nonce } = p as unknown as { code: string; to: string; nonce: string };
         hub.revealLink(this, code, to, nonce);
         return {};

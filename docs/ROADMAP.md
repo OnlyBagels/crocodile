@@ -27,7 +27,8 @@ report what matters most; issues and discussions are welcome.
 - Hybrid post-quantum key exchange everywhere, ratcheting sender keys,
   prekeys with forward secrecy, padding, constant-bitrate voice, encrypted
   client↔server and server↔server channels, encryption at rest.
-- Multiple devices per account: linking with a code and security check,
+- Multiple devices per account: linking with a code and a security check
+  (nonces committed and revealed in order, confirmed on both devices),
   per-device keys for message delivery, renaming and removal.
 - Opt-in relay through coordination servers for networks that block direct
   connections (hour-long windows renewed while still needed, capped users

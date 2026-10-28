@@ -201,6 +201,7 @@ describe('offline delivery', () => {
       'claimed',
     );
     await alice1.confirmDeviceLink();
+    await alice2a.confirmDeviceLink();
     await waitFor(
       () => alice2a.identity?.userId === alice1.userId && alice2a.state.link === 'connected',
       8000,

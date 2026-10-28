@@ -2780,7 +2780,9 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         off();
       };
     });
-    // The timer can fire while link.nonce is still in flight, before anything awaits this.
+    // The timer can fire while link.nonce is still in flight, before anything
+    // awaits this, and an unhandled rejection would crash Node. Swallowing it
+    // here loses nothing: the await below still throws it.
     revealed.catch(() => {});
     let theirNonce: string;
     try {

@@ -65,8 +65,13 @@ hosts a group. This document explains how the pieces fit and why.
   rotates weekly. The peer id used in sessions is `<userId>.<deviceId>`, so
   one person can be in a call from one device while chatting on another.
   A new device is linked by typing a short code shown on it into a signed-in
-  device and comparing a 6-digit security code on both; the account seed is
-  then sent in a hybrid-encrypted, signed box. Removing a device publishes
+  device and comparing a 6-digit security code on both. The new device first
+  commits to its keys and a nonce, the signed-in device answers with its
+  nonce, and only then does the new device reveal its own; the security code
+  covers both keys and both nonces (§7). Both people confirm the codes match
+  before the account seed is sent, in a hybrid-encrypted, signed box, and the
+  new device holds an account that arrives early until it is confirmed.
+  Removing a device publishes
   a permanent revocation.
 - `name#1234` tags are a display aid derived from the user id.
 - **Safety numbers** let two users compare keys out of band.
@@ -352,6 +357,15 @@ effort. Everything below is automatic.
   grace period, giving forward secrecy even for keys delivered to offline
   devices. Every box is signed by the sender's Ed25519 key, which (with
   the recipient's prekey) is also part of the key derivation.
+- **Linking a device.** A server sits between the two devices, so the 6-digit
+  security code is built so it can't be ground: the code covers both devices'
+  signing keys, the encryption keys the account is sent to and a nonce from
+  each device. The new device sends a commitment to its keys and nonce first;
+  the signed-in device sends its nonce once it holds that; the new device
+  reveals its nonce last, once. A server that swaps a key has to fix its
+  choices before it sees either nonce, so each try matches one time in a
+  million and ends the link. The account is sent only after both people
+  confirm the codes match.
 - **Ratcheting sender keys.** Each member has a sender key per session with
   two HKDF hash chains: the text chain advances after every message
   (per-message forward secrecy); the audio chain advances every 30 s. Keys are

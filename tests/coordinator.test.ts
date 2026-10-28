@@ -1582,6 +1582,88 @@ describe('device linking', () => {
       fresh.conn.request('link.reveal', { code, to: other.conn.peer, nonce: linkNonce() }),
     ).rejects.toThrow(/another device/);
     await fresh.conn.request('link.reveal', { code, to: by, nonce: linkNonce() });
+    // It reveals once; a second nonce can't replace the first.
+    await expect(
+      fresh.conn.request('link.reveal', { code, to: by, nonce: linkNonce() }),
+    ).rejects.toThrow(/already revealed/);
     await existing.conn.request('link.send', { code, box });
+    // Once the account is sent the link is spent: no more nonces.
+    await expect(existing.conn.request('link.nonce', { code, nonce: linkNonce() })).rejects.toThrow(
+      /claim the code first/,
+    );
+  });
+
+  it('limits code lookups per connection, whatever origin the frames name', async () => {
+    const c = await server();
+    let looked = 0;
+    const findLink = c.findLink.bind(c);
+    c.findLink = (code) => {
+      looked++;
+      return findLink(code);
+    };
+    const onFlood = (
+      c.mesh as unknown as { onFlood(f: unknown, from: string, link: object): void }
+    ).onFlood.bind(c.mesh);
+    const link = {};
+    // A server that names a new origin in every frame still has one budget.
+    for (let i = 0; i < 200; i++) {
+      onFlood(
+        {
+          t: 'flood',
+          id: `q${i}`,
+          origin: `origin-${i}`,
+          hops: 9,
+          f: { t: 'link_query', qid: `q${i}`, code: 'ABCD-EFGH' },
+        },
+        'peer',
+        link,
+      );
+    }
+    expect(looked).toBeGreaterThan(0);
+    expect(looked).toBeLessThan(100);
+    // Another connection has a budget of its own.
+    const before = looked;
+    onFlood(
+      {
+        t: 'flood',
+        id: 'other',
+        origin: 'o',
+        hops: 9,
+        f: { t: 'link_query', qid: 'other', code: 'ABCD-EFGH' },
+      },
+      'peer2',
+      {},
+    );
+    expect(looked).toBe(before + 1);
+  });
+
+  it('gives each connection one budget for all the link steps', async () => {
+    const c = await server();
+    const fresh = await user(c);
+    const kemKey = createLinkKem().publicKey;
+    const { code } = await fresh.conn.request('link.open', {
+      encKey: fresh.identity.encPublicKey,
+      kemKey,
+      commit: linkNonce(),
+    });
+    const existing = await user(c);
+    // Steps that fail still cost: the tries can't be spread over claim, nonce and reveal.
+    const tries = [];
+    for (let i = 0; i < 12; i++) {
+      tries.push(
+        existing.conn
+          .request(i % 2 ? 'link.nonce' : 'link.reveal', {
+            code,
+            to: fresh.conn.peer,
+            nonce: linkNonce(),
+          })
+          .then(
+            () => 'ok',
+            (e: Error) => e.message,
+          ),
+      );
+    }
+    const results = await Promise.all(tries);
+    expect(results.filter((m) => /too many attempts/.test(m)).length).toBeGreaterThan(0);
   });
 });

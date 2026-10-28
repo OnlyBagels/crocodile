@@ -383,17 +383,17 @@ export class Mesh {
   }
 
   /**
-   * Code lookups other servers may make of us, per origin. Their clients'
-   * own claim limit applies there, which a hostile server can skip.
+   * Code lookups other servers may make of us, per connection they arrive on
+   * (not per `origin`, which the sender picks). Their clients' own claim limit
+   * applies there, which a hostile server can skip.
    */
-  private linkQueryLimits = new Map<string, RateLimiter>();
+  private linkQueryLimits = new WeakMap<Link, RateLimiter>();
 
-  private takeLinkQuery(origin: string): boolean {
-    let limiter = this.linkQueryLimits.get(origin);
+  private takeLinkQuery(link: Link): boolean {
+    let limiter = this.linkQueryLimits.get(link);
     if (!limiter) {
-      if (this.linkQueryLimits.size > 1000) this.linkQueryLimits.clear();
       limiter = new RateLimiter(5, 50);
-      this.linkQueryLimits.set(origin, limiter);
+      this.linkQueryLimits.set(link, limiter);
     }
     return limiter.take();
   }
@@ -715,7 +715,7 @@ export class Mesh {
         if (this.hub.sessions.applyRemoteVoice(frame)) this.forward(frame, peerId);
         return;
       case 'flood':
-        this.onFlood(frame, peerId);
+        this.onFlood(frame, peerId, link);
         return;
       case 'req':
         if (!link.limiter.take()) {
@@ -777,7 +777,7 @@ export class Mesh {
     }
   }
 
-  private onFlood(frame: FedFlood, from: string) {
+  private onFlood(frame: FedFlood, from: string, link: Link) {
     if (this.floodSeen.has(frame.id) || frame.origin === this.selfId) return;
     const now = Date.now();
     this.floodSeen.set(frame.id, now);
@@ -794,7 +794,7 @@ export class Mesh {
         this.hub.mailbox.onRemoteAck(f.peer, f.ids, f.proof);
         return;
       case 'link_query': {
-        if (!this.takeLinkQuery(frame.origin)) return;
+        if (!this.takeLinkQuery(link)) return;
         const found = this.hub.findLink(f.code);
         if (!found) return;
         found.claimedBy = f.by ?? `remote:${frame.origin}`;

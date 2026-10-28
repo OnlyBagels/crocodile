@@ -64,7 +64,8 @@ const COMMAND_HELP: Record<string, string> = {
 Adds this computer to your Crocodile account. It shows a code: in the
 Crocodile app on a computer where you're signed in, open the account menu,
 choose "Link another device" and type it. Then check both show the same
-security code, and confirm in the app and here.`,
+security code, and confirm in the app and here. It needs a terminal: it asks
+you to type "yes" once the codes match.`,
   init: `crocodile init <name>
 
 Makes a new account just for this computer, for example for a server or a
