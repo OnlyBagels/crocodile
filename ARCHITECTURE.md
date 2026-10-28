@@ -127,6 +127,14 @@ server learns who lists whom:
 - **Blocks** are enforced by the blocking user's apps (they ignore the
   blocked user's invitations, messages and mail), since no server knows
   about them. The blocked user is only told that they are no longer listed.
+  In a space the blocked member is treated as not there: their sender keys
+  are not taken and ours not given to them (our key is replaced when we
+  block), their messages are not kept, whoever passes them on, and files are
+  not served to them. They still share the room: a host relays them to
+  everyone who has not blocked them, and a blocker who hosts the room is still
+  connected to them. After unblocking, keys go both ways again at once
+  (ours is sent with a request for theirs); what was written in between
+  stays unreadable.
 - Apps that predate sealed lists wrote them in the open. Servers still accept
   such lists, and updated apps read them and move their own into the sealed
   form on first connection, telling everyone they list in a note.
@@ -147,10 +155,15 @@ A coordinator (`packages/coordinator`) offers a WebSocket JSON-RPC API:
    key-exchange offer (X25519 + ML-KEM-768). A second signature covers the
    rest of the hello (the STUN servers apps use, the operator's contact),
    which apps ignore when it is missing. The client checks the signatures
-   against the key in the directory listing, answers the key exchange and
-   signs the transcript. From then on every frame is AES-256-GCM encrypted
-   and padded, so metadata is confidential even over plain `ws://` to a
-   home server. Server-to-server mesh links use the same handshake.
+   against the key in the directory listing and answers the key exchange.
+   Who the client is (its key, device, app and version, and a signature over
+   the transcript) goes in the first frame sealed under that exchange, and
+   from then on every frame is AES-256-GCM encrypted and padded, so metadata
+   is confidential even over plain `ws://` to a home server: all that shows
+   is the server's own hello, the size and timing of the frames and how a
+   connection ends. Server-to-server mesh links use the same key exchange
+   but identify themselves in a frame of their own, with the server ids in
+   the clear.
 2. The client can put and get records, subscribe to prefixes, search users,
    watch presence and voice-channel occupancy, join or leave sessions, and
    send signalling messages to other session members.
@@ -342,7 +355,8 @@ effort. Everything below is automatic.
   safe even against a future quantum computer. Sealed boxes to a device use
   its current **prekey**; prekey secrets are deleted after rotation plus a
   grace period, giving forward secrecy even for keys delivered to offline
-  devices. Every box is signed by the sender's Ed25519 key.
+  devices. Every box is signed by the sender's Ed25519 key, which (with
+  the recipient's prekey) is also part of the key derivation.
 - **Ratcheting sender keys.** Each member has a sender key per session with
   two HKDF hash chains: the text chain advances after every message
   (per-message forward secrecy); the audio chain advances every 30 s. Keys are
@@ -351,7 +365,11 @@ effort. Everything below is automatic.
   membership the client verified itself from signed records. The first key
   a member gets from someone is answered with its own key once more, so a
   key lost on the way (sent while a restarted app was still connecting)
-  doesn't leave one side unable to read the other.
+  doesn't leave one side unable to read the other. A sender key names the
+  device it is for and when it was made; a member refuses one for another
+  device, one dated far from their clock, one older than the newest from the
+  same sender and one the sender has since replaced, so a recorded old key
+  can't be played back to bring expired ones to life.
 - **Voice.** An Encoded Transform worker encrypts every Opus frame with
   AES-256-GCM before packetisation:
   `ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ 0xC8`, the trailer authenticated
@@ -366,8 +384,10 @@ effort. Everything below is automatic.
   find key frames:
   `header ‖ ciphertext ‖ tag ‖ kid ‖ gen ‖ counter ‖ headerLen ‖ 0xC9`.
 - **Text.** Messages are signed by their author (so history can be re-shared
-  verifiably), padded (Padmé) to hide their exact length and encrypted with
-  the text chain.
+  verifiably) together with the space they were written in, so one space's
+  message is not taken for another's that reuses a channel id. They are
+  padded (Padmé) to hide their exact length and encrypted with the text chain.
+  A device gives a text channel id to the space it joined first.
 - **At rest.** Identity, prekeys and message history are encrypted in local
   storage with a key protected by the OS keychain.
 - **Transport.** DTLS-SRTP and SCTP-over-DTLS underneath, as in all WebRTC;
@@ -387,6 +407,10 @@ mechanisms get them everywhere they belong:
    works no matter who was online when, or whose clock is ahead. Messages
    show a small clock until confirmed. A DM with undelivered messages
    re-invites the friend as soon as they come online.
+   A DM someone starts with a person we don't know waits as a request
+   (`dmRequests`): the invite is not answered and mailed messages are dropped
+   (the sender's queue still holds them) until the user accepts, which opens
+   the DM and lets the queue through.
 3. **History sync.** On connecting, a member asks the host and backup (or the
    DM partner) for everything newer than the newest message it did not write
    offline itself. Replies are sealed to the requester and every message is
@@ -415,8 +439,10 @@ don't ride the session's relay channel but a direct connection of their own.
 author, encrypted with the text chain, synced to members who were offline)
 carrying a **manifest**: name, size, type, a random 32-byte file key and a
 **root hash**, plus for pictures and videos a tiny thumbnail (a few hundred
-bytes, still images only) and dimensions or duration. Deleting the message
-deletes the file on every member device that has it.
+bytes, still images only) and dimensions or duration. The file id is a hash
+of the author and the file key, and a message whose file id is not that is
+refused, so nobody can post a file under another member's id. Deleting the
+message deletes the file on every member device that has it.
 
 **The content.** The file is split into 1 MiB blocks, each encrypted with
 AES-256-GCM under a key derived from the file key (HKDF, salted with the file

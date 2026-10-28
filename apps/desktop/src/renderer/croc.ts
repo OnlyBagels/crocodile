@@ -5,6 +5,7 @@ import {
   VoiceEngine,
   defaultVoiceSettings,
   type ClientState,
+  pendingRequests,
   type VoiceSettings,
 } from '@crocodile/client-core';
 import { StateStore } from '@crocodile/client-core';
@@ -383,6 +384,8 @@ function useStore<S extends object, T>(store: StateStore<S>, selector: (s: S) =>
     return next;
   });
 }
+
+export { pendingRequests };
 
 /** Subscribe to a slice of client state; re-renders only when it changes (shallowly). */
 export function useCroc<T>(selector: (s: ClientState) => T): T {

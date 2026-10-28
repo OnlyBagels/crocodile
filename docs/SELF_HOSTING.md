@@ -119,8 +119,10 @@ main server puts the TCP side behind a reverse proxy on 443.
   (`--capacity`), and times out connections that don't authenticate. Each
   account can make it store at most 100 devices, 100 spaces and 500
   memberships, each space at most 1000 invites, and each account receives at
-  most 200 unread friend notes, so one account cannot
-  fill your disk (records replicated from other servers are not counted). The
+  most 200 unread friend notes (a server stops at twice that when other
+  owners copy notes to it), and a connection can only write its own
+  account's records. One account therefore cannot fill your disk, though
+  many accounts can: see [Known gaps](SECURITY.md#known-gaps). The
   built-in relay refuses to send traffic to your own machine or your private
   network (loopback, 10/8, 172.16/12, 192.168/16, link-local, CGNAT, IPv6
   ULA and similar), so relay users cannot reach your router or other home
@@ -224,7 +226,9 @@ The directory is tiny: `docker compose --profile directory up -d directory`
 (port 7400). Point coordinators at it with `CROC_DIRECTORY` and build the app
 with `CROC_DIRECTORIES=https://your-directory` to make it the default.
 Directories verify that each registered server is reachable at its advertised
-URL, and drop servers that stop sending heartbeats. One address may register
+URL, and drop servers that stop sending heartbeats. A public directory refuses
+URLs whose name resolves to a private address, connects only to the address it
+checked, and does not follow redirects. One address may register
 20 times a minute, and a directory lists at most 5000 servers. Behind a
 reverse proxy, set `CROC_DIR_TRUST_PROXY=1` (and keep port 7400 off the
 internet) so the limit applies to each server's address, not the proxy's.

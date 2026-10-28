@@ -37,6 +37,9 @@ export interface RecordQuotas {
   notesPerUser: number;
 }
 
+/** How many times the notes quota a server will hold when copies arrive from other owners. */
+const NOTE_COPIES_MAX = 2;
+
 export const defaultRecordQuotas: RecordQuotas = {
   devicesPerUser: 100,
   spacesPerUser: 100,
@@ -85,9 +88,19 @@ export class RecordService {
     private readonly quotas: RecordQuotas = defaultRecordQuotas,
   ) {}
 
-  /** Why a new record would exceed its author's quota, if it would. */
-  private overQuota(record: SignedRecord): string | undefined {
+  /** Unread notes held for the recipient of a note. */
+  private notesHeld(note: SignedRecord): number {
+    return this.store.countByTerm(`note-to:${note.key.split(':')[1]}`);
+  }
+
+  /**
+   * Why a new record would exceed its author's quota, if it would. Only notes are counted when a
+   * copy comes from another server: each owner takes a user's notes up to the quota on its own, so
+   * copies are let in past it, but only so far (a deletion marker takes no place in the count).
+   */
+  private overQuota(record: SignedRecord, fresh: boolean): string | undefined {
     const q = this.quotas;
+    if (!fresh && record.kind !== 'note') return undefined;
     switch (record.kind) {
       case 'device': {
         const { userId } = record.body as RecordBodies['device'];
@@ -115,9 +128,10 @@ export class RecordService {
           : undefined;
       }
       case 'note': {
-        const to = record.key.split(':')[1];
-        return this.store.countByTerm(`note-to:${to}`) >= q.notesPerUser
-          ? `at most ${q.notesPerUser} unread notes per account`
+        if ((record.body as RecordBodies['note']).deleted) return undefined;
+        const limit = q.notesPerUser * (fresh ? 1 : NOTE_COPIES_MAX);
+        return this.notesHeld(record) >= limit
+          ? `at most ${limit} unread notes per account`
           : undefined;
       }
       default:
@@ -176,8 +190,8 @@ export class RecordService {
       (record.body as RecordBodies['note']).deleted
     )
       return { accepted: false, current, reason: 'no such note' };
-    if (opts.fresh && grows) {
-      const over = this.overQuota(record);
+    if (grows) {
+      const over = this.overQuota(record, opts.fresh);
       if (over) return { accepted: false, current, reason: `quota reached: ${over}` };
     }
     const seq = this.store.put(record);

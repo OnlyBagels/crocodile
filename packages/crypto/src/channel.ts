@@ -6,7 +6,9 @@ import { pad, unpad } from './padding';
 /**
  * Encrypted, length-padded frames over an existing WebSocket. Used between
  * clients and coordination servers and between servers in the mesh, so
- * metadata stays confidential even over plain ws:// to home-hosted servers.
+ * what is said stays confidential even over plain ws:// to home-hosted
+ * servers. A client's sign-in is sealed too; a server's own id is not (the
+ * hello, and a server's identification to another server).
  *
  * Key agreement is hybrid (X25519 + ML-KEM-768) with fresh keys per
  * connection on both sides (forward secret); the handshake messages are
@@ -46,6 +48,13 @@ export function acceptChannel(keys: ChannelKeys, answer: { epk: string; kem: str
   const ssKem = ml_kem768.decapsulate(fromB64u(answer.kem), keys.mlkemSecret);
   return concatBytes(ssX, ssKem);
 }
+
+/**
+ * What the channel that carries a client's sign-in is bound to. It is apart from the channel for
+ * the rest of the connection, which also names the client (known only once the sign-in is open).
+ */
+export const signInChannelContext = (challenge: string, serverId: string) =>
+  `${challenge}|${serverId}|auth`;
 
 export class SecureChannel {
   private sendN = 0;

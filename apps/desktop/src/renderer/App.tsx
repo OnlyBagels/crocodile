@@ -7,6 +7,7 @@ import {
   getClient,
   navigate,
   openModal,
+  pendingRequests,
   playSound,
   sounds,
   ui,
@@ -547,7 +548,7 @@ function useGlobalBehaviours() {
   );
 
   const totalUnread = useCroc(
-    (s) => Object.values(s.unread).reduce((a, b) => a + b, 0) + s.friends.incoming.length,
+    (s) => Object.values(s.unread).reduce((a, b) => a + b, 0) + pendingRequests(s),
   );
   useEffect(() => {
     void desktop?.app.setBadge(totalUnread);

@@ -77,6 +77,31 @@ describe('crocodile (command line)', () => {
     expect(alice.err.join('\n')).toMatch(new RegExp(`${bobTag} has report.bin`));
   }, 120_000);
 
+  it('says who wants to send something when get was not told whose files to take', async () => {
+    const coord = await startCoordinator({ stunPort: 0 });
+    stops.push(() => coord.stop());
+    const alice = person('alice', coord.url);
+    const bob = person('bob', coord.url);
+    expect(await alice.cmd('init', 'alice')).toBe(0);
+    expect(await bob.cmd('init', 'bob')).toBe(0);
+    const aliceTag = alice.out.at(-1)!;
+    const bobTag = bob.out.at(-1)!;
+    writeFileSync(join(alice.cwd, 'note.txt'), 'hello');
+
+    const waiting = bob.cmd('get');
+    const sending = alice.cmd('send', 'note.txt', '--to', bobTag);
+    await waitFor(
+      () => bob.err.some((l) => l.includes(`${aliceTag} wants to send you something`)),
+      30_000,
+      'a hint',
+    );
+    expect(bob.err.join('\n')).toContain(`get --from ${aliceTag}`);
+    expect(bob.err.join('\n')).not.toMatch(/Receiving/);
+    bob.stop();
+    alice.stop();
+    await Promise.all([waiting, sending]);
+  }, 60_000);
+
   it('carries on a download stopped half way when run again', async () => {
     const coord = await startCoordinator({ stunPort: 0 });
     stops.push(() => coord.stop());

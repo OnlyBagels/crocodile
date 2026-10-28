@@ -85,34 +85,43 @@ export class RpcFailure extends Error {
  */
 export const FRAME_BUDGET = 512 * 1024;
 
-const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+export const jsonBytes = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
 
 /**
  * Splits items into runs whose JSON fits in `budget` bytes and `max` items.
  * A single item larger than the budget goes alone (records are smaller).
  */
 export function chunkByBytes<T>(items: T[], budget = FRAME_BUDGET, max = Infinity): T[][] {
-  const out: T[][] = [];
+  return [...runsByBytes(items, budget, max)];
+}
+
+/** `chunkByBytes`, one run at a time: the first costs no more than it takes to fill it. */
+function* runsByBytes<T>(items: T[], budget: number, max = Infinity): Generator<T[]> {
   let run: T[] = [];
   // A run's JSON: its items, a comma or bracket after each, and "[" first.
   let size = 1;
   for (const item of items) {
     const n = jsonBytes(item) + 1;
     if (run.length && (size + n > budget || run.length >= max)) {
-      out.push(run);
+      yield run;
       run = [];
       size = 1;
     }
     run.push(item);
     size += n;
   }
-  if (run.length) out.push(run);
-  return out;
+  if (run.length) yield run;
 }
 
 /** The longest leading run of items that fits in `budget` bytes. */
 export function withinBytes<T>(items: T[], budget = FRAME_BUDGET): T[] {
-  return chunkByBytes(items, budget)[0] ?? [];
+  return runsByBytes(items, budget).next().value ?? [];
+}
+
+/** What fits in one frame, and `more` when something was left out. */
+export function cutToFrame<T>(items: T[]): { records: T[]; more?: true } {
+  const records = withinBytes(items);
+  return records.length < items.length ? { records, more: true } : { records };
 }
 
 /**

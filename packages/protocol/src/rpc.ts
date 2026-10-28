@@ -112,12 +112,23 @@ export function helloFullPayload(h: Omit<ServerHello, 'sig' | 'sigFull'>) {
   };
 }
 
+/**
+ * The client's answer to the hello. Only its half of the channel is in the clear; who it is
+ * travels sealed under that channel (see `ClientAuthBody`), so that someone watching a plain
+ * `ws://` connection learns neither the user nor the device.
+ */
 export const ClientAuth = z.object({
   t: z.literal('auth'),
-  key: z.string(),
-  device: DeviceId,
   /** Client's half of the channel: ephemeral X25519 key and ML-KEM ciphertext. */
   channel: z.object({ epk: z.string().max(64), kem: z.string().max(2000) }),
+  /** A `ClientAuthBody`, sealed as the first frame (`n` 0) of a channel used for it alone. */
+  sealed: z.object({ n: z.literal(0), c: z.string().max(8000) }),
+});
+export type ClientAuth = z.infer<typeof ClientAuth>;
+
+export const ClientAuthBody = z.object({
+  key: z.string(),
+  device: DeviceId,
   /** Signature over (challenge, server.id, device, channel). */
   sig: z.string(),
   client: z.object({
@@ -125,7 +136,7 @@ export const ClientAuth = z.object({
     version: z.string().max(32),
   }),
 });
-export type ClientAuth = z.infer<typeof ClientAuth>;
+export type ClientAuthBody = z.infer<typeof ClientAuthBody>;
 
 export interface AuthOk {
   t: 'auth_ok';
@@ -253,6 +264,8 @@ export const RpcParams = {
   'records.list': z.object({
     prefix: z.string().min(3).max(200),
     limit: z.number().int().min(1).max(5000).optional(),
+    /** Continue after this key, when the previous answer said there is more. */
+    after: z.string().max(200).optional(),
   }),
   'records.subscribe': z.object({ prefixes: z.array(z.string().min(3).max(200)).max(2000) }),
   'users.search': z.object({ query: z.string().min(1).max(64) }),
@@ -305,8 +318,16 @@ export const RpcParams = {
 
 export interface RpcMethods {
   'records.put': { accepted: boolean; current: SignedRecord | null; reason?: string };
-  'records.get': { records: SignedRecord[] };
-  'records.list': { records: SignedRecord[] };
+  /**
+   * `more`: the answer was cut to fit one frame; ask again for the keys from index `next` on.
+   * Keys before it were answered, or have no record to give.
+   */
+  'records.get': { records: SignedRecord[]; more?: boolean; next?: number };
+  /**
+   * `more`: there are records after these. Ask again with `after` the last key returned, or `next`
+   * if given (a page that held nothing to return).
+   */
+  'records.list': { records: SignedRecord[]; more?: boolean; next?: string };
   'records.subscribe': Record<string, never>;
   'users.search': { profiles: SignedRecord<'profile'>[] };
   'friends.incoming': { records: SignedRecord<'friends'>[] };
