@@ -68,7 +68,8 @@ dropped, not kept (it would crowd out friends' mail on the server); their app
 still holds the messages and delivers them once you accept and both are
 online. At most 50 requests are kept, the newest first, so a flood can push a
 real one out. The command line `get --from <name>` takes up
-that person's request while it runs, because naming them is asking to receive.
+that person's request while it runs, because naming them is asking to receive;
+without `--from` it only says who is waiting.
 
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the

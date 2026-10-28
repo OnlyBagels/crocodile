@@ -15,7 +15,7 @@ import {
   ShieldCheck,
 } from 'lucide-react';
 import { sessionIds } from '@crocodile/protocol';
-import { getClient, navigate, openModal, useCroc, useUi } from '../croc';
+import { getClient, navigate, openModal, pendingRequests, useCroc, useUi } from '../croc';
 import { dmStatusLabel } from '../lib/connection';
 import { colorFor, initials } from '../lib/format';
 import { Avatar, Menu, MenuItem, UserName, cx } from './ui';
@@ -281,7 +281,7 @@ export function HomeSidebar() {
   const dms = useCroc((s) => s.dms);
   const me = useCroc((s) => s.me?.userId);
   const unread = useCroc((s) => s.unread);
-  const incoming = useCroc((s) => s.friends.incoming.length + s.dmRequests.length);
+  const incoming = useCroc(pendingRequests);
   const presence = useCroc((s) => s.presence);
   const sessions = useCroc((s) => s.sessions);
   return (

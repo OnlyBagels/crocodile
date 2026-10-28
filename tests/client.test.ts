@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CoordinatorLink,
   CrocodileClient,
+  pendingRequests,
   GroupKeyring,
   MemoryKeyValueStore,
   MemoryMessageStore,
@@ -1808,6 +1809,32 @@ describe('conversations from people we do not know', () => {
     expect(bob.state.dmRequests).toEqual([]);
     expect(joined(bob, dm)).toBe(true);
     expect(dm).toBe(sessionIdOf(alice, bob));
+  });
+});
+
+describe('requests waiting on us', () => {
+  const friends = (incoming: string[]) => ({
+    friends: [],
+    incoming,
+    outgoing: [],
+    blocked: [],
+  });
+
+  it('counts a person who asked both ways once', () => {
+    expect(pendingRequests({ friends: friends(['a', 'b']), dmRequests: ['b', 'c'] })).toBe(3);
+    expect(pendingRequests({ friends: friends([]), dmRequests: [] })).toBe(0);
+  });
+
+  it('keeps no more than the newest 50 message requests', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const add = (u: string) =>
+      (alice as unknown as { addDmRequest(u: string): void }).addDmRequest(u);
+    for (let i = 0; i < 55; i++) add(`stranger${i}`);
+    expect(alice.state.dmRequests).toHaveLength(50);
+    expect(alice.state.dmRequests[0]).toBe('stranger54');
+    expect(alice.state.dmRequests).not.toContain('stranger4');
   });
 });
 

@@ -10,7 +10,7 @@ import {
   Users,
 } from 'lucide-react';
 import type { ProfileView } from '@crocodile/client-core';
-import { getClient, navigate, openModal, useCroc } from '../croc';
+import { getClient, navigate, openModal, pendingRequests, useCroc } from '../croc';
 import { CrocMark } from './Logo';
 import { Avatar, Button, IconButton, UserName, cx } from './ui';
 
@@ -23,7 +23,10 @@ export function PeopleView() {
   const client = getClient();
   const online = friends.friends.filter((f) => presence[f] && presence[f] !== 'offline');
   const dmRequests = useCroc((s) => s.dmRequests);
-  const requestCount = dmRequests.length + friends.incoming.length + friends.outgoing.length;
+  // Someone who asked both ways is one card, the friend request.
+  const messageRequests = dmRequests.filter((u) => !friends.incoming.includes(u));
+  const waiting = useCroc(pendingRequests);
+  const requestCount = waiting + friends.outgoing.length;
   const tabs: [Tab, string, number][] = [
     ['all', 'All', friends.friends.length],
     ['online', 'Online', online.length],
@@ -37,7 +40,7 @@ export function PeopleView() {
         ? online.map((u) => ({ u, kind: 'friend' as const }))
         : tab === 'requests'
           ? [
-              ...dmRequests.map((u) => ({ u, kind: 'message' as const })),
+              ...messageRequests.map((u) => ({ u, kind: 'message' as const })),
               ...friends.incoming.map((u) => ({ u, kind: 'incoming' as const })),
               ...friends.outgoing.map((u) => ({ u, kind: 'outgoing' as const })),
             ]
@@ -65,9 +68,7 @@ export function PeopleView() {
                 <span
                   className={cx(
                     'rounded-full px-1.5 text-[10px]',
-                    id === 'requests' && (friends.incoming.length || dmRequests.length)
-                      ? 'bg-danger text-white'
-                      : 'bg-hover',
+                    id === 'requests' && waiting ? 'bg-danger text-white' : 'bg-hover',
                   )}
                 >
                   {n}
@@ -155,10 +156,7 @@ export function PeopleView() {
                     <>
                       <Button
                         className="h-8 flex-1 px-3 text-xs"
-                        onClick={() => {
-                          void client.acceptDmRequest(u);
-                          navigate({ kind: 'dm', userId: u });
-                        }}
+                        onClick={() => navigate({ kind: 'dm', userId: u })}
                       >
                         <Check size={14} /> Accept
                       </Button>

@@ -388,6 +388,10 @@ export interface ClientState {
   files: Record<string, FileView>;
 }
 
+/** People waiting on us: friend requests and message requests, each person once. */
+export const pendingRequests = (s: Pick<ClientState, 'friends' | 'dmRequests'>) =>
+  new Set([...s.friends.incoming, ...s.dmRequests]).size;
+
 export type ClientEvents = {
   /** `update`: an edit or deletion of an earlier message, not a new one. */
   message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
@@ -1199,7 +1203,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (this.state.friends.blocked.includes(other)) continue;
         // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
         // queue still holds it, and goes through once we accept). Only the sender can ask.
-        if (!this.knowsForDm(other)) {
+        // What another device of ours sent is our own conversation, whoever it was to.
+        if (sender !== this.userId && !this.knowsForDm(other)) {
           if (other === sender) this.addDmRequest(other);
           continue;
         }

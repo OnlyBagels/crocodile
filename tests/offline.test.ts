@@ -180,6 +180,55 @@ describe('offline delivery', () => {
     expect(again.state.dmRequests).toContain(alice.userId);
   });
 
+  it('keeps what one of our devices sent to someone we do not know on our other devices', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice1 = await signUp(makeClient(net, coord), 'alice');
+    const bob0 = await signUp(makeClient(net, coord), 'bob');
+    // A second device of Alice's, which then goes offline.
+    const alice2a = makeClient(net, coord);
+    await alice2a.init();
+    await alice2a.startDeviceLink();
+    const code = await waitFor(
+      () => (alice2a.state.linking?.role === 'new' ? alice2a.state.linking.code : undefined),
+      5000,
+      'code',
+    );
+    await alice1.claimDeviceLink(code);
+    await waitFor(
+      () => alice2a.state.linking?.role === 'new' && alice2a.state.linking.step === 'claimed',
+      5000,
+      'claimed',
+    );
+    await alice1.confirmDeviceLink();
+    await waitFor(
+      () => alice2a.identity?.userId === alice1.userId && alice2a.state.link === 'connected',
+      8000,
+      'second device',
+    );
+    await waitFor(() => alice1.state.devices.length === 2, 8000, 'device list');
+    await waitFor(
+      () => coord.store.listPrefix(`device:${bob0.userId}`, 1).length > 0,
+      8000,
+      'bob device',
+    );
+    await alice1.updateSettings({ useMailbox: true });
+    await alice2a.shutdown();
+    const dm = await alice1.openDm(bob0.userId);
+    await alice1.openChannel(dm);
+    await bob0.shutdown();
+    await alice1.sendMessage(dm, 'to a stranger');
+    await waitFor(
+      () => alice1.state.messages[dm]!.find((m) => m.body === 'to a stranger')?.mailed,
+      15000,
+      'mailed',
+    );
+    const alice2 = await restart(net, alice2a, coord);
+    await alice2.openChannel(dm);
+    await waitFor(() => bodies(alice2, dm).includes('to a stranger'), 15000, 'on the other device');
+    expect(alice2.state.dms).toContain(bob0.userId);
+  });
+
   it('delivers what the sender still holds once the request is accepted', async () => {
     const { net, coord, alice: alice0, bob, dm } = await mailedByStranger();
     await bob.acceptDmRequest(alice0.userId);
