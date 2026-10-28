@@ -201,6 +201,15 @@ describe('group session', () => {
     expect(joins()).toBe(0);
   });
 
+  it('waits for a join under way on a new connection before asking for a relay', async () => {
+    const { s, joins } = joinFirst();
+    s.applyState(state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1));
+    void s.join({ fresh: true });
+    await s.useServerRelay();
+    expect(s.relayGrant).not.toBeNull();
+    expect(joins()).toBe(1);
+  });
+
   it('does not take a relay when it was left while joining', async () => {
     const { s } = joinFirst();
     const asking = s.useServerRelay();

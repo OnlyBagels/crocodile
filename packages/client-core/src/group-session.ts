@@ -654,7 +654,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     try {
       // The server only grants a relay to a member, and a session we left stays left.
       if (this.left) return this.ctx.log('relay not used: the session was left', {});
-      if (!this.state) {
+      // Not joined, or joining again on a new connection: the state we hold is the old one's.
+      if (!this.state || this.joining) {
         await this.join();
         if (this.left) return;
       }
