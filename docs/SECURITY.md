@@ -97,11 +97,22 @@ picture size.
   `@noble/ciphers`). All audited, pure-TypeScript implementations.
 - Sealed boxes to a device: X25519 and ML-KEM-768 against the device's
   current prekey (rotated weekly, secret deleted after a grace period), HKDF,
-  AES-GCM; signed by the sender and bound to sender and recipient devices.
+  AES-GCM; signed by the sender, and the sender's key and device and the
+  recipient's prekey go into the key derivation, so whoever carries a box
+  can't put their own signature on it.
 - Sender keys with a per-message text ratchet and a 30-second audio ratchet,
-  replaced every 30 minutes and on leave.
+  replaced every 30 minutes and on leave. A key is sealed with its
+  recipient device and the time; a member takes it only if it is for them,
+  within ten minutes of their clock, not older than the newest key from
+  that sender and not one the sender has since replaced.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
+  A listener takes each counter once per key (a window of the last 1024), so
+  a frame it took can't be played again, not even by cutting its connection
+  first. The counters are forgotten 45 seconds after the last connection that
+  had the key ends; coming back later, a listener starts from the sender's
+  key as last sent, so frames recorded in the minutes after that can be
+  played once. A host can still hold back frames, and deliver one late.
 - Video: per-frame AES-GCM with keys from the audio chain under a separate
   label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
   and is authenticated with the trailer.

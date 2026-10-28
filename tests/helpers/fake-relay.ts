@@ -117,6 +117,13 @@ export class FakeRelayNetwork {
   /** Block bytes the holder had sent when that cut happened. */
   bytesAtCut = 0;
 
+  /** Hand `d` to `to` as if `from` had sent it directly in the session (a hostile or replaying peer). */
+  injectDirect(sessionId: string, from: string, to: string, d: unknown) {
+    for (const [key, relay] of this.relays)
+      if (key.startsWith(`${sessionId}|`))
+        relay.peers.get(to)?.t.deliver({ t: 'msg', from, direct: true, d } as RelayToClient);
+  }
+
   /** Lose the next `count` direct (sealed) session messages a user sends. */
   dropDirectFrom?: { user: string; count: number };
 
