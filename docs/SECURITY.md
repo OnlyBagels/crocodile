@@ -102,6 +102,12 @@ picture size.
   replaced every 30 minutes and on leave.
 - Voice: per-frame AES-GCM with an authenticated SFrame-style trailer
   `(kid, generation, counter)`; constant-bitrate Opus.
+  A listener takes each counter once per key (a window of the last 1024), so
+  a frame it took can't be played again, not even by cutting its connection
+  first. The counters are forgotten 45 seconds after the last connection that
+  had the key ends; coming back later, a listener starts from the sender's
+  key as last sent, so frames recorded in the minutes after that can be
+  played once. A host can still hold back frames, and deliver one late.
 - Video: per-frame AES-GCM with keys from the audio chain under a separate
   label; the VP8 payload header (3 bytes, 10 on key frames) stays readable
   and is authenticated with the trailer.
