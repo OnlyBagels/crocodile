@@ -401,9 +401,9 @@ export type ClientEvents = {
 const APP_VERSION_FALLBACK = '0.1.0';
 /** How far ahead of our clock a message's time may be before it is refused. */
 const MAX_AHEAD_MS = 5 * 60_000;
-/** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 /** Conversations from people we don't know that wait for an answer (the newest are kept). */
 const DM_REQUESTS_MAX = 50;
+/** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
 const MAIL_BOX_BYTES = 48 * 1024;
@@ -769,6 +769,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('device-id');
     await this.platform.kv.delete('outbox');
     await this.platform.kv.delete('friend-list');
+    await this.platform.kv.delete('dms');
+    await this.platform.kv.delete('dm-requests');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
@@ -994,18 +996,37 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     }
     for (const s of this.sessions.values())
       void s.join().catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
-    // Mail held for this device while it was offline, anywhere in the mesh.
-    // Signed for this server, so the others send their mail for us here too.
+    this.fetchMail();
+    this.scheduleMail();
+  }
+
+  /**
+   * Mail held for this device while it was offline, anywhere in the mesh. Signed for this
+   * server, so the others send their mail for us here too.
+   */
+  private fetchMail() {
     const server = this.state.server?.info.id;
-    void link
-      .request(
+    void this.link
+      ?.request(
         'mail.fetch',
         server
           ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
           : {},
       )
       .catch(() => {});
-    this.scheduleMail();
+  }
+
+  /** Mail from people who are requests, left on the server until we decide. */
+  private heldMail = new Map<string, string[]>();
+
+  private ackMail(ids: string[]) {
+    if (!ids.length) return;
+    void this.link
+      ?.request('mail.ack', {
+        ids,
+        proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids }),
+      })
+      .catch(() => {});
   }
 
   // ===========================================================================
@@ -1177,21 +1198,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
         const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
         if (this.state.friends.blocked.includes(other)) continue;
-        // Someone we don't know is a request, not a message: nothing of it is kept.
+        // Someone we don't know is a request, not a message: the mail stays on the server,
+        // unread, until we accept (it is fetched again then) or decline (it is deleted).
         if (!this.knowsForDm(other)) {
           this.addDmRequest(other);
-          continue;
+          const held = this.heldMail.get(other) ?? [];
+          if (!held.includes(item.id)) this.heldMail.set(other, [...held, item.id].slice(-100));
+          done.splice(done.indexOf(item.id), 1);
+          break;
         }
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length)
-      await this.link
-        ?.request('mail.ack', {
-          ids: done,
-          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
-        })
-        .catch(() => {});
+    this.ackMail(done);
   }
 
   private async ensureProfilePublished() {
@@ -1525,7 +1544,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set({ friends: this.friendsView() });
     // A request from someone we blocked is gone; from someone we now know, taken up.
     for (const u of this.state.dmRequests) {
-      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u);
+      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u, true);
       else if (this.knowsForDm(u)) void this.acceptDmRequest(u).catch(() => {});
     }
     for (const s of this.sessions.values()) s.recheckPeers();
@@ -2792,7 +2811,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     void this.fetchProfiles([userId]).catch(() => {});
   }
 
-  private dropDmRequest(userId: string) {
+  /** Forgets a request; `discard` also deletes the mail they left, unread. */
+  private dropDmRequest(userId: string, discard = false) {
+    const held = this.heldMail.get(userId) ?? [];
+    this.heldMail.delete(userId);
+    if (discard) this.ackMail(held);
     if (!this.state.dmRequests.includes(userId)) return;
     const dmRequests = this.state.dmRequests.filter((u) => u !== userId);
     this.store.set({ dmRequests });
@@ -2801,15 +2824,19 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   /** Takes up a conversation someone started: from now on we join it and they can reach us. */
   async acceptDmRequest(userId: string) {
-    this.dropDmRequest(userId);
     await this.openDm(userId);
   }
 
   declineDmRequest(userId: string) {
-    this.dropDmRequest(userId);
+    this.dropDmRequest(userId, true);
   }
 
   private addDm(userId: string) {
+    // Opening a conversation, however it came about, answers a request: what they left is read.
+    if (this.state.dmRequests.includes(userId) || this.heldMail.has(userId)) {
+      this.dropDmRequest(userId);
+      this.fetchMail();
+    }
     if (this.state.dms.includes(userId)) return;
     const dms = [userId, ...this.state.dms];
     this.store.set({ dms });

@@ -1772,6 +1772,22 @@ describe('conversations from people we do not know', () => {
     await waitFor(() => joined(bob, dm), 5000, 'joined');
   });
 
+  it('is answered by opening the conversation any other way, too', async () => {
+    const { alice, bob } = await pair();
+    await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    await bob.openDm(alice.userId);
+    expect(bob.state.dmRequests).toEqual([]);
+  });
+
+  it('is dropped when the sender is blocked later', async () => {
+    const { alice, bob } = await pair();
+    await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    await bob.block(alice.userId);
+    expect(bob.state.dmRequests).toEqual([]);
+  });
+
   it('is not a request from a friend: their conversation is joined as before', async () => {
     const { alice, bob } = await pair();
     await alice.addFriend(bob.userId);

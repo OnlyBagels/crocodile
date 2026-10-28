@@ -82,9 +82,9 @@ while this computer was off, if the sender is still online), downloads it
 straight from the sender and saves it. Prints the saved path. With --keep
 it goes on receiving until you stop it.
 
-While it runs, it takes up a conversation that someone you don't know
-starts (only from the person named with --from, if you give one); the app
-would show it as a request to accept. Name the sender when you can.`,
+With --from it also takes up a conversation that person starts while it
+runs, even if they aren't a friend yet (the app would show a request to
+accept). Without --from, only friends and existing conversations are heard.`,
   whoami: `crocodile whoami
 
 Shows the account this computer uses (name#tag and user id).`,
@@ -453,11 +453,11 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
     const file = client.files!.manifest(f.id);
     if (file && !f.complete && !f.mine && f.sessionId.startsWith('dm:')) add(f.author, file);
   }
-  // Naming the sender, or running this at all, is asking to hear from them: a conversation
-  // someone starts is taken up while this runs (the app would wait for an answer).
+  // Naming the sender is asking to hear from them: a conversation they start is taken up while
+  // this runs (the app would wait for an answer). Without a name, only people already known.
   const takeRequests = () => {
-    for (const u of client.state.dmRequests)
-      if (!from || u === from) void client.acceptDmRequest(u);
+    if (from && client.state.dmRequests.includes(from))
+      void client.acceptDmRequest(from).catch(() => {});
   };
   takeRequests();
   io.err(`Waiting for files${opts.from ? ` from ${opts.from}` : ''} (Ctrl+C to stop)…`);

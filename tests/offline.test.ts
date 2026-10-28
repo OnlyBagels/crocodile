@@ -142,7 +142,7 @@ describe('offline delivery', () => {
     await waitFor(() => a.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
   });
 
-  it('keeps nothing mailed by someone we do not know, and shows a request instead', async () => {
+  async function mailedByStranger() {
     const coord = await server();
     const net = new FakeRelayNetwork();
     const alice = await signUp(makeClient(net, coord), 'alice');
@@ -166,9 +166,33 @@ describe('offline delivery', () => {
     await alice.shutdown();
     const bob = await restart(net, bob0, coord);
     await waitFor(() => bob.state.dmRequests.includes(alice.userId), 15000, 'a request');
-    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+    return { coord, net, alice, bob, dm };
+  }
+
+  it('leaves mail from someone we do not know on the server, unread, as a request', async () => {
+    const { coord, alice, bob, dm } = await mailedByStranger();
+    await new Promise((r) => setTimeout(r, 500));
+    expect(coord.store.mailCount({ toUser: bob.userId })).toBeGreaterThan(0);
     expect(bob.state.dms).not.toContain(alice.userId);
     expect(bodies(bob, dm)).toEqual([]);
+  });
+
+  it('reads that mail once the request is accepted', async () => {
+    const { coord, alice, bob, dm } = await mailedByStranger();
+    await bob.acceptDmRequest(alice.userId);
+    await bob.openChannel(dm);
+    await waitFor(() => bodies(bob, dm).includes('mailed hello'), 15000, 'the mail');
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+  });
+
+  it('deletes that mail unread when the request is declined, and keeps the request over a restart', async () => {
+    const { coord, net, alice, bob, dm } = await mailedByStranger();
+    const again = await restart(net, bob, coord);
+    expect(again.state.dmRequests).toContain(alice.userId);
+    again.declineDmRequest(alice.userId);
+    await waitFor(() => coord.store.mailCount({ toUser: again.userId }) === 0, 8000, 'deleted');
+    expect(again.state.dms).not.toContain(alice.userId);
+    expect(bodies(again, dm)).toEqual([]);
   });
 
   it('mails many long messages in boxes and requests the server takes', async () => {
