@@ -10,7 +10,7 @@ import {
   Users,
 } from 'lucide-react';
 import type { ProfileView } from '@crocodile/client-core';
-import { getClient, navigate, openModal, useCroc } from '../croc';
+import { getClient, navigate, openModal, pendingRequests, useCroc } from '../croc';
 import { CrocMark } from './Logo';
 import { Avatar, Button, IconButton, UserName, cx } from './ui';
 
@@ -22,7 +22,11 @@ export function PeopleView() {
   const presence = useCroc((s) => s.presence);
   const client = getClient();
   const online = friends.friends.filter((f) => presence[f] && presence[f] !== 'offline');
-  const requestCount = friends.incoming.length + friends.outgoing.length;
+  const dmRequests = useCroc((s) => s.dmRequests);
+  // Someone who asked both ways is one card, the friend request.
+  const messageRequests = dmRequests.filter((u) => !friends.incoming.includes(u));
+  const waiting = useCroc(pendingRequests);
+  const requestCount = waiting + friends.outgoing.length;
   const tabs: [Tab, string, number][] = [
     ['all', 'All', friends.friends.length],
     ['online', 'Online', online.length],
@@ -36,6 +40,7 @@ export function PeopleView() {
         ? online.map((u) => ({ u, kind: 'friend' as const }))
         : tab === 'requests'
           ? [
+              ...messageRequests.map((u) => ({ u, kind: 'message' as const })),
               ...friends.incoming.map((u) => ({ u, kind: 'incoming' as const })),
               ...friends.outgoing.map((u) => ({ u, kind: 'outgoing' as const })),
             ]
@@ -63,9 +68,7 @@ export function PeopleView() {
                 <span
                   className={cx(
                     'rounded-full px-1.5 text-[10px]',
-                    id === 'requests' && friends.incoming.length
-                      ? 'bg-danger text-white'
-                      : 'bg-hover',
+                    id === 'requests' && waiting ? 'bg-danger text-white' : 'bg-hover',
                   )}
                 >
                   {n}
@@ -97,7 +100,7 @@ export function PeopleView() {
           <div className="mt-6 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
             {rows.map(({ u, kind }) => (
               <div
-                key={u}
+                key={`${kind}:${u}`}
                 className="rounded-2xl border border-line bg-island-2 p-4 transition hover:border-accent/40"
               >
                 <button
@@ -108,13 +111,15 @@ export function PeopleView() {
                   <div className="min-w-0">
                     <UserName userId={u} className="block truncate font-bold" />
                     <div className="text-xs text-muted">
-                      {kind === 'incoming'
-                        ? 'Wants to be friends'
-                        : kind === 'outgoing'
-                          ? 'Request sent'
-                          : kind === 'blocked'
-                            ? 'Blocked'
-                            : (presence[u] ?? 'offline')}
+                      {kind === 'message'
+                        ? 'Wants to message you'
+                        : kind === 'incoming'
+                          ? 'Wants to be friends'
+                          : kind === 'outgoing'
+                            ? 'Request sent'
+                            : kind === 'blocked'
+                              ? 'Blocked'
+                              : (presence[u] ?? 'offline')}
                     </div>
                   </div>
                 </button>
@@ -144,6 +149,26 @@ export function PeopleView() {
                         onClick={() => void client.removeFriend(u)}
                       >
                         <UserMinus size={15} />
+                      </IconButton>
+                    </>
+                  )}
+                  {kind === 'message' && (
+                    <>
+                      <Button
+                        className="h-8 flex-1 px-3 text-xs"
+                        onClick={() => navigate({ kind: 'dm', userId: u })}
+                      >
+                        <Check size={14} /> Accept
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        className="h-8 px-3 text-xs"
+                        onClick={() => client.declineDmRequest(u)}
+                      >
+                        Decline
+                      </Button>
+                      <IconButton label="Block" size={32} onClick={() => void client.block(u)}>
+                        <ShieldBan size={15} />
                       </IconButton>
                     </>
                   )}

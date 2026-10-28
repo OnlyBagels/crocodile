@@ -18,6 +18,7 @@ import {
   installUpdate,
   navigate,
   openModal,
+  pendingRequests,
   ui,
   useCroc,
   useUi,
@@ -34,7 +35,7 @@ export function TopBar() {
   const dmUnread = useCroc((s) =>
     Object.entries(s.unread).some(([ch, n]) => ch.startsWith('dm:') && n > 0),
   );
-  const requests = useCroc((s) => s.friends.incoming.length);
+  const requests = useCroc(pendingRequests);
   const list = Object.values(spaces).sort((a, b) => a.name.localeCompare(b.name));
 
   return (
@@ -210,7 +211,7 @@ function ConnectionPill() {
 function AccountMenu() {
   const me = useCroc((s) => s.me);
   const status = useCroc((s) => s.settings.status);
-  const requests = useCroc((s) => s.friends.incoming.length);
+  const requests = useCroc(pendingRequests);
   const client = getClient();
   if (!me) return null;
   const statuses = [
@@ -265,7 +266,7 @@ function AccountMenu() {
           {requests > 0 && (
             <MenuItem
               icon={<Bell size={16} />}
-              label={`${requests} friend request${requests === 1 ? '' : 's'}`}
+              label={`${requests} request${requests === 1 ? '' : 's'}`}
               onClick={() => {
                 close();
                 navigate({ kind: 'friends' });

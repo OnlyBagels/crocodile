@@ -343,6 +343,8 @@ export interface ClientState {
   voice: Record<string, VoiceOccupancy>;
   sessions: Record<string, SessionView>;
   dms: string[];
+  /** People we don't know who started a conversation: nothing is shared until we accept. */
+  dmRequests: string[];
   messages: Record<string, MessageView[]>;
   unread: Record<string, number>;
   typing: Record<string, Record<string, number>>;
@@ -386,6 +388,10 @@ export interface ClientState {
   files: Record<string, FileView>;
 }
 
+/** People waiting on us: friend requests and message requests, each person once. */
+export const pendingRequests = (s: Pick<ClientState, 'friends' | 'dmRequests'>) =>
+  new Set([...s.friends.incoming, ...s.dmRequests]).size;
+
 export type ClientEvents = {
   /** `update`: an edit or deletion of an earlier message, not a new one. */
   message: { channel: string; message: ChatMessage; mine: boolean; update: boolean };
@@ -399,6 +405,8 @@ export type ClientEvents = {
 const APP_VERSION_FALLBACK = '0.1.0';
 /** How far ahead of our clock a message's time may be before it is refused. */
 const MAX_AHEAD_MS = 5 * 60_000;
+/** Conversations from people we don't know that wait for an answer (the newest are kept). */
+const DM_REQUESTS_MAX = 50;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
@@ -485,6 +493,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       voice: {},
       sessions: {},
       dms: [],
+      dmRequests: [],
       messages: {},
       unread: {},
       typing: {},
@@ -567,10 +576,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}),
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
+    const dmRequests = (await this.platform.kv.get<string[]>('dm-requests')) ?? [];
     await this.loadDevice();
     await this.outbox.load();
     await this.files?.load();
-    this.store.set({ settings, dms, deviceId: this.deviceId });
+    this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
@@ -763,6 +773,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     await this.platform.kv.delete('device-id');
     await this.platform.kv.delete('outbox');
     await this.platform.kv.delete('friend-list');
+    await this.platform.kv.delete('dms');
+    await this.platform.kv.delete('dm-requests');
     this.outbox = new Outbox(this.platform.kv);
     clearTimeout(this.mailTimer);
     clearInterval(this.prekeyTimer);
@@ -783,6 +795,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       sessions: {},
       messages: {},
       dms: [],
+      dmRequests: [],
       devices: [],
       voiceSession: null,
       outgoingCall: null,
@@ -989,18 +1002,34 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       void s
         .join({ fresh: true })
         .catch((err) => this.log('join failed', { id: s.sessionId, err: String(err) }));
-    // Mail held for this device while it was offline, anywhere in the mesh.
-    // Signed for this server, so the others send their mail for us here too.
+    this.fetchMail();
+    this.scheduleMail();
+  }
+
+  /**
+   * Mail held for this device while it was offline, anywhere in the mesh. Signed for this
+   * server, so the others send their mail for us here too.
+   */
+  private fetchMail() {
     const server = this.state.server?.info.id;
-    void link
-      .request(
+    void this.link
+      ?.request(
         'mail.fetch',
         server
           ? { proof: signMailProof(this.identity!, { t: 'mail_fetch', peer: this.peer, server }) }
           : {},
       )
       .catch(() => {});
-    this.scheduleMail();
+  }
+
+  private ackMail(ids: string[]) {
+    if (!ids.length) return;
+    void this.link
+      ?.request('mail.ack', {
+        ids,
+        proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids }),
+      })
+      .catch(() => {});
   }
 
   // ===========================================================================
@@ -1172,16 +1201,17 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
         const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
         if (this.state.friends.blocked.includes(other)) continue;
+        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+        // queue still holds it, and goes through once we accept). Only the sender can ask.
+        // What another device of ours sent is our own conversation, whoever it was to.
+        if (sender !== this.userId && !this.knowsForDm(other)) {
+          if (other === sender) this.addDmRequest(other);
+          continue;
+        }
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
-    if (done.length)
-      await this.link
-        ?.request('mail.ack', {
-          ids: done,
-          proof: signMailProof(this.identity!, { t: 'mail_ack', peer: this.peer, ids: done }),
-        })
-        .catch(() => {});
+    this.ackMail(done);
   }
 
   private async ensureProfilePublished() {
@@ -1222,6 +1252,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...s.friends.incoming,
       ...s.friends.outgoing,
       ...s.dms,
+      ...s.dmRequests,
     ]);
     for (const space of Object.values(s.spaces)) for (const m of space.members) set.add(m);
     return [...set];
@@ -1513,6 +1544,15 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private refreshFriends() {
     void this.platform.kv.set('friend-list', toB64u(encodeFriendList(this.friendList)));
     this.store.set({ friends: this.friendsView() });
+    // A request from someone we blocked is gone; from someone we now know, taken up.
+    for (const u of this.state.dmRequests) {
+      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u);
+      else if (this.knowsForDm(u)) {
+        // Joined now if we can; otherwise it is ours, and their invite or our opening it joins.
+        if (this.state.link === 'connected') void this.acceptDmRequest(u).catch(() => {});
+        else this.addDm(u);
+      }
+    }
     for (const s of this.sessions.values()) s.recheckPeers();
     void this.fetchProfiles(this.relevantUsers()).catch(() => {});
   }
@@ -2761,12 +2801,54 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const scope = parseSessionId(sessionId);
     if (!scope || scope.kind !== 'dm' || !scope.users.includes(this.userId)) return;
     if (this.state.friends.blocked.includes(from)) return;
+    // Someone we don't know waits as a request: we don't join, so they learn nothing of us.
+    if (!this.knowsForDm(from)) return this.addDmRequest(from);
     this.addDm(from);
     const session = this.ensureSession(sessionId);
     if (!session.state) await session.join().catch(() => {});
   }
 
+  /**
+   * Whether a conversation with them is ours to join: a friend, someone we asked to be friends
+   * with, or one we already have.
+   */
+  private knowsForDm(userId: string) {
+    const f = this.state.friends;
+    return (
+      userId === this.userId ||
+      f.friends.includes(userId) ||
+      f.outgoing.includes(userId) ||
+      this.state.dms.includes(userId)
+    );
+  }
+
+  private addDmRequest(userId: string) {
+    if (this.state.dmRequests.includes(userId)) return;
+    const dmRequests = [userId, ...this.state.dmRequests].slice(0, DM_REQUESTS_MAX);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+    void this.fetchProfiles([userId]).catch(() => {});
+  }
+
+  private dropDmRequest(userId: string) {
+    if (!this.state.dmRequests.includes(userId)) return;
+    const dmRequests = this.state.dmRequests.filter((u) => u !== userId);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+  }
+
+  /** Takes up a conversation someone started: from now on we join it and they can reach us. */
+  async acceptDmRequest(userId: string) {
+    await this.openDm(userId);
+  }
+
+  declineDmRequest(userId: string) {
+    this.dropDmRequest(userId);
+  }
+
   private addDm(userId: string) {
+    // Opening a conversation, however it came about, answers a request.
+    this.dropDmRequest(userId);
     if (this.state.dms.includes(userId)) return;
     const dms = [userId, ...this.state.dms];
     this.store.set({ dms });
