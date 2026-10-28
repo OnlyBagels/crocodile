@@ -384,6 +384,10 @@ mechanisms get them everywhere they belong:
    works no matter who was online when, or whose clock is ahead. Messages
    show a small clock until confirmed. A DM with undelivered messages
    re-invites the friend as soon as they come online.
+   A DM someone starts with a person we don't know waits as a request
+   (`dmRequests`): the invite is not answered and mailed messages are dropped
+   (the sender's queue still holds them) until the user accepts, which opens
+   the DM and lets the queue through.
 3. **History sync.** On connecting, a member asks the host and backup (or the
    DM partner) for everything newer than the newest message it did not write
    offline itself. Replies are sealed to the requester and every message is

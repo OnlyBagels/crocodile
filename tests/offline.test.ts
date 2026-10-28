@@ -142,6 +142,35 @@ describe('offline delivery', () => {
     await waitFor(() => a.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
   });
 
+  it('keeps nothing mailed by someone we do not know, and shows a request instead', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord), 'alice');
+    const bob0 = await signUp(makeClient(net, coord), 'bob');
+    await waitFor(() => coord.records.get(`profile:${alice.userId}`), 8000, 'profile');
+    await waitFor(
+      () => coord.store.listPrefix(`device:${bob0.userId}`, 1).length > 0,
+      8000,
+      'bob device',
+    );
+    await alice.updateSettings({ useMailbox: true });
+    const dm = await alice.openDm(bob0.userId);
+    await alice.openChannel(dm);
+    await bob0.shutdown();
+    await alice.sendMessage(dm, 'mailed hello');
+    await waitFor(
+      () => alice.state.messages[dm]!.find((m) => m.body === 'mailed hello')?.mailed,
+      15000,
+      'mailed',
+    );
+    await alice.shutdown();
+    const bob = await restart(net, bob0, coord);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 15000, 'a request');
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
+    expect(bob.state.dms).not.toContain(alice.userId);
+    expect(bodies(bob, dm)).toEqual([]);
+  });
+
   it('mails many long messages in boxes and requests the server takes', async () => {
     const coord = await server();
     const net = new FakeRelayNetwork();

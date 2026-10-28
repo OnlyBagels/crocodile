@@ -343,6 +343,8 @@ export interface ClientState {
   voice: Record<string, VoiceOccupancy>;
   sessions: Record<string, SessionView>;
   dms: string[];
+  /** People we don't know who started a conversation: nothing is shared until we accept. */
+  dmRequests: string[];
   messages: Record<string, MessageView[]>;
   unread: Record<string, number>;
   typing: Record<string, Record<string, number>>;
@@ -400,6 +402,8 @@ const APP_VERSION_FALLBACK = '0.1.0';
 /** How far ahead of our clock a message's time may be before it is refused. */
 const MAX_AHEAD_MS = 5 * 60_000;
 /** How long direct delivery gets before an opted-in DM goes to a mailbox. */
+/** Conversations from people we don't know that wait for an answer (the newest are kept). */
+const DM_REQUESTS_MAX = 50;
 const MAIL_AFTER_MS = 5000;
 /** Plaintext bytes of messages in one mailbox box. */
 const MAIL_BOX_BYTES = 48 * 1024;
@@ -485,6 +489,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       voice: {},
       sessions: {},
       dms: [],
+      dmRequests: [],
       messages: {},
       unread: {},
       typing: {},
@@ -567,10 +572,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...((await this.platform.kv.get<Partial<Settings>>('settings')) ?? {}),
     };
     const dms = (await this.platform.kv.get<string[]>('dms')) ?? [];
+    const dmRequests = (await this.platform.kv.get<string[]>('dm-requests')) ?? [];
     await this.loadDevice();
     await this.outbox.load();
     await this.files?.load();
-    this.store.set({ settings, dms, deviceId: this.deviceId });
+    this.store.set({ settings, dms, dmRequests, deviceId: this.deviceId });
     await this.records.load();
     const seed = await this.platform.kv.get<string>('identity-seed');
     if (!seed) {
@@ -783,6 +789,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       sessions: {},
       messages: {},
       dms: [],
+      dmRequests: [],
       devices: [],
       voiceSession: null,
       outgoingCall: null,
@@ -1170,6 +1177,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
         const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
         if (this.state.friends.blocked.includes(other)) continue;
+        // Someone we don't know is a request, not a message: nothing of it is kept.
+        if (!this.knowsForDm(other)) {
+          this.addDmRequest(other);
+          continue;
+        }
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
     }
@@ -1511,6 +1523,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   private refreshFriends() {
     void this.platform.kv.set('friend-list', toB64u(encodeFriendList(this.friendList)));
     this.store.set({ friends: this.friendsView() });
+    // A request from someone we blocked is gone; from someone we now know, taken up.
+    for (const u of this.state.dmRequests) {
+      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u);
+      else if (this.knowsForDm(u)) void this.acceptDmRequest(u).catch(() => {});
+    }
     for (const s of this.sessions.values()) s.recheckPeers();
     void this.fetchProfiles(this.relevantUsers()).catch(() => {});
   }
@@ -2746,9 +2763,50 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     const scope = parseSessionId(sessionId);
     if (!scope || scope.kind !== 'dm' || !scope.users.includes(this.userId)) return;
     if (this.state.friends.blocked.includes(from)) return;
+    // Someone we don't know waits as a request: we don't join, so they learn nothing of us.
+    if (!this.knowsForDm(from)) return this.addDmRequest(from);
     this.addDm(from);
     const session = this.ensureSession(sessionId);
     if (!session.state) await session.join().catch(() => {});
+  }
+
+  /**
+   * Whether a conversation with them is ours to join: a friend, someone we asked to be friends
+   * with, or one we already have.
+   */
+  private knowsForDm(userId: string) {
+    const f = this.state.friends;
+    return (
+      userId === this.userId ||
+      f.friends.includes(userId) ||
+      f.outgoing.includes(userId) ||
+      this.state.dms.includes(userId)
+    );
+  }
+
+  private addDmRequest(userId: string) {
+    if (this.state.dmRequests.includes(userId)) return;
+    const dmRequests = [userId, ...this.state.dmRequests].slice(0, DM_REQUESTS_MAX);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+    void this.fetchProfiles([userId]).catch(() => {});
+  }
+
+  private dropDmRequest(userId: string) {
+    if (!this.state.dmRequests.includes(userId)) return;
+    const dmRequests = this.state.dmRequests.filter((u) => u !== userId);
+    this.store.set({ dmRequests });
+    void this.platform.kv.set('dm-requests', dmRequests);
+  }
+
+  /** Takes up a conversation someone started: from now on we join it and they can reach us. */
+  async acceptDmRequest(userId: string) {
+    this.dropDmRequest(userId);
+    await this.openDm(userId);
+  }
+
+  declineDmRequest(userId: string) {
+    this.dropDmRequest(userId);
   }
 
   private addDm(userId: string) {

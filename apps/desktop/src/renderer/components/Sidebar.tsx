@@ -281,7 +281,7 @@ export function HomeSidebar() {
   const dms = useCroc((s) => s.dms);
   const me = useCroc((s) => s.me?.userId);
   const unread = useCroc((s) => s.unread);
-  const incoming = useCroc((s) => s.friends.incoming.length);
+  const incoming = useCroc((s) => s.friends.incoming.length + s.dmRequests.length);
   const presence = useCroc((s) => s.presence);
   const sessions = useCroc((s) => s.sessions);
   return (

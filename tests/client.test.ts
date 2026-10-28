@@ -1703,3 +1703,85 @@ describe('message ids', () => {
     expect(older).toEqual([]);
   });
 });
+
+describe('conversations from people we do not know', () => {
+  async function pair() {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    return { alice, bob };
+  }
+  const sessionIdOf = (a: CrocodileClient, b: CrocodileClient) => sessionIds.dm(a.userId, b.userId);
+  const joined = (c: CrocodileClient, sid: string) =>
+    (c as unknown as { sessions: Map<string, unknown> }).sessions.has(sid);
+
+  it('waits as a request: we do not join, so they learn nothing about us', async () => {
+    const { alice, bob } = await pair();
+    const dm = await alice.openDm(bob.userId);
+    await alice.openChannel(dm);
+    await alice.sendMessage(dm, 'hello stranger');
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(bob.state.dms).not.toContain(alice.userId);
+    expect(joined(bob, dm)).toBe(false);
+    expect(bodies(bob, dm)).toEqual([]);
+    expect(alice.state.sessions[dm]?.peers ?? []).not.toContain(bob.userId);
+  });
+
+  it('is taken up when accepted, and the waiting message arrives', async () => {
+    const { alice, bob } = await pair();
+    const dm = await alice.openDm(bob.userId);
+    await alice.openChannel(dm);
+    await alice.sendMessage(dm, 'hello stranger');
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    await bob.acceptDmRequest(alice.userId);
+    expect(bob.state.dmRequests).not.toContain(alice.userId);
+    expect(bob.state.dms).toContain(alice.userId);
+    await bob.openChannel(dm);
+    await waitFor(() => bodies(bob, dm).includes('hello stranger'), 12000, 'the message');
+    await bob.sendMessage(dm, 'hi');
+    await waitFor(() => bodies(alice, dm).includes('hi'), 12000, 'reply');
+  });
+
+  it('is dropped when declined, and does not join', async () => {
+    const { alice, bob } = await pair();
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    bob.declineDmRequest(alice.userId);
+    expect(bob.state.dmRequests).toEqual([]);
+    expect(joined(bob, dm)).toBe(false);
+  });
+
+  it('does not appear at all from someone we blocked', async () => {
+    const { alice, bob } = await pair();
+    await bob.block(alice.userId);
+    await alice.openDm(bob.userId);
+    await new Promise((r) => setTimeout(r, 2000));
+    expect(bob.state.dmRequests).toEqual([]);
+    expect(bob.state.dms).toEqual([]);
+  });
+
+  it('is taken up at once when we ask the sender to be friends', async () => {
+    const { alice, bob } = await pair();
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dmRequests.includes(alice.userId), 12000, 'a request');
+    await bob.addFriend(alice.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 5000, 'taken up');
+    expect(bob.state.dmRequests).toEqual([]);
+    await waitFor(() => joined(bob, dm), 5000, 'joined');
+  });
+
+  it('is not a request from a friend: their conversation is joined as before', async () => {
+    const { alice, bob } = await pair();
+    await alice.addFriend(bob.userId);
+    await waitFor(() => bob.state.friends.incoming.includes(alice.userId), 12000, 'request');
+    await bob.addFriend(alice.userId);
+    await waitFor(() => alice.state.friends.friends.includes(bob.userId), 12000, 'friends');
+    const dm = await alice.openDm(bob.userId);
+    await waitFor(() => bob.state.dms.includes(alice.userId), 12000, 'joined');
+    expect(bob.state.dmRequests).toEqual([]);
+    expect(joined(bob, dm)).toBe(true);
+    expect(dm).toBe(sessionIdOf(alice, bob));
+  });
+});

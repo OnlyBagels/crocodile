@@ -59,6 +59,13 @@ that setting, and then only from the friend who posted it (or another
 friend), so a stranger in a big space can't learn your IP address by posting
 a picture or by fetching a friend's picture first and offering it.
 
+A conversation started by someone you don't know (not a friend, not someone you
+asked to be friends with, not one you already have) does not connect: the app
+keeps it as a **request** and joins nothing, so the sender learns nothing about
+you and none of their messages are kept, until you accept it. Declining drops
+it; blocking the sender hides their requests. The command line `get` takes up
+requests while it runs, because running it is asking to receive.
+
 The **host peer** of a session sees the IP addresses of its members and the
 size and timing of their encrypted frames, plus who is speaking (from the
 RFC 6464 audio-level header). It holds the same keys as every other member
