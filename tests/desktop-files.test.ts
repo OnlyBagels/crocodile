@@ -117,13 +117,18 @@ describe('saving files', () => {
     const cut = safeFileName(long);
     expect(cut.length).toBeLessThanOrEqual(255);
     expect(cut).not.toMatch(/[\ud800-\udbff]$/);
+    // Names count in bytes too.
+    const wide = safeFileName(`${'日'.repeat(200)}.exe`);
+    expect(Buffer.byteLength(wide)).toBeLessThanOrEqual(255);
+    expect(wide).toMatch(/日\.exe$/);
+    expect(safeFileName('a\u0085b\u200bc\ufeffd')).toBe('a_b_c_d');
     // The extension is what the risky-file check reads, so it survives.
     expect(safeFileName(`${'a'.repeat(300)}.exe`)).toMatch(/\.exe$/);
     expect(safeFileName(`${'a'.repeat(300)}.exe`)).toHaveLength(255);
   });
 
   it('asks before opening more of what Windows runs on open', () => {
-    for (const ext of ['rdp', 'iqy', 'slk', 'ps1xml', 'mjs'])
+    for (const ext of ['rdp', 'iqy', 'slk', 'ps1xml', 'mjs', 'theme', 'ksh', 'msu'])
       expect(RISKY_EXTENSIONS.has(ext)).toBe(true);
   });
 
@@ -139,6 +144,7 @@ describe('saving files', () => {
       'lpt9.txt',
       'CONIN$',
       'conout$.log',
+      'NUL .txt',
     ])
       expect(safeFileName(name)).toBe(`_${name}`);
     // Other names that merely start the same are ordinary files.

@@ -148,7 +148,8 @@ export const RISKY_EXTENSIONS = new Set(
     'appxbundle msixbundle settingcontent-ms library-ms search-ms searchconnector-ms diagcab ' +
     'website mht mhtml xbap jnlp vhd vhdx dll ocx sys xll xlam dotm xltm potm ppsm sldm ' +
     'one pyw pyz desktop terminal webloc inetloc fileloc workflow action ' +
-    'psc1 ps1xml msh msh1 msh2 mshxml msh1xml msh2xml rdp ade adp mde slk iqy scptd osx tool mjs'
+    'psc1 ps1xml msh msh1 msh2 mshxml msh1xml msh2xml rdp ade adp mde slk iqy scptd osx tool mjs ' +
+    'psd1 theme themepack msu cab diagcfg ksh csh fish apk'
   ).split(' '),
 );
 
@@ -161,9 +162,11 @@ export const RISKY_EXTENSIONS = new Set(
  */
 export function safeFileName(name: unknown): string {
   const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
-  const replaced = base
+  const replaced = base.replace(
     // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u001f\u007f<>:"|?*‎‏‪-‮⁦-⁩]/g, '_');
+    /[\u0000-\u001f\u007f-\u009f<>:"|?*\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g,
+    '_',
+  );
   const clean = cut(replaced);
   let start = 0;
   let end = clean.length;
@@ -174,14 +177,18 @@ export function safeFileName(name: unknown): string {
 }
 
 /** CON, NUL, COM1 and the like are devices on Windows with or without an extension ("nul.txt"). */
-const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\.|$)/i;
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$) *(\.|$)/i;
 
-/** At most 255 characters, from the front of the name but keeping its ending, whole characters only. */
+/**
+ * At most 255 characters and 255 bytes (file systems count either), from the
+ * front of the name but keeping its ending, whole characters only.
+ */
 function cut(name: string): string {
-  if (name.length <= 255) return name;
+  const fits = (s: string) => s.length <= 255 && Buffer.byteLength(s) <= 255;
+  if (fits(name)) return name;
   const dot = name.lastIndexOf('.');
   const ext = dot > 0 && name.length - dot <= 32 ? name.slice(dot) : '';
-  let stem = name.slice(0, 255 - ext.length);
-  if (/[\ud800-\udbff]$/.test(stem)) stem = stem.slice(0, -1);
-  return stem + ext;
+  const stem = [...name.slice(0, dot > 0 && ext ? dot : name.length)];
+  while (stem.length > 0 && !fits(stem.join('') + ext)) stem.pop();
+  return stem.join('') + ext;
 }

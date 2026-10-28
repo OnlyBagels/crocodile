@@ -15,7 +15,7 @@ import {
   type UtilityProcess,
 } from 'electron';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { extname, join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { cpus } from 'node:os';
 import { contextMenuTemplate } from './context-menu';
@@ -218,7 +218,7 @@ ipcMain.handle('files:end', async (_e, token: string, then: 'open' | 'reveal' | 
         buttons: ['Cancel', 'Open anyway'],
         defaultId: 0,
         cancelId: 0,
-        message: `Open ${safeFileName(path)}?`,
+        message: `Open ${basename(path)}?`,
         detail:
           'This kind of file can run code on your computer. Only open it if you trust ' +
           'the person who sent it and expected it.',
