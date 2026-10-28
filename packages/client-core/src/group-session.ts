@@ -483,16 +483,19 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         .catch(() => {});
     }
     clearTimeout(this.retryTimer);
+    // Every ten seconds at first, then less often: the same host may be named for a long time.
+    const wait = Math.min(10_000 * 2 ** this.refusals++, 300_000);
     this.retryTimer = setTimeout(() => {
       if (this.left || this.transport || this.state?.epoch !== epoch) return;
       this.refused = undefined;
       this.connectTransport();
-    }, 10_000);
+    }, wait);
   }
 
   /** The host (and epoch) being checked, and the one we refused to connect to. */
   private vetting?: string;
   private refused?: string;
+  private refusals = 0;
 
   /**
    * Records changed: a host we are connected to that no longer belongs is let go (the new
@@ -526,6 +529,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.videoShowing.clear();
     this.sentWatch = null;
     this.route = null;
+    this.rttMs = null;
   }
 
   /** The host and epoch of the latest connection attempt. */
@@ -598,6 +602,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       this.connectedAt = Date.now();
       this.failures = 0;
       this.failedInARow = 0;
+      this.refusals = 0;
       this.unreachable = null;
       this.setStatus('connected');
       // ICE may still switch pairs just after connecting: read it again a few times.
@@ -1182,9 +1187,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
           void this.sendKeyTo(peer);
       } else if (this.keySentTo.has(peer) || held.has(peer)) {
+        // Ours is replaced only if they could read it; a key of theirs in its grace period is
+        // just dropped.
+        if (this.keySentTo.has(peer) || this.keyring.hasKeyFrom(peer)) revoked = true;
         this.keySentTo.delete(peer);
         this.keyring.forgetPeer(peer);
-        revoked = true;
       }
     }
     // The new key only goes to peers still allowed.
@@ -1246,6 +1253,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private answerWant(peer: string) {
     const wait = 2000 - (Date.now() - (this.wantAnswered.get(peer) ?? 0));
     if (wait <= 0) {
+      if (this.wantAnswered.size > 200) this.wantAnswered.clear();
       this.wantAnswered.set(peer, Date.now());
       void this.sendKeyTo(peer, false);
       return;
@@ -1334,7 +1342,10 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
         if (payload.sessionId !== this.sessionId) return;
         if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
           // A member we have blocked is not waiting on records: their key is not taken.
-          if (this.ctx.isMemberPeer(this.sessionId, from)) return;
+          if (this.ctx.isMemberPeer(this.sessionId, from)) {
+            this.ctx.log('ignoring a key from a blocked member', { from });
+            return;
+          }
           this.parkedKeys.push({ from, payload, at: Date.now() });
           if (this.parkedKeys.length > 100) this.parkedKeys.shift();
           await this.ctx.refreshPeer(this.sessionId, from).catch(() => {});

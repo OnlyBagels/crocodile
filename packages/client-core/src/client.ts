@@ -2499,7 +2499,8 @@ export class CrocodileClient extends Emitter<ClientEvents> {
 
   private async refreshPeer(sessionId: string, peer: string) {
     const scope = parseSessionId(sessionId);
-    if (!scope || !this.link) return;
+    if (!scope) return;
+    if (!this.link) throw new Error('not connected');
     const userId = peerIds.user(peer);
     const keys = [recordKey.device(userId, peerIds.device(peer))];
     if (scope.kind !== 'dm')

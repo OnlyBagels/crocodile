@@ -1815,17 +1815,19 @@ describe('blocks and hosts in spaces', () => {
     await alice.openChannel(ch);
     await bob.openChannel(ch);
     await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
-    // Bob, the owner, bans Alice, but only on his side: the server has not heard of it.
+    // Bob, the owner, bans Alice, but only on his side: the server has not heard of it, and
+    // still names her. Her relay goes away and Bob must not simply connect to it again.
     const record = bob.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
-    const banned = signRecord(
-      bob.identity!,
-      'space',
-      record.key,
-      { ...record.body, bans: [alice.userId] },
-      record.version + 1,
-    );
     const attempts = bob.state.sessions[sid]!.attempts.length;
-    bob.records.ingestAll([banned]);
+    bob.records.ingestAll([
+      signRecord(
+        bob.identity!,
+        'space',
+        record.key,
+        { ...record.body, bans: [alice.userId] },
+        record.version + 1,
+      ),
+    ]);
     net.crashRelayProcessOf(alice.userId);
     await new Promise((r) => setTimeout(r, 3000));
     expect(bob.state.sessions[sid]?.status).not.toBe('connected');
