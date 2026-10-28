@@ -121,7 +121,9 @@ describe('saving files', () => {
     const wide = safeFileName(`${'日'.repeat(200)}.exe`);
     expect(Buffer.byteLength(wide)).toBeLessThanOrEqual(255);
     expect(wide).toMatch(/日\.exe$/);
-    expect(safeFileName('a\u0085b\u200bc\ufeffd')).toBe('a_b_c_d');
+    expect(safeFileName('a\u0085b\u200bc\ufeffd\u061ce\u2028f')).toBe('a_b_c_d_e_f');
+    // A device prefix doesn't push a name over the limit.
+    expect(safeFileName(`nul.${'a'.repeat(251)}`).length).toBeLessThanOrEqual(255);
     // The extension is what the risky-file check reads, so it survives.
     expect(safeFileName(`${'a'.repeat(300)}.exe`)).toMatch(/\.exe$/);
     expect(safeFileName(`${'a'.repeat(300)}.exe`)).toHaveLength(255);

@@ -164,7 +164,7 @@ export function safeFileName(name: unknown): string {
   const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
   const replaced = base.replace(
     // eslint-disable-next-line no-control-regex
-    /[\u0000-\u001f\u007f-\u009f<>:"|?*\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g,
+    /[\u0000-\u001f\u007f-\u009f<>:"|?*\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]|\u034f/g,
     '_',
   );
   const clean = cut(replaced);
@@ -173,7 +173,7 @@ export function safeFileName(name: unknown): string {
   while (start < end && (clean[start] === '.' || /\s/.test(clean[start]!))) start++;
   while (end > start && (clean[end - 1] === '.' || /\s/.test(clean[end - 1]!))) end--;
   const safe = clean.slice(start, end) || 'file';
-  return WINDOWS_DEVICE.test(safe) ? `_${safe}` : safe;
+  return WINDOWS_DEVICE.test(safe) ? cut(`_${safe}`) : safe;
 }
 
 /** CON, NUL, COM1 and the like are devices on Windows with or without an extension ("nul.txt"). */

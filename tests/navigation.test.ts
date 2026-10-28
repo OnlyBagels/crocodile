@@ -42,5 +42,7 @@ describe('main-window navigation guard', () => {
     expect(isAllowedNavigation('http://localhost:5173@evil.example/', app, dev)).toBe(false);
     expect(isAllowedNavigation('https://localhost:5173/', app, dev)).toBe(false);
     expect(isAllowedNavigation('not a url', app, dev)).toBe(false);
+    // A dev URL that isn't a web address would match every file: URL.
+    expect(isAllowedNavigation('file:///etc/passwd', app, 'file:///dev/index.html')).toBe(false);
   });
 });
