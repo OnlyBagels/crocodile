@@ -294,10 +294,27 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     return this.sessionId.startsWith('dm:');
   }
 
-  async join() {
+  private joining?: Promise<void>;
+
+  /**
+   * Callers that join while a join is in flight share it. A join that has to
+   * go out on a new connection (`fresh`) doesn't: the one in flight was sent
+   * on the old one. Leaving drops it too, so a join after a leave comes after it.
+   */
+  join(opts: { fresh?: boolean } = {}): Promise<void> {
     this.left = false;
+    if (opts.fresh) this.joining = undefined;
+    const sent: Promise<void> = (this.joining ??= this.sendJoin().finally(() => {
+      if (this.joining === sent) this.joining = undefined;
+    }));
+    return sent;
+  }
+
+  private async sendJoin() {
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
+    // Left meanwhile: a join now would come after the leave.
+    if (this.left) return;
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
@@ -317,6 +334,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async leave() {
     if (this.left) return;
     this.left = true;
+    this.joining = undefined;
     clearTimeout(this.retryTimer);
     clearTimeout(this.renewTimer);
     clearTimeout(this.expiryTimer);
@@ -745,7 +763,16 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async useServerRelay() {
     this.relayRequested = true;
     try {
-      this.relayGrant = await this.ctx.relay.request(this.sessionId);
+      // The server only grants a relay to a member, and a session we left stays left.
+      if (this.left) return this.ctx.log('relay not used: the session was left', {});
+      // Not joined, or joining again on a new connection: the state we hold is the old one's.
+      if (!this.state || this.joining) {
+        await this.join();
+        if (this.left) return;
+      }
+      const granted = await this.ctx.relay.request(this.sessionId);
+      if (this.left) return;
+      this.relayGrant = granted;
       this.ctx.log('using server relay', {
         server: this.relayGrant.server,
         until: this.relayGrant.expiresAt,
