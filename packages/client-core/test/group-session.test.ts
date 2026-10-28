@@ -172,10 +172,16 @@ describe('group session', () => {
   it('does not connect to the other side of a direct conversation that we blocked', async () => {
     const bob = 'bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1';
     const transports: StuckTransport[] = [];
+    const requests: string[] = [];
     const ctx = {
       identity: createIdentity(),
       peer: me,
-      link: () => ({ request: async () => ({}) }),
+      link: () => ({
+        request: async (m: string) => {
+          requests.push(m);
+          return {};
+        },
+      }),
       platform: {},
       iceServers: () => [],
       relay: { allowed: () => false, request: async () => grant(1000) },
@@ -194,6 +200,8 @@ describe('group session', () => {
     await wait(20);
     expect(transports).toHaveLength(0);
     expect(s.status).toBe('reconnecting');
+    // The server knows nothing of blocks, so it is not told.
+    expect(requests).not.toContain('session.report');
   });
 
   it('stops hearing a peer at once when their key is only in its grace period', () => {

@@ -385,11 +385,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
             .map((m) => m.peer)
             // In a space a blocked member is still relayed to the others; in a direct
             // conversation there are no others.
-            .filter((p) =>
-              this.isDm
-                ? this.ctx.isAllowedPeer(sessionId, p)
-                : this.ctx.isMemberPeer(sessionId, p),
-            ),
+            .filter((p) => this.mayConnect(p)),
         sendSignal: (to, data) => {
           void this.ctx
             .link()
@@ -472,11 +468,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
     if (this.left || this.state?.epoch !== epoch || this.state.host !== host || this.transport)
       return;
-    if (this.hostBelongs(host)) {
+    if (this.mayConnect(host)) {
       this.connectTransport();
       return;
     }
-    this.refused = key;
+    // A fetch that failed says nothing: state pushes may try again at once.
+    if (fetched) this.refused = key;
     if (this.lastRefused !== host) {
       this.lastRefused = host;
       this.refusals = 0;
@@ -487,7 +484,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.emit('update', undefined);
     // Told only when our records of it are as new as the fetch could make them: a fetch that
     // failed says nothing about the host.
-    if (fetched && this.reportedEpoch !== epoch) {
+    // Not for a host we only blocked: the server knows nothing of blocks.
+    if (fetched && !this.ctx.isMemberPeer(this.sessionId, host) && this.reportedEpoch !== epoch) {
       this.reportedEpoch = epoch;
       void this.ctx
         .link()
@@ -504,8 +502,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }, wait);
   }
 
-  /** Whether we deal with the host: in a direct conversation, not one we blocked either. */
-  private hostBelongs(host: string) {
+  /** Whether we connect to, or admit, a peer: in a direct conversation not one we blocked either. */
+  private mayConnect(host: string) {
     return this.isDm
       ? this.ctx.isAllowedPeer(this.sessionId, host)
       : this.ctx.isMemberPeer(this.sessionId, host);
@@ -524,7 +522,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private recheckHost() {
     const host = this.state?.host;
     if (!host || host === this.me || this.left) return;
-    const member = this.hostBelongs(host);
+    const member = this.mayConnect(host);
     if (!member && this.transport?.host === host) this.connectTransport();
     else if (member && this.refused === `${this.state!.epoch}|${host}`) {
       this.refused = undefined;
@@ -568,7 +566,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     this.closeTransport();
     this.forgetConnection();
     if (!state?.host || this.left) return;
-    if (state.host !== this.me && !this.hostBelongs(state.host)) {
+    if (state.host !== this.me && !this.mayConnect(state.host)) {
       this.setStatus(this.failures > 0 ? 'reconnecting' : 'connecting');
       void this.vetHost(state.epoch, state.host);
       return;
