@@ -547,7 +547,10 @@ function useGlobalBehaviours() {
   );
 
   const totalUnread = useCroc(
-    (s) => Object.values(s.unread).reduce((a, b) => a + b, 0) + s.friends.incoming.length,
+    (s) =>
+      Object.values(s.unread).reduce((a, b) => a + b, 0) +
+      s.friends.incoming.length +
+      s.dmRequests.length,
   );
   useEffect(() => {
     void desktop?.app.setBadge(totalUnread);

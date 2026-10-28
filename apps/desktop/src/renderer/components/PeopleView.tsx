@@ -99,7 +99,7 @@ export function PeopleView() {
           <div className="mt-6 grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
             {rows.map(({ u, kind }) => (
               <div
-                key={u}
+                key={`${kind}:${u}`}
                 className="rounded-2xl border border-line bg-island-2 p-4 transition hover:border-accent/40"
               >
                 <button

@@ -63,7 +63,7 @@ A conversation started by someone you don't know (not a friend, not someone you
 asked to be friends with, not one you already have) does not connect: the app
 keeps it as a **request** and joins nothing, so the sender learns nothing about
 you and none of their messages are kept, until you accept it. Declining drops
-it; blocking the sender hides their requests. Mail they left for you is
+it (they can ask again); blocking the sender stops that and hides their requests. Mail they left for you is
 dropped, not kept (it would crowd out friends' mail on the server); their app
 still holds the messages and delivers them once you accept and both are
 online. At most 50 requests are kept, the newest first, so a flood can push a

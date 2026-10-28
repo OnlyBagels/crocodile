@@ -1245,6 +1245,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       ...s.friends.incoming,
       ...s.friends.outgoing,
       ...s.dms,
+      ...s.dmRequests,
     ]);
     for (const space of Object.values(s.spaces)) for (const m of space.members) set.add(m);
     return [...set];
