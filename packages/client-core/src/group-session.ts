@@ -309,6 +309,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   private async sendJoin() {
     if (this.status === 'idle' || this.status === 'left') this.setStatus('joining');
     const caps = await this.ctx.caps();
+    // Left meanwhile: a join now would come after the leave.
+    if (this.left) return;
     const { state } = await this.ctx.link().request('session.join', {
       sessionId: this.sessionId,
       caps,
