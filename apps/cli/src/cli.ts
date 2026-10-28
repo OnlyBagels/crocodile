@@ -457,7 +457,9 @@ async function get(ctx: Ctx, opts: { from?: string; dir?: string; keep: boolean 
   // this runs (the app would wait for an answer). Without a name, only people already known.
   const takeRequests = () => {
     if (from && client.state.dmRequests.includes(from))
-      void client.acceptDmRequest(from).catch(() => {});
+      void client
+        .acceptDmRequest(from)
+        .catch((e) => io.err(`Could not take up the conversation: ${e.message}`));
   };
   takeRequests();
   io.err(`Waiting for files${opts.from ? ` from ${opts.from}` : ''} (Ctrl+C to stop)…`);

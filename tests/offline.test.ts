@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { sealToDevice } from '@crocodile/crypto';
+import { recordKey, sessionIds, type SignedRecord } from '@crocodile/protocol';
 import {
   CrocodileClient,
   MemoryKeyValueStore,
@@ -169,30 +171,51 @@ describe('offline delivery', () => {
     return { coord, net, alice, bob, dm };
   }
 
-  it('leaves mail from someone we do not know on the server, unread, as a request', async () => {
-    const { coord, alice, bob, dm } = await mailedByStranger();
-    await new Promise((r) => setTimeout(r, 500));
-    expect(coord.store.mailCount({ toUser: bob.userId })).toBeGreaterThan(0);
+  it('drops mail from someone we do not know and shows a request, which survives a restart', async () => {
+    const { coord, net, alice, bob, dm } = await mailedByStranger();
+    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
     expect(bob.state.dms).not.toContain(alice.userId);
     expect(bodies(bob, dm)).toEqual([]);
-  });
-
-  it('reads that mail once the request is accepted', async () => {
-    const { coord, alice, bob, dm } = await mailedByStranger();
-    await bob.acceptDmRequest(alice.userId);
-    await bob.openChannel(dm);
-    await waitFor(() => bodies(bob, dm).includes('mailed hello'), 15000, 'the mail');
-    await waitFor(() => coord.store.mailCount({ toUser: bob.userId }) === 0, 8000, 'acked');
-  });
-
-  it('deletes that mail unread when the request is declined, and keeps the request over a restart', async () => {
-    const { coord, net, alice, bob, dm } = await mailedByStranger();
     const again = await restart(net, bob, coord);
     expect(again.state.dmRequests).toContain(alice.userId);
-    again.declineDmRequest(alice.userId);
-    await waitFor(() => coord.store.mailCount({ toUser: again.userId }) === 0, 8000, 'deleted');
-    expect(again.state.dms).not.toContain(alice.userId);
-    expect(bodies(again, dm)).toEqual([]);
+  });
+
+  it('delivers what the sender still holds once the request is accepted', async () => {
+    const { net, coord, alice: alice0, bob, dm } = await mailedByStranger();
+    await bob.acceptDmRequest(alice0.userId);
+    await bob.openChannel(dm);
+    const alice = await restart(net, alice0, coord);
+    await alice.openChannel(dm);
+    await waitFor(() => bodies(bob, dm).includes('mailed hello'), 20000, 'from the sender');
+  });
+
+  it('does not make a request in someone else’s name from mail a stranger sends', async () => {
+    const { bob, alice, dm } = await mailedByStranger();
+    // A third person, and a conversation of theirs with Bob that Alice names in her mail.
+    const carol = await signUp(makeClient(new FakeRelayNetwork(), await server()), 'carol');
+    const device = bob.records.get(recordKey.device(bob.userId, bob.state.deviceId as string)) as
+      SignedRecord<'device'> | undefined;
+    const ch = sessionIds.dm(bob.userId, carol.userId);
+    const message = {
+      id: 'forged-message-0001',
+      ch,
+      author: alice.userId,
+      key: alice.identity!.publicKey,
+      ts: Date.now(),
+      body: 'from carol, honest',
+      sig: 'x',
+    };
+    const box = sealToDevice(
+      alice.identity!,
+      alice.state.deviceId as string,
+      { peer: `${bob.userId}.${bob.state.deviceId as string}`, prekey: device!.body.prekey },
+      new TextEncoder().encode(JSON.stringify({ type: 'mail', messages: [message] })),
+    );
+    await (bob as unknown as { onMail(items: unknown[]): Promise<void> }).onMail([
+      { id: 'forged', box },
+    ]);
+    expect(bob.state.dmRequests).not.toContain(carol.userId);
+    expect(bodies(bob, dm)).toEqual([]);
   });
 
   it('mails many long messages in boxes and requests the server takes', async () => {

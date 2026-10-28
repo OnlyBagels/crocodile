@@ -63,10 +63,11 @@ A conversation started by someone you don't know (not a friend, not someone you
 asked to be friends with, not one you already have) does not connect: the app
 keeps it as a **request** and joins nothing, so the sender learns nothing about
 you and none of their messages are kept, until you accept it. Declining drops
-it; blocking the sender hides their requests. Mail they left for you stays on
-the server unread until you decide (accepting fetches it; declining or
-blocking deletes it). At most 50 requests are kept, the newest first, so a
-flood can push a real one out. The command line `get --from <name>` takes up
+it; blocking the sender hides their requests. Mail they left for you is
+dropped, not kept (it would crowd out friends' mail on the server); their app
+still holds the messages and delivers them once you accept and both are
+online. At most 50 requests are kept, the newest first, so a flood can push a
+real one out. The command line `get --from <name>` takes up
 that person's request while it runs, because naming them is asking to receive.
 
 The **host peer** of a session sees the IP addresses of its members and the

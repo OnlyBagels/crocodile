@@ -1016,9 +1016,6 @@ export class CrocodileClient extends Emitter<ClientEvents> {
       .catch(() => {});
   }
 
-  /** Mail from people who are requests, left on the server until we decide. */
-  private heldMail = new Map<string, string[]>();
-
   private ackMail(ids: string[]) {
     if (!ids.length) return;
     void this.link
@@ -1198,14 +1195,11 @@ export class CrocodileClient extends Emitter<ClientEvents> {
         if (scope?.kind !== 'dm' || !scope.users.includes(this.userId)) continue;
         const other = scope.users.find((u) => u !== this.userId) ?? this.userId;
         if (this.state.friends.blocked.includes(other)) continue;
-        // Someone we don't know is a request, not a message: the mail stays on the server,
-        // unread, until we accept (it is fetched again then) or decline (it is deleted).
+        // Someone we don't know is a request, not a message: nothing of it is kept (the sender's
+        // queue still holds it, and goes through once we accept). Only the sender can ask.
         if (!this.knowsForDm(other)) {
-          this.addDmRequest(other);
-          const held = this.heldMail.get(other) ?? [];
-          if (!held.includes(item.id)) this.heldMail.set(other, [...held, item.id].slice(-100));
-          done.splice(done.indexOf(item.id), 1);
-          break;
+          if (other === sender) this.addDmRequest(other);
+          continue;
         }
         if (await this.acceptMessage(m.ch, m)) this.addDm(other);
       }
@@ -1544,8 +1538,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     this.store.set({ friends: this.friendsView() });
     // A request from someone we blocked is gone; from someone we now know, taken up.
     for (const u of this.state.dmRequests) {
-      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u, true);
-      else if (this.knowsForDm(u)) void this.acceptDmRequest(u).catch(() => {});
+      if (this.state.friends.blocked.includes(u)) this.dropDmRequest(u);
+      else if (this.knowsForDm(u)) {
+        // Joined now if we can; otherwise it is ours, and their invite or our opening it joins.
+        if (this.state.link === 'connected') void this.acceptDmRequest(u).catch(() => {});
+        else this.addDm(u);
+      }
     }
     for (const s of this.sessions.values()) s.recheckPeers();
     void this.fetchProfiles(this.relevantUsers()).catch(() => {});
@@ -2811,11 +2809,7 @@ export class CrocodileClient extends Emitter<ClientEvents> {
     void this.fetchProfiles([userId]).catch(() => {});
   }
 
-  /** Forgets a request; `discard` also deletes the mail they left, unread. */
-  private dropDmRequest(userId: string, discard = false) {
-    const held = this.heldMail.get(userId) ?? [];
-    this.heldMail.delete(userId);
-    if (discard) this.ackMail(held);
+  private dropDmRequest(userId: string) {
     if (!this.state.dmRequests.includes(userId)) return;
     const dmRequests = this.state.dmRequests.filter((u) => u !== userId);
     this.store.set({ dmRequests });
@@ -2828,15 +2822,12 @@ export class CrocodileClient extends Emitter<ClientEvents> {
   }
 
   declineDmRequest(userId: string) {
-    this.dropDmRequest(userId, true);
+    this.dropDmRequest(userId);
   }
 
   private addDm(userId: string) {
-    // Opening a conversation, however it came about, answers a request: what they left is read.
-    if (this.state.dmRequests.includes(userId) || this.heldMail.has(userId)) {
-      this.dropDmRequest(userId);
-      this.fetchMail();
-    }
+    // Opening a conversation, however it came about, answers a request.
+    this.dropDmRequest(userId);
     if (this.state.dms.includes(userId)) return;
     const dms = [userId, ...this.state.dms];
     this.store.set({ dms });
