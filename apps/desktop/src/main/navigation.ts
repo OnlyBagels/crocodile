@@ -5,6 +5,14 @@
  * (plus the dev server when set) — never an arbitrary `file://` path.
  */
 export function isAllowedNavigation(url: string, appUrl: string, devUrl?: string): boolean {
-  if (devUrl && url.startsWith(devUrl)) return true;
+  if (devUrl && sameOrigin(url, devUrl)) return true;
   return url === appUrl || url.startsWith(`${appUrl}#`) || url.startsWith(`${appUrl}?`);
+}
+
+function sameOrigin(url: string, other: string): boolean {
+  try {
+    return new URL(url).origin === new URL(other).origin;
+  } catch {
+    return false;
+  }
 }

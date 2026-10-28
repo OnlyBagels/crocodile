@@ -155,7 +155,8 @@ export const RISKY_EXTENSIONS = new Set(
  * A file name the UI suggests, made safe to create and to judge by its
  * extension: no folders, no control, direction or reserved characters (":"
  * would name an NTFS stream), no dots or spaces at the ends (Windows drops
- * trailing ones, so "evil.exe." would look extensionless and still run).
+ * trailing ones, so "evil.exe." would look extensionless and still run), and
+ * not a Windows device name ("nul.txt" would open the device, not a file).
  */
 export function safeFileName(name: unknown): string {
   const base = typeof name === 'string' ? name.split(/[\\/]/).pop()! : '';
@@ -167,5 +168,9 @@ export function safeFileName(name: unknown): string {
   let end = clean.length;
   while (start < end && (clean[start] === '.' || /\s/.test(clean[start]!))) start++;
   while (end > start && (clean[end - 1] === '.' || /\s/.test(clean[end - 1]!))) end--;
-  return clean.slice(start, end) || 'file';
+  const safe = clean.slice(start, end) || 'file';
+  return WINDOWS_DEVICE.test(safe) ? `_${safe}` : safe;
 }
+
+/** CON, NUL, COM1 and the like are devices on Windows with or without an extension ("nul.txt"). */
+const WINDOWS_DEVICE = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$)(\.|$)/i;

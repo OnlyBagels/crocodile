@@ -111,4 +111,31 @@ describe('saving files', () => {
     expect(safeFileName(42)).toBe('file');
     expect(safeFileName('x'.repeat(300))).toHaveLength(255);
   });
+
+  it('does not name a file after a Windows device', () => {
+    for (const name of [
+      'CON',
+      'nul',
+      'Aux.txt',
+      'prn.tar.gz',
+      'COM1',
+      'com9.exe',
+      'LPT1',
+      'lpt9.txt',
+      'CONIN$',
+      'conout$.log',
+    ])
+      expect(safeFileName(name)).toBe(`_${name}`);
+    // Other names that merely start the same are ordinary files.
+    for (const name of [
+      'console.txt',
+      'nullable',
+      'com10.txt',
+      'com.txt',
+      'lpt.txt',
+      'a.con',
+      'auxiliary.md',
+    ])
+      expect(safeFileName(name)).toBe(name);
+  });
 });

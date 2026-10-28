@@ -27,5 +27,10 @@ describe('main-window navigation guard', () => {
     expect(isAllowedNavigation(dev, app, dev)).toBe(true);
     expect(isAllowedNavigation(`${dev}/#/x`, app, dev)).toBe(true);
     expect(isAllowedNavigation('http://localhost:9999', app, dev)).toBe(false);
+    // Only the same origin: a host that merely starts with the dev server's address is another.
+    expect(isAllowedNavigation('http://localhost:5173.example.test/', app, dev)).toBe(false);
+    expect(isAllowedNavigation('http://localhost:5173@evil.example/', app, dev)).toBe(false);
+    expect(isAllowedNavigation('https://localhost:5173/', app, dev)).toBe(false);
+    expect(isAllowedNavigation('not a url', app, dev)).toBe(false);
   });
 });

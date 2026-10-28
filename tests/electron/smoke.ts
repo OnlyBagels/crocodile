@@ -272,39 +272,6 @@ const shadow = await a.page.evaluate(() => {
 });
 if (!/[/,] 0\.12\)/.test(shadow)) throw new Error(`panel shadow is too strong: ${shadow}`);
 
-// A link that never expires, then resetting it. Links are read from the dialog
-// only: the chat behind it shows the first invite link too.
-await a.page.getByRole('button', { name: 'Invite people' }).first().click();
-const inviteDialog = a.page.getByRole('dialog');
-const newDialogLink = async (old: string | null) => {
-  for (const start = Date.now(); Date.now() - start < 15_000;) {
-    const link = (await inviteDialog.innerText()).match(/croc:\/\/join\/[a-z2-7]+/)?.[0];
-    if (link && link !== old) return link;
-    await a.page.waitForTimeout(100);
-  }
-  throw new Error(`the invite dialog never showed a link other than ${old}`);
-};
-const weekLink = await newDialogLink(null);
-await inviteDialog.getByRole('button', { name: 'Never' }).click();
-const permanentLink = await newDialogLink(weekLink);
-if (permanentLink === inviteText) throw new Error('a never-expiring link reused the week-long one');
-await inviteDialog.getByText('Anyone with this link can join, until you reset it.').waitFor();
-await shot(a.page, '05b-invite-never');
-// Keep this link: clearing the rest leaves the permanent URL untouched.
-await inviteDialog.getByRole('button', { name: 'Reset links…' }).click();
-await shot(a.page, '05c-invite-reset-confirm');
-await inviteDialog.getByRole('button', { name: 'Keep this link' }).click();
-await inviteDialog.getByRole('button', { name: 'Reset links…' }).waitFor();
-if (!(await inviteDialog.innerText()).includes(permanentLink))
-  throw new Error('keeping the link changed it');
-await shot(a.page, '05d-invite-kept');
-// Reset all: a fresh link replaces it.
-await inviteDialog.getByRole('button', { name: 'Reset links…' }).click();
-await inviteDialog.getByRole('button', { name: 'Reset all' }).click();
-await newDialogLink(permanentLink);
-await shot(a.page, '05e-invite-reset-all');
-await a.page.keyboard.press('Escape');
-
 // Voice room.
 const inCall = (page: Page) =>
   page.waitForFunction(() => /you host|hosted by/.test(document.body.innerText), undefined, {

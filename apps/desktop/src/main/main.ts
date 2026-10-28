@@ -35,7 +35,8 @@ import type {
 } from './ipc-types';
 import { setupScreenShare } from './screen-share';
 
-const isDev = !!process.env.CROC_RENDERER_URL;
+// A packaged app never loads a renderer from elsewhere, whatever the environment says.
+const isDev = !app.isPackaged && !!process.env.CROC_RENDERER_URL;
 const APP_PROTOCOL = 'croc';
 
 // Separate profiles (e.g. two instances on one machine for testing).

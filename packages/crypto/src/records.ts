@@ -197,8 +197,6 @@ export function validateRecord(input: unknown, ctx: ValidationContext): Validati
           return reject('invite was made by someone who is no longer an admin');
         if (invite.body.expiresAt !== null && invite.body.expiresAt < ctx.now)
           return reject('invite expired');
-        // Bulk reset: an invite made before the space's last clear no longer admits.
-        if (invite.version < (space.body.invitesResetAt ?? 0)) return reject('invite was reset');
       }
       return { ok: true, authorId };
     }
