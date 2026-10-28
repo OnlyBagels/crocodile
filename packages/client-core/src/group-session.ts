@@ -634,6 +634,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
   async useServerRelay() {
     this.relayRequested = true;
     try {
+      // The server only grants a relay to a member.
+      if (!this.state) await this.join();
       this.relayGrant = await this.ctx.relay.request(this.sessionId);
       this.ctx.log('using server relay', {
         server: this.relayGrant.server,

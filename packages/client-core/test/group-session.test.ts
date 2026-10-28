@@ -32,7 +32,10 @@ afterEach(async () => {
   for (const s of sessions.splice(0)) await s.leave();
 });
 
-function session(relayRequest: () => Promise<RelayGrant>) {
+function session(
+  relayRequest: () => Promise<RelayGrant>,
+  request: (type: string) => Promise<unknown> = async () => ({}),
+) {
   const transports: StuckTransport[] = [];
   const factory: TransportFactory = () => {
     const t = new StuckTransport();
@@ -42,7 +45,8 @@ function session(relayRequest: () => Promise<RelayGrant>) {
   const ctx = {
     identity: createIdentity(),
     peer: me,
-    link: () => ({ request: async () => ({}) }),
+    link: () => ({ request }),
+    caps: async () => ({}),
     platform: {},
     iceServers: () => [],
     relay: { allowed: () => true, request: relayRequest },
@@ -83,6 +87,23 @@ describe('group session', () => {
     expect(s.attempts).toHaveLength(2);
     expect(s.attempts[0]!.end).toMatchObject({ ok: false, stage: 'superseded' });
     expect(s.attempts[1]!.end).toBeUndefined();
+  });
+
+  it('joins the session first when asked for a relay before it has', async () => {
+    let joined = false;
+    const { s } = session(
+      async () => {
+        if (!joined) throw new Error('join the session first');
+        return grant(60_000);
+      },
+      async (type) => {
+        if (type !== 'session.join') return {};
+        joined = true;
+        return { state: state('bbbbbbbbbbbbbbbbbbbbbbbbbb.dev1', 1) };
+      },
+    );
+    await s.useServerRelay();
+    expect(s.relayGrant).not.toBeNull();
   });
 
   it('tries a failed relay renewal again before the grant runs out', async () => {
