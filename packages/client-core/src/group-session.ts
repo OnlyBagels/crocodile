@@ -449,12 +449,21 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
    * another host.
    */
   private async vetHost(epoch: number, host: string) {
-    await this.ctx.refreshPeer(this.sessionId, host).catch(() => {});
-    if (this.left || this.state?.epoch !== epoch || this.state.host !== host) return;
+    const key = `${epoch}|${host}`;
+    if (this.vetting === key) return;
+    this.vetting = key;
+    try {
+      await this.ctx.refreshPeer(this.sessionId, host).catch(() => {});
+    } finally {
+      this.vetting = undefined;
+    }
+    if (this.left || this.state?.epoch !== epoch || this.state.host !== host || this.transport)
+      return;
     if (this.ctx.isMemberPeer(this.sessionId, host)) {
       this.connectTransport();
       return;
     }
+    this.refused = key;
     this.ctx.log('not connecting to a host that is not a member', { host });
     this.unreachable = host;
     this.setStatus('reconnecting');
@@ -472,6 +481,25 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }, 10_000);
   }
 
+  /** The host (and epoch) being checked, and the one we refused to connect to. */
+  private vetting?: string;
+  private refused?: string;
+
+  /**
+   * Records changed: a host we are connected to that no longer belongs is let go (the new
+   * connection attempt checks it again), and one we refused is tried once it does.
+   */
+  private recheckHost() {
+    const host = this.state?.host;
+    if (!host || host === this.me || this.left) return;
+    const member = this.ctx.isMemberPeer(this.sessionId, host);
+    if (!member && this.transport?.host === host) this.connectTransport();
+    else if (member && this.refused === `${this.state!.epoch}|${host}`) {
+      this.refused = undefined;
+      this.connectTransport();
+    }
+  }
+
   /** The host and epoch of the latest connection attempt. */
   private attempted?: { epoch: number; host: string };
 
@@ -485,6 +513,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
       void this.vetHost(state.epoch, state.host);
       return;
     }
+    this.refused = undefined;
     this.attempted = { epoch: state.epoch, host: state.host };
     const slots = this.voice && this.isVoice ? state.relaySlots : 0;
     const grant =
@@ -1126,7 +1155,11 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     let revoked = false;
     // Everyone we gave our key to, not only those the host lists as connected now: someone who
     // was banned and left themselves off the list still holds it.
-    const known = new Set([...this.peers.keys(), ...this.keySentTo.keys()]);
+    const known = new Set([
+      ...this.peers.keys(),
+      ...this.keySentTo.keys(),
+      ...this.keyring.peersWithKeys(),
+    ]);
     for (const peer of known) {
       if (this.ctx.isAllowedPeer(this.sessionId, peer)) {
         if (this.peers.has(peer) && this.keySentTo.get(peer) !== this.keyring.kid)
@@ -1140,6 +1173,7 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     // The new key only goes to peers still allowed.
     if (revoked) this.keyring.rotate();
     void this.processParkedKeys();
+    this.recheckHost();
   }
 
   /** Whether a peer may be heard, after fetching their records once if not. */
@@ -1174,7 +1208,8 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     const first = !this.keyring.hasKeyFrom(from);
     this.keyring.addPeerKey(from, { kid: payload.kid, text: payload.text, audio: payload.audio });
     await this.flushPending();
-    if (first || payload.want) await this.sendKeyTo(from);
+    if (first) await this.sendKeyTo(from, false);
+    else if (payload.want) this.answerWant(from);
   }
 
   private distributeKey() {
@@ -1183,10 +1218,36 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     }
   }
 
-  private async sendKeyTo(peer: string) {
+  private wantAnswered = new Map<string, number>();
+  private wantLater = new Set<string>();
+  /**
+   * A key is sent on request, and anyone may ask: at most once in a while for each peer. A
+   * request that comes too soon is answered when the wait is over, once, however many came.
+   */
+  private answerWant(peer: string) {
+    const wait = 2000 - (Date.now() - (this.wantAnswered.get(peer) ?? 0));
+    if (wait <= 0) {
+      this.wantAnswered.set(peer, Date.now());
+      void this.sendKeyTo(peer, false);
+      return;
+    }
+    if (this.wantLater.has(peer)) return;
+    this.wantLater.add(peer);
+    setTimeout(() => {
+      this.wantLater.delete(peer);
+      if (this.left || !this.ctx.isAllowedPeer(this.sessionId, peer)) return;
+      this.wantAnswered.set(peer, Date.now());
+      void this.sendKeyTo(peer, false);
+    }, wait);
+  }
+
+  /**
+   * `ask`: also ask for theirs, when we hold none (we let go of it, as when someone is
+   * unblocked). An answer never asks, so two clients can't keep answering each other.
+   */
+  private async sendKeyTo(peer: string, ask = true) {
     const chains = this.keyring.exportMine();
-    // Asking for theirs when we hold none (we let go of it, as when someone is unblocked).
-    const want = !this.keyring.hasKeyFrom(peer);
+    const want = ask && !this.keyring.hasKeyFrom(peer);
     const payload = {
       type: 'sender_key' as const,
       sessionId: this.sessionId,
@@ -1251,6 +1312,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     switch (payload.type) {
       case 'sender_key':
         if (payload.sessionId !== this.sessionId) return;
+        // A member we have blocked is not waiting on records: their key is not taken.
+        if (
+          this.ctx.isMemberPeer(this.sessionId, from) &&
+          !this.ctx.isAllowedPeer(this.sessionId, from)
+        )
+          return;
         if (!this.ctx.isAllowedPeer(this.sessionId, from)) {
           this.parkedKeys.push({ from, payload, at: Date.now() });
           if (this.parkedKeys.length > 100) this.parkedKeys.shift();
@@ -1337,7 +1404,12 @@ export class GroupSession extends Emitter<GroupSessionEvents> {
     if (channels.length === 0) return;
     const st = this.state;
     const preferred = [st?.host, st?.backup, ...candidates].filter(
-      (u): u is string => !!u && u !== this.me && this.peers.has(u) && !this.historyAsked.has(u),
+      (u): u is string =>
+        !!u &&
+        u !== this.me &&
+        this.peers.has(u) &&
+        !this.historyAsked.has(u) &&
+        this.ctx.isAllowedPeer(this.sessionId, u),
     );
     const targets = [...new Set(preferred)].slice(0, 2);
     if (targets.length === 0) return;

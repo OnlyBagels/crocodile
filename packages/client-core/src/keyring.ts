@@ -113,6 +113,11 @@ export class GroupKeyring extends Emitter<{ changed: FrameKeys; rotated: Exporte
     return true;
   }
 
+  /** Everyone whose key we hold, replaced or about to be dropped included. */
+  peersWithKeys(): string[] {
+    return [...new Set([...this.peers.values()].map((p) => p.peer))];
+  }
+
   hasKeyFrom(peer: string) {
     for (const p of this.peers.values()) if (p.peer === peer && p.expiresAt === null) return true;
     return false;

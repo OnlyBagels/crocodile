@@ -1827,4 +1827,47 @@ describe('blocks and hosts in spaces', () => {
     expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
     expect(bob.state.sessions[sid]?.status).not.toBe('connected');
   });
+
+  it('lets go of a host that is banned while we are connected, and takes it back when the ban is lifted', async () => {
+    const coord = await server();
+    const net = new FakeRelayNetwork();
+    const bob = await signUp(makeClient(net, coord, { canHost: false }), 'bob');
+    const alice = await signUp(makeClient(net, coord, { nat: 'open' }), 'alice');
+    const spaceId = await bob.createSpace('Mine');
+    await alice.joinWithInvite(await bob.createInvite(spaceId));
+    const ch = channelOf(bob, spaceId);
+    const sid = sessionIds.space(spaceId);
+    await alice.openChannel(ch);
+    await bob.openChannel(ch);
+    await waitFor(() => bob.state.sessions[sid]?.peers.includes(alice.userId), 12000, 'connected');
+    // Bob, the owner, bans Alice, but only on his side: the server has not heard of it.
+    const record = bob.records.get(recordKey.space(spaceId)) as SignedRecord<'space'>;
+    const banned = signRecord(
+      bob.identity!,
+      'space',
+      record.key,
+      { ...record.body, bans: [alice.userId] },
+      record.version + 1,
+    );
+    const attempts = bob.state.sessions[sid]!.attempts.length;
+    bob.records.ingestAll([banned]);
+    (bob as unknown as { sessions: Map<string, { recheckPeers(): void }> }).sessions
+      .get(sid)!
+      .recheckPeers();
+    await waitFor(() => bob.state.sessions[sid]?.status !== 'connected', 3000, 'let go');
+    expect(bob.state.sessions[sid]?.attempts).toHaveLength(attempts);
+    // The ban is lifted (a newer record without it): the host is tried again at once.
+    const lifted = signRecord(
+      bob.identity!,
+      'space',
+      record.key,
+      { ...record.body, bans: [] },
+      record.version + 2,
+    );
+    bob.records.ingestAll([lifted]);
+    (bob as unknown as { sessions: Map<string, { recheckPeers(): void }> }).sessions
+      .get(sid)!
+      .recheckPeers();
+    await waitFor(() => bob.state.sessions[sid]?.status === 'connected', 5000, 'back');
+  });
 });
