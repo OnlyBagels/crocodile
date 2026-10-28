@@ -280,6 +280,9 @@ describe.skipIf(!haveChromium)('network check in Chromium', () => {
         type: 'application/octet-stream',
         read: async (o, l) => new Uint8Array(data.subarray(o, o + l)),
       });
+      // They are strangers: the conversation waits as a request until it is taken up.
+      await until(page, `window.croc.state.dmRequests.includes(${JSON.stringify(cli.userId)})`);
+      await page.evaluate((u) => window.croc.acceptDmRequest(u), cli.userId);
       await until(page, `!!window.croc.state.files[${JSON.stringify(id)}]`, 20_000);
       await page.evaluate((fid) => window.croc.downloadFile(fid), id);
       await until(
